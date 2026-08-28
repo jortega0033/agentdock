@@ -17,6 +17,13 @@ This was verified against real local installs during development — on this pro
 `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`, neither of which is a path you'd want to
 hardcode, which is exactly why discovery works this way instead.
 
+Re-verified after packaging: launched from the Start Menu shortcut of a real NSIS-installed build
+(not a dev terminal, so not inheriting whatever `PATH` a shell session happens to have), the daemon
+still found and correctly reported both CLIs. Discovery logic itself is unchanged by
+packaging — it's the same `findExecutable()` call either way — but the *inherited environment* a
+packaged app launches with genuinely can differ from a terminal's, which is exactly the scenario
+this was built to handle, so it was worth confirming rather than assuming.
+
 ## `ProviderStatus`
 
 ```ts

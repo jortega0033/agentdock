@@ -153,6 +153,53 @@ workspace/npm dependency it imports into one self-contained `dist/index.js` via 
 verified afterward by running that exact file with plain `node` and by relaunching the packaged
 (non-dev) Electron app end to end.
 
+## Packaging
+
+`apps/desktop/electron-builder.yml` configures [electron-builder](https://www.electron.build/) to
+produce a Windows NSIS installer (`pnpm package:win`) into `dist-packages/` at the repo root —
+deliberately not under `apps/desktop/dist/` or `dist-electron/`, so installer output never mixes
+with the Vite/esbuild build artifacts those two directories hold. See the README's
+[Packaging](../README.md#packaging-windows) section for the exact commands and output layout, and
+[security.md](security.md#electron-hardening) for what packaging does and doesn't change about the
+threat model (short version: nothing — the daemon's auth/Origin model is identical whether the app
+is running from source or installed).
+
+Three things had to be figured out, not assumed, to get from "electron-builder exits 0" to "the
+installed app actually works":
+
+1. **Where the daemon bundle lives once packaged.** `resolveDaemonEntry()`
+   (`apps/desktop/electron/resolve-daemon-entry.ts`) is a pure function (no Electron import, fully
+   unit-testable) with three cases: dev server → run source through `tsx`; packaged
+   (`app.isPackaged`) → `process.resourcesPath/daemon/index.js`, shipped as an electron-builder
+   `extraResource` outside `app.asar` (see [Runtime layout](../README.md#runtime-layout-once-packaged)
+   in the README for why outside asar specifically); unpacked-but-not-packaged production build →
+   the daemon's own `dist/index.js` next to its source, falling back to `tsx` if that hasn't been
+   built yet. Tests assert packaged mode never falls through to the tsx/source path, since neither
+   exists in a packaged build.
+2. **What electron-builder should treat as a runtime dependency.** `react`, `react-dom`, `zod`, and
+   `@agent-dock/shared` are all fully inlined into `dist/` and `dist-electron/main.js` at build time
+   (Vite for the renderer, esbuild via vite-plugin-electron for main) — none of them are read from
+   `node_modules` once built. They live in `package.json`'s `devDependencies`, not `dependencies`,
+   specifically so electron-builder's automatic production-dependency resolution (which inspects
+   `dependencies` and copies the matching `node_modules` trees into the package independently of the
+   `files` config) doesn't embed a second, unused, unbundled copy of each — this was caught by
+   unpacking a real built `app.asar` and finding `node_modules/@agent-dock/shared` inside it despite
+   an explicit `files` exclude.
+3. **A shutdown-path crash only a real packaged run surfaced.** Closing the window while the daemon's
+   `exit` event was still in flight called `webContents.send()` on an already-destroyed window,
+   which throws — uncaught, from inside a `child_process` event handler, it took down the whole main
+   process (observed as a native "Error"-titled window and stray helper processes instead of a clean
+   quit). Every push to the renderer now goes through `sendToRenderer()`
+   (`apps/desktop/electron/send-to-renderer.ts`, also Electron-import-free and unit-tested), which
+   checks `isDestroyed()` on both the window and its `webContents` first. Re-verified by repeating
+   the exact close sequence against a rebuilt package: clean exit, zero leftover processes.
+
+The desktop app also takes Electron's `app.requestSingleInstanceLock()` — a second launch attempt
+focuses the existing window instead of opening a second one, which would otherwise spawn a second
+daemon and lose the race against the first over the shared discovery file (see
+[security.md](security.md#single-daemon-instance)). Verified live: launching the packaged exe a
+second time while the first was running left the process count and the daemon's port unchanged.
+
 ## Known limitations / v0.2 directions
 
 - **No persistence.** Sessions and their event history are lost on daemon restart, by design (see
@@ -167,7 +214,23 @@ verified afterward by running that exact file with plain `node` and by relaunchi
   to `TerminateProcess` on Windows, which does not deliver a real `SIGTERM` the daemon's own
   shutdown handler can catch — see the `killDaemon()` comment in `electron/main.ts` for the
   mitigation (cancelling the one active session over HTTP before killing the child) and its limits.
+  **Reconfirmed against the packaged app**: the daemon process itself always dies with the app (no
+  orphaned process, verified across several close/relaunch cycles), but its discovery file can be
+  left stale rather than cleaned up — harmless, since the next daemon start only trusts a discovery
+  file whose recorded pid is still alive (see [security.md](security.md#single-daemon-instance)) and
+  overwrites it otherwise.
 - **Process-tree cancellation was empirically verified on Windows only** (a real grandchild
   process, simulating a CLI-launched tool subprocess, was confirmed killed within ~1s of
   cancellation). The POSIX path uses the standard, well-documented process-group mechanism but
   wasn't re-verified on macOS/Linux in this audit for lack of a machine to test on.
+- **Packaging targets Windows only.** `electron-builder.yml` configures an NSIS installer and
+  nothing else; macOS (`dmg`) and Linux (`AppImage`/`deb`) targets are straightforward additions to
+  the same config but haven't been added or tested — see the README's
+  [Platform support](../README.md#platform-support) matrix. No code assumes Windows specifically
+  (the process-management layer already branches on `process.platform` where it matters), but that's
+  not the same claim as "verified".
+- **No installer signing.** The NSIS installer and the packaged `AgentDock.exe` are unsigned —
+  `electron-builder`'s log shows signing steps being skipped for lack of a certificate. Expect
+  Windows SmartScreen to warn on first run of an unsigned installer; that's expected for an
+  unsigned OSS boilerplate build, not a packaging bug, and code signing was explicitly out of scope
+  for this milestone.

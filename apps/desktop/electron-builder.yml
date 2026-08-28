@@ -1,0 +1,62 @@
+# electron-builder config for the AgentDock desktop shell.
+#
+# appId is a placeholder reverse-DNS identifier, not a claim to own that domain — anyone forking
+# this boilerplate for real distribution should change it (and productName) to their own.
+appId: dev.agentdock.desktop
+productName: AgentDock
+copyright: Copyright © AgentDock contributors
+
+directories:
+  # Keep installer/unpacked-app output out of Vite's dist/ and esbuild's dist-electron/, and out
+  # of the repo root's own node_modules — a dedicated top-level folder is unambiguous either way.
+  output: ../../dist-packages
+
+# main.js and preload.js are already self-contained bundles (vite-plugin-electron/esbuild inline
+# every dependency, including the workspace @agent-dock/shared package, at build time — see
+# vite.config.ts). The renderer (dist/) is a normal Vite production build, also self-contained.
+# So the packaged app needs none of node_modules at runtime. Two things enforce that: this
+# explicit "files" list (no node_modules glob at all), AND react/react-dom/zod/@agent-dock/shared
+# living in package.json's "devDependencies" rather than "dependencies" — electron-builder embeds
+# whatever's listed under "dependencies" into the package by walking node_modules itself,
+# independently of "files", so leaving them there would have silently doubled the packaged app
+# with an unused, unbundled copy of each (this was caught by inspecting a real packaged build).
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - package.json
+
+# The daemon is a *separate* process the packaged app spawns (see electron/main.ts), not code the
+# renderer or main bundle import — it has to exist as a real file on disk for `spawn()` to launch,
+# so it can't just live inside main.js. It's shipped as an extraResource (outside app.asar
+# entirely) rather than relying on Electron's asar-aware fs patching, since spawning a *new*
+# process against a path inside an asar archive is exactly the kind of "works by accident"
+# behavior this project avoids — apps/daemon/dist/index.js is already a single self-contained
+# esbuild bundle (see apps/daemon/scripts/build.mjs), so nothing else needs to come with it.
+extraResources:
+  - from: ../daemon/dist
+    to: daemon
+
+asar: true
+
+# No auto-update in this boilerplate (out of scope by design — see docs/architecture.md). Without
+# this, electron-builder still tries to generate update-feed metadata (latest.yml, .blockmap) and
+# infer a publish target from the git remote, which crashes when there isn't one configured.
+publish: null
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  # No custom icon asset exists in this repository (see docs/architecture.md for why one wasn't
+  # fabricated) — electron-builder falls back to its own default Electron icon. Add an `icon:`
+  # path here once a real one exists.
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: false
+  createStartMenuShortcut: true
+  artifactName: "${productName}-Setup-${version}.${ext}"
+  # A .blockmap is only useful for differential auto-update downloads, which this project doesn't
+  # have — skip generating one rather than ship a file with no purpose.
+  differentialPackage: false

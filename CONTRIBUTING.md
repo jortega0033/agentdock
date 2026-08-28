@@ -29,7 +29,15 @@ pnpm typecheck   # strict TypeScript, no `any` without a comment justifying it
 pnpm lint
 pnpm test        # must pass without a real Claude/Codex install or any paid API call
 pnpm build
+pnpm audit       # electron-builder's own build-time deps are a known, documented exception —
+                 # see docs/architecture.md#packaging; nothing shipped in the app should show up here
 ```
+
+If you touched anything under `apps/desktop/electron/` (main process, preload, or packaging
+config), also run `pnpm package:win` (Windows) and confirm the app still launches from
+`dist-packages/win-unpacked/AgentDock.exe` — packaging has its own failure modes that `pnpm build`
+alone won't catch (see [docs/architecture.md#packaging](docs/architecture.md#packaging) for two
+real ones this project already hit).
 
 If you're touching a provider adapter (`packages/agent-runtime/src/providers/*`), add or update:
 

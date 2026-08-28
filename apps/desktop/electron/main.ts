@@ -12,8 +12,19 @@ import {
   streamSessionEvents,
   type DaemonConnection,
 } from './daemon-client.js';
+import { resolveDaemonEntry } from './resolve-daemon-entry.js';
+import { sendToRenderer } from './send-to-renderer.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Two AgentDock windows would each spawn their own daemon sidecar and race over the same
+// discovery file (the daemon's own single-instance guard, see docs/security.md, would make the
+// second one fail to start) — rather than let that surface as a confusing "daemon unavailable"
+// error, refuse to open a second window at all and focus the existing one instead.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+}
 
 /**
  * Renderer status only — never the token or base URL. The renderer talks to the daemon
@@ -33,29 +44,16 @@ function discoveryFilePath(): string {
 }
 
 function sendStatus(status: DaemonStatus): void {
-  mainWindow?.webContents.send('daemon:status', status);
-}
-
-/**
- * Locates the daemon package regardless of whether we're running from source (`vite dev`, cwd =
- * apps/desktop) or a packaged build. In dev (VITE_DEV_SERVER_URL set) always runs src/index.ts
- * through tsx, even if a stale dist/ build exists from a previous `pnpm build`, so the sidecar
- * always reflects the current source. Outside dev, prefers a built dist/index.js (plain Node, no
- * extra loaders) and only falls back to tsx+src if it hasn't been built yet.
- */
-function resolveDaemonEntry(): { cwd: string; args: string[] } {
-  const daemonPkgDir = join(__dirname, '..', '..', 'daemon');
-  const srcEntry = join(daemonPkgDir, 'src', 'index.ts');
-  const tsxFallback = { cwd: daemonPkgDir, args: ['--import', 'tsx', srcEntry] };
-
-  if (process.env.VITE_DEV_SERVER_URL) return tsxFallback;
-
-  const builtEntry = join(daemonPkgDir, 'dist', 'index.js');
-  return existsSync(builtEntry) ? { cwd: daemonPkgDir, args: [builtEntry] } : tsxFallback;
+  sendToRenderer(mainWindow, 'daemon:status', status);
 }
 
 function spawnDaemon(): void {
-  const { cwd, args } = resolveDaemonEntry();
+  const { cwd, args } = resolveDaemonEntry({
+    mainDir: __dirname,
+    isDevServer: !!process.env.VITE_DEV_SERVER_URL,
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+  });
   const spawnedAt = Date.now();
 
   daemonChild = spawn(process.execPath, args, {
@@ -118,7 +116,7 @@ function forwardSessionEvents(sessionId: string): void {
   activeStreamAbort = controller;
 
   const onEvent = (event: AgentEvent) => {
-    mainWindow?.webContents.send('daemon:session-event', { sessionId, event });
+    sendToRenderer(mainWindow, 'daemon:session-event', { sessionId, event });
     if (event.type === 'session.completed' || event.type === 'session.failed' || event.type === 'session.cancelled') {
       if (activeSessionId === sessionId) activeSessionId = undefined;
     }
@@ -126,7 +124,7 @@ function forwardSessionEvents(sessionId: string): void {
 
   streamSessionEvents(daemonConn, sessionId, onEvent, controller.signal).catch((err: Error) => {
     if (controller.signal.aborted) return;
-    mainWindow?.webContents.send('daemon:session-event', {
+    sendToRenderer(mainWindow, 'daemon:session-event', {
       sessionId,
       event: { type: 'error', message: `event stream failed: ${err.message}`, recoverable: false },
     });
@@ -212,23 +210,31 @@ ipcMain.handle('dialog:select-directory', async () => {
   return result.filePaths[0];
 });
 
-app.whenReady().then(() => {
-  spawnDaemon();
-  createWindow();
-
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+if (gotSingleInstanceLock) {
+  app.on('second-instance', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
   });
-});
 
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
+  app.whenReady().then(() => {
+    spawnDaemon();
+    createWindow();
 
-let shuttingDown = false;
-app.on('before-quit', (event) => {
-  if (shuttingDown || !daemonChild) return;
-  shuttingDown = true;
-  event.preventDefault();
-  void killDaemon().finally(() => app.quit());
-});
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
+
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+  });
+
+  let shuttingDown = false;
+  app.on('before-quit', (event) => {
+    if (shuttingDown || !daemonChild) return;
+    shuttingDown = true;
+    event.preventDefault();
+    void killDaemon().finally(() => app.quit());
+  });
+}

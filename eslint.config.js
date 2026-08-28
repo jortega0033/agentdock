@@ -10,6 +10,7 @@ export default tseslint.config(
     ignores: [
       '**/dist/**',
       '**/dist-electron/**',
+      '**/dist-packages/**',
       '**/node_modules/**',
       '**/coverage/**',
       '**/release/**',

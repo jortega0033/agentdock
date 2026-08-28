@@ -95,6 +95,77 @@ pnpm test        # unit + integration tests (no real CLI calls; see docs/provide
 pnpm lint        # ESLint
 ```
 
+## Production build
+
+`pnpm build` compiles every package in dependency order and produces:
+
+- `packages/shared/dist/`, `packages/agent-runtime/dist/` — compiled library output
+- `apps/daemon/dist/index.js` — the daemon bundled by esbuild into **one self-contained file**
+  (every dependency inlined, including the two packages above) — required so it can run under
+  plain `node`, with no workspace resolution or `tsx`, once packaged. See
+  [docs/architecture.md](docs/architecture.md#daemon-discovery-and-lifecycle) for why this needed
+  fixing, not just adding.
+- `apps/desktop/dist/` — the Vite production build of the React renderer
+- `apps/desktop/dist-electron/main.js`, `preload.js` — the Electron main process and preload
+  script, each bundled to a single file (`main.js` inlines `@agent-dock/shared` and `zod`;
+  `preload.js` is forced to CommonJS since Electron's sandboxed preload loader doesn't support ESM)
+
+None of this is an installer yet — it's the "does the code actually compile to something runnable"
+step. `electron .` against `apps/desktop` at this point runs the app unpacked, useful for a quick
+check without going through a full package step.
+
+## Packaging (Windows)
+
+```bash
+pnpm package:win   # pnpm build, then electron-builder --win nsis
+```
+
+Produces, under `dist-packages/` at the repo root:
+
+- `dist-packages/win-unpacked/` — the unpacked app (`AgentDock.exe` + `resources/`)
+- `dist-packages/AgentDock-Setup-<version>.exe` — the NSIS installer
+
+`pnpm package` (no `:win`) runs `electron-builder` for whatever platform you're on; today that's
+only meaningfully tested on Windows — see [Platform support](#platform-support) below. Both
+commands are non-interactive and safe to run from a clean checkout after `pnpm install`, with no
+signing configured (there's nothing to sign with in this repo — see
+[docs/architecture.md](docs/architecture.md#packaging) for what that means for a real release).
+
+### Runtime layout once packaged
+
+```
+AgentDock.exe                    (Electron; renderer + main process live in resources/app.asar)
+resources/
+  app.asar                       renderer (dist/) + main + preload — no node_modules needed,
+                                  everything is bundled at build time (see Production build above)
+  daemon/
+    index.js                     the daemon's own esbuild bundle, unmodified from apps/daemon/dist/
+```
+
+The daemon ships **outside** `app.asar`, as an electron-builder `extraResource`, because it's
+spawned as a separate OS process (`child_process.spawn`) rather than imported code — asar is a
+virtual filesystem Electron's own `fs` module knows how to read, but handing a path inside it to a
+freshly spawned process is exactly the kind of "happens to work" behavior this project avoids. See
+`apps/desktop/electron-builder.yml` and `apps/desktop/electron/resolve-daemon-entry.ts` for exactly
+how the packaged app locates it (`process.resourcesPath`), separately from how dev mode does
+(`tsx` against source) and how an unpacked-but-not-packaged build does (the daemon's own
+`dist/index.js` next to its source).
+
+## Platform support
+
+| | source / dev | production build | packaged app | installer | uninstall |
+|---|---|---|---|---|---|
+| **Windows** | ✅ verified | ✅ verified | ✅ verified (installed, launched, closed, relaunched, second-instance-blocked) | ✅ verified (NSIS, silent install/uninstall) | ✅ verified |
+| **macOS** | untested | untested | untested | not implemented | — |
+| **Linux** | untested | untested | untested | not implemented | — |
+
+Nothing in the code is deliberately Windows-only (path handling uses `node:path`, process
+management already has POSIX branches — see [docs/security.md](docs/security.md#process-hygiene)),
+but "should work" and "verified" are different claims; only Windows has actually been installed and
+exercised end to end. Adding `mac`/`linux` targets to `electron-builder.yml` (`dmg`/`zip`,
+`AppImage`/`deb`) is a reasonable next step but wasn't attempted here — see
+[docs/architecture.md](docs/architecture.md#known-limitations--v02-directions).
+
 ## Adding a provider
 
 See [docs/providers.md](docs/providers.md#adding-a-new-provider) — it's meant to be: implement one

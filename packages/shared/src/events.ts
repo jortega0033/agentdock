@@ -42,7 +42,7 @@ export interface AgentEventMeta {
 /**
  * What actually crosses the daemon → client boundary: a normalized AgentEvent plus the ordering
  * metadata above, flattened into one object. This is the protocol v1 wire/public shape — see
- * docs/architecture.md#protocol-v1 for the ordering guarantees every session's event stream
+ * docs/protocol-v1.md#ordering-guarantees for the ordering guarantees every session's event stream
  * upholds (exactly one terminal event, always last; nothing emitted after it).
  */
 export type AgentEventEnvelope = AgentEvent & AgentEventMeta;

@@ -46,7 +46,7 @@ export interface SessionEventsOptions {
  * Typed client for the AgentDock daemon's HTTP + SSE API. Owns everything a caller shouldn't
  * have to hand-write: the daemon URL, the bearer token, JSON request/response handling,
  * incremental SSE parsing, and a protocol-version compatibility check performed automatically
- * before the first real request. See docs/architecture.md#protocol-v1.
+ * before the first real request. See docs/protocol-v1.md.
  *
  * No reconnect logic: `sessions.events()` opens exactly one stream and ends when the daemon
  * closes it (at the session's terminal event) or `signal` aborts. If the connection drops for any

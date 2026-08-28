@@ -10,7 +10,7 @@ export type SessionStatus = 'starting' | 'running' | 'completed' | 'failed' | 'c
  * true (see docs/providers.md#provider-capabilities).
  *
  * Sessions live behind the daemon's SessionStore (in-memory by default — see
- * docs/architecture.md#sessionstore) and do not survive a daemon restart.
+ * docs/daemon.md#session-lifecycle-sessionmanager-sessionstore) and do not survive a daemon restart.
  */
 export interface AgentSession {
   id: string;

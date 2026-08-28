@@ -1,7 +1,7 @@
 /**
  * Minimal structured logger. Injected everywhere rather than importing a global so tests can
  * assert on log calls and swap in a silent logger. Never pass raw CLI auth/status output or
- * environment variables through `meta` — see docs/security.md.
+ * environment variables through `meta` — see SECURITY.md.
  */
 export interface Logger {
   debug(message: string, meta?: Record<string, unknown>): void;

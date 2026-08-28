@@ -1,0 +1,132 @@
+# Electron
+
+`apps/desktop` is a demo Electron + React client for the daemon. It exists to prove the daemon and
+`@agent-dock/client` work end to end and to give you a real, working example to fork — it has no
+provider-specific logic of its own.
+
+## The three-layer boundary
+
+```
+Renderer (React)  ──IPC (contextBridge)──▶  Electron main  ──@agent-dock/client──▶  Daemon
+```
+
+The renderer **never** calls the daemon's HTTP+SSE API directly — only the main process does,
+through one `AgentDockClient` instance. This isn't a style preference: a renderer `fetch()` to the
+daemon cannot actually succeed, because the daemon deliberately never answers a CORS preflight. See
+[SECURITY.md](../SECURITY.md#renderer-never-talks-to-the-daemon-directly) for the full explanation
+of why, including what was reproduced against a real browser tab. The short version for this doc:
+keep new daemon calls in `electron/main.ts`, never add a `fetch()` to the daemon from anywhere
+under `src/` (the renderer).
+
+## BrowserWindow security settings
+
+`electron/main.ts` creates its window with:
+
+```ts
+webPreferences: {
+  contextIsolation: true,
+  nodeIntegration: false,
+  sandbox: true,
+  preload: join(__dirname, 'preload.js'),
+}
+```
+
+`webSecurity` is never overridden. `setWindowOpenHandler` denies every `window.open`/`target=_blank`
+popup and opens the URL in the OS browser instead; `will-navigate` blocks in-window navigation away
+from the dev-server origin or `file://`, redirecting anywhere else to the OS browser too. Neither
+matters for the *current* UI (it renders no untrusted content or links), but it's cheap defense in
+depth for a fork that later adds either — see [SECURITY.md](../SECURITY.md#electron-hardening).
+
+## The preload bridge
+
+`electron/preload.ts` exposes exactly five functions on `window.agentDock` via `contextBridge` —
+never a generic "invoke this channel with this payload" tunnel, and never the daemon's base URL or
+bearer token:
+
+```ts
+interface AgentDockBridge {
+  getDaemonStatus(): Promise<DaemonStatus>;
+  onDaemonStatus(callback: (status: DaemonStatus) => void): () => void;
+  listProviders(): Promise<ProviderStatus[]>;
+  createSession(input: CreateSessionInput): Promise<AgentSession>;
+  cancelSession(sessionId: string): Promise<void>;
+  onSessionEvent(callback: (sessionId: string, event: AgentEvent) => void): () => void;
+  selectDirectory(): Promise<string | null>;
+}
+```
+
+Each maps to one `ipcMain.handle(...)` in `main.ts`. If you're adding a new capability the renderer
+needs, add a narrow, single-purpose function here — resist the temptation to add a generic
+"send arbitrary IPC channel + payload" escape hatch, since that's exactly the shape that would let a
+compromised renderer reach something it shouldn't.
+
+## Daemon lifecycle from Electron's side
+
+On `app.whenReady()`, `main.ts` spawns the daemon as a child process
+(`spawn(process.execPath, args, { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, ... })`),
+using `resolveDaemonEntry()` (`electron/resolve-daemon-entry.ts`) to pick the right entry point for
+dev/packaged/unpacked — see [packaging.md](packaging.md#resolvedaemonentry) for the three cases. It
+then polls the discovery file (`waitForDaemonReady`, 200ms interval, 15s timeout) until it can read
+a port+token and successfully call `client.health()`, which doubles as both the readiness check and
+the protocol-compatibility check in one call. `daemon:status` IPC events (`connecting` / `ready` /
+`unavailable`) let the renderer show its own connection state without ever seeing *why* in terms of
+daemon internals.
+
+`app.requestSingleInstanceLock()` means a second launch of the app focuses the existing window
+instead of opening a second one — which would otherwise spawn a second daemon and lose the
+single-instance race described in [daemon.md#single-instance-behavior](daemon.md#single-instance-behavior).
+
+On quit, `killDaemon()` aborts the active SSE subscription, best-effort cancels the one active
+session over HTTP, then kills the daemon child process. See
+[daemon.md#shutdown](daemon.md#shutdown) for the Windows-specific limitation this works around.
+
+## Renderer trust assumptions
+
+The renderer is treated as **semi-trusted, not adversarial** — it's this repo's own React code,
+sandboxed by Electron's process isolation, but it's still the layer closest to whatever the CLI's
+output ends up rendering. Concretely: the renderer never receives the daemon's token or base URL
+(so even a fully compromised renderer can't reach the daemon directly), and every IPC input from
+the renderer is re-validated against the Zod schemas at the `ipcMain.handle` boundary in `main.ts`
+— not just trusted because it came from "our own" preload bridge. See the comment on
+`daemon:create-session` in `electron/main.ts` for why that revalidation is a distinct concern from
+`@agent-dock/client`'s own validation of the daemon's response.
+
+## The working-directory picker
+
+`selectDirectory()` opens a native OS directory picker (`dialog.showOpenDialog`) from the main
+process and returns the chosen path (or `null` if cancelled) to the renderer — this is the only way
+a session's `cwd` gets set; the renderer cannot read the filesystem itself to construct one.
+
+## Provider and session flow (what the demo UI actually does)
+
+1. On load, the renderer calls `listProviders()` and shows each provider's `installed` /
+   `authenticated` state (routing the user to the CLI's own login flow if `installed` is true but
+   `authenticated` isn't).
+2. The user picks a provider, a working directory (via the picker above), and types a prompt.
+3. `createSession(input)` creates the session; `main.ts` immediately starts forwarding that
+   session's SSE events to the renderer via `onSessionEvent`.
+4. `EventLog.tsx` renders each `AgentEvent` with a single `switch (event.type)` — see
+   [protocol-v1.md](protocol-v1.md) for the full event union; the UI never branches on which
+   provider produced an event.
+5. `cancelSession(id)` is available while a session is running.
+
+## Where to safely add native functionality
+
+- **A new daemon capability the UI needs**: add the IPC handler in `main.ts`, the typed function in
+  `preload.ts`'s `AgentDockBridge`, and call it from the renderer through `window.agentDock`. Don't
+  add a daemon call directly in renderer code.
+- **A new native OS integration** (file picker, notifications, tray icon, etc.): same pattern — main
+  process owns the Electron/Node API, preload exposes a narrow typed function, renderer calls it.
+  Never enable `nodeIntegration` or disable `contextIsolation`/`sandbox` to shortcut this.
+- **Rendering content that isn't this repo's own UI** (e.g. a tool result containing a link or
+  HTML): route external links through `shell.openExternal` (already the default for any navigation
+  away from the app, see [BrowserWindow security settings](#browserwindow-security-settings) above)
+  rather than loading them in-window.
+
+## Build tooling
+
+`vite-plugin-electron/simple` (`vite.config.ts`) bundles `electron/main.ts` and `electron/preload.ts`
+with esbuild and drives the Electron process during `vite dev` (launch + reload on change); `vite
+build` produces the same `dist-electron/` output for packaging. `preload.js` is forced to CommonJS
+output (`format: 'cjs'`) since Electron's sandboxed preload loader doesn't support ESM, even though
+the rest of this project is `"type": "module"`.

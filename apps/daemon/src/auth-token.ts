@@ -1,6 +1,6 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 
-/** Generates the daemon's local authorization token. See docs/security.md for the threat model. */
+/** Generates the daemon's local authorization token. See SECURITY.md for the threat model. */
 export function generateToken(): string {
   return randomBytes(32).toString('hex');
 }

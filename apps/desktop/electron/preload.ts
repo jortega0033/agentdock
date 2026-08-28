@@ -5,7 +5,7 @@ import type { AgentEvent, AgentSession, ProviderId, ProviderStatus } from '@agen
  * The only surface the renderer has onto Node/Electron. Every function here is a narrow,
  * single-purpose capability — never a generic "invoke this IPC channel with this payload" tunnel
  * and never the daemon's connection info (base URL + bearer token stay in the main process; see
- * electron/main.ts and docs/security.md). The renderer cannot run a shell command, read/write an
+ * electron/main.ts and SECURITY.md). The renderer cannot run a shell command, read/write an
  * arbitrary file, or reach any daemon route this bridge doesn't explicitly expose.
  */
 export type DaemonStatus = { state: 'connecting' } | { state: 'ready' } | { state: 'unavailable'; error: string };

@@ -12,7 +12,7 @@ import { sendToRenderer } from './send-to-renderer.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Two AgentDock windows would each spawn their own daemon sidecar and race over the same
-// discovery file (the daemon's own single-instance guard, see docs/security.md, would make the
+// discovery file (the daemon's own single-instance guard, see SECURITY.md, would make the
 // second one fail to start) — rather than let that surface as a confusing "daemon unavailable"
 // error, refuse to open a second window at all and focus the existing one instead.
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
@@ -24,7 +24,7 @@ if (!gotSingleInstanceLock) {
  * Renderer status only — never the token or base URL. The renderer talks to the daemon
  * exclusively through the IPC handlers below, which delegate to `@agent-dock/client`; the
  * `AgentDockClient` instance (which carries the bearer token) never crosses into the renderer
- * process. See docs/security.md.
+ * process. See SECURITY.md.
  */
 type DaemonStatus = { state: 'connecting' } | { state: 'ready' } | { state: 'unavailable'; error: string };
 

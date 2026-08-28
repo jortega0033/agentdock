@@ -48,9 +48,8 @@ win:
   target:
     - target: nsis
       arch: [x64]
-  # No custom icon asset exists in this repository (see docs/architecture.md for why one wasn't
-  # fabricated) — electron-builder falls back to its own default Electron icon. Add an `icon:`
-  # path here once a real one exists.
+  # No custom icon asset exists in this repository — electron-builder falls back to its own
+  # default Electron icon. Add an `icon:` path here once a real one exists.
 
 nsis:
   oneClick: false

@@ -11,7 +11,7 @@ import type { AgentSession } from '@agent-dock/shared';
  * Scope is deliberately narrow: only the `AgentSession` record. A session's live process handle
  * (an `AsyncGenerator` plus a `cancel()` closure) isn't something you can "store" at all, and its
  * buffered event history is kept as separate runtime-only state in SessionManager — see
- * docs/architecture.md#sessionstore for why persisting replayable event history isn't part of
+ * docs/daemon.md#session-lifecycle-sessionmanager-sessionstore for why persisting replayable event history isn't part of
  * what this interface owns.
  */
 export interface SessionStore {

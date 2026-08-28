@@ -18,7 +18,7 @@ export interface BuildServerOptions {
 /**
  * Builds (but does not start) the daemon's HTTP server.
  *
- * Local-auth model (see docs/security.md): every route except /health requires
+ * Local-auth model (see SECURITY.md): every route except /health requires
  * `Authorization: Bearer <token>` with the token generated at process startup and handed to the
  * desktop client out-of-band (a local file, not the network). No CORS headers are ever added, so
  * a browser page cannot read cross-origin responses even if it guessed the token; and because
@@ -35,7 +35,7 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
     const origin = req.headers.origin;
     // "null" is what browsers send for a sandboxed iframe, a data: URI, or some file:// contexts
     // — reject it explicitly rather than letting it fall through to "no Origin header" handling.
-    // (This isn't the only thing standing between an attacker and the daemon — see docs/security.md
+    // (This isn't the only thing standing between an attacker and the daemon — see SECURITY.md
     // for why the bearer token and the total absence of CORS response headers are what actually
     // stop a browser from completing a privileged request — but a null-origin request is still a
     // browser-controlled context we have no reason to treat as trusted, so we say so explicitly.)

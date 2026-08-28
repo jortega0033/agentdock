@@ -1,5 +1,28 @@
 # Providers
 
+## The `AgentProvider` interface
+
+Every provider adapter (`packages/agent-runtime/src/providers/*/adapter.ts`) implements one
+interface (`packages/agent-runtime/src/types.ts`):
+
+```ts
+interface AgentProvider {
+  readonly id: ProviderId;
+  readonly name: string;
+  detect(): Promise<ProviderStatus>;
+  startSession(options: StartSessionOptions): ProviderSessionHandle;
+}
+```
+
+An implementation owns everything provider-specific — executable discovery, command construction,
+process spawning, output parsing, and normalization into `AgentEvent`. Nothing outside
+`packages/agent-runtime` should ever need to know a provider's native event shape; that's the whole
+point of normalizing into the shared `AgentEvent` union documented in
+[protocol-v1.md](protocol-v1.md). In practice, an adapter doesn't implement spawning/parsing
+directly — it delegates to the shared `runProviderSession()` helper (see
+[architecture.md#process-management](architecture.md#process-management)) and supplies only
+`buildArgs()` and `parseLine()`, the two genuinely provider-specific pure functions.
+
 ## Executable discovery
 
 `findExecutable()` (`packages/agent-runtime/src/detect-executable.ts`) does not assume the CLI is
@@ -180,27 +203,29 @@ Say you want to add `GeminiProvider`. You should not need to touch the daemon's 
 package, or the desktop UI at all:
 
 1. **Register the id.** Add `'gemini'` to `PROVIDER_IDS` in `packages/shared/src/provider.ts`.
-2. **Write the adapter.** Create `packages/agent-runtime/src/providers/gemini/`:
-   - `detect.ts` — resolve the executable, get its version, determine auth state (never coercing
-     "couldn't tell" into `true`).
-   - `capabilities.ts` — declare a `ProviderCapabilities` object reflecting what you actually
-     implemented below, not an aspiration (see [Provider capabilities](#provider-capabilities)).
-   - `parser.ts` — a pure function `(raw: unknown, logger: Logger) => ParsedLine` mapping the
-     CLI's native JSONL shape into `AgentEvent[]`, matching the `ParsedLine` contract in
-     `providers/common/run-session.ts`.
-   - `build-args.ts` — a pure function `(opts: StartSessionOptions) => string[]` constructing the
-     CLI's argv, branching on `opts.resumeProviderSessionId` if `capabilities.resume` is true.
-   - `adapter.ts` — a class implementing `AgentProvider`, delegating execution to the shared
-     `runProviderSession()` helper (validation, spawning, cancellation, and the
-     completed/failed/cancelled terminal-event guarantee are all handled there — you only supply
-     `buildArgs` and `parseLine`).
-3. **Write provider-specific parser tests.** Unit-test the parser against fixture JSON (see
-   `test/codex-parser.test.ts` for the shape).
-4. **Run the shared provider contract suite.** Add `test/gemini-contract.test.ts` calling
-   `describeProviderContract()` with your fixtures and capabilities (see
-   [Provider contract tests](#provider-contract-tests)) — a `node` fixture script standing in for
-   the real CLI, so CI never needs a real Gemini account.
-5. **Register it.** Add `new GeminiProvider(logger)` to `buildProviderRegistry()` in
+2. **Write `detect.ts`.** Resolve the executable (via `findExecutable`, see
+   [Executable discovery](#executable-discovery)), get its version, and determine auth state —
+   never coercing "couldn't tell" into `true` (see [`ProviderStatus`](#providerstatus)).
+3. **Write `capabilities.ts`.** Declare a `ProviderCapabilities` object reflecting what you
+   actually implemented in the steps below, not an aspiration (see
+   [Provider capabilities](#provider-capabilities)).
+4. **Write `parser.ts`.** A pure function `(raw: unknown, logger: Logger) => ParsedLine` mapping
+   the CLI's native JSONL shape into `AgentEvent[]`, matching the `ParsedLine` contract in
+   `providers/common/run-session.ts`.
+5. **Write `build-args.ts`.** A pure function `(opts: StartSessionOptions) => string[]`
+   constructing the CLI's argv, branching on `opts.resumeProviderSessionId` if `capabilities.resume`
+   is true.
+6. **Write `adapter.ts`.** A class implementing `AgentProvider`
+   (see [The `AgentProvider` interface](#the-agentprovider-interface)), delegating execution to the
+   shared `runProviderSession()` helper — validation, spawning, cancellation, and the
+   completed/failed/cancelled terminal-event guarantee are all handled there; you only supply
+   `buildArgs` and `parseLine`.
+7. **Write provider-specific parser tests**, and **run the shared provider contract suite.** Unit-
+   test the parser against fixture JSON (see `test/codex-parser.test.ts` for the shape), then add
+   `test/gemini-contract.test.ts` calling `describeProviderContract()` with your fixtures and
+   capabilities (see [Provider contract tests](#provider-contract-tests)) — a `node` fixture script
+   standing in for the real CLI, so CI never needs a real Gemini account.
+8. **Register it.** Add `new GeminiProvider(logger)` to `buildProviderRegistry()` in
    `apps/daemon/src/providers.ts`.
 
 That's the whole surface. `GET /providers` picks it up automatically (it iterates the registry),

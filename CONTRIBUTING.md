@@ -17,10 +17,34 @@ exact version this repo was built against).
 
 ## Project structure
 
-See [docs/architecture.md](docs/architecture.md) for the full picture. In short:
+See [docs/architecture.md](docs/architecture.md) for the full picture, and
+[DEVELOPMENT.md](DEVELOPMENT.md) for an "I want to change X, start here" map. In short:
 `packages/shared` (types/contracts) → `packages/agent-runtime` (provider adapters, process
 management) → `apps/daemon` (HTTP+SSE server) → `apps/desktop` (Electron+React demo client).
 Dependencies only flow in that direction.
+
+## Architecture rules
+
+These aren't style preferences — breaking them tends to break the security model or the layering
+the tests assume. The full list, with the reasoning behind each, is
+[DEVELOPMENT.md#common-architectural-rules](DEVELOPMENT.md#common-architectural-rules); briefly:
+never build a shell command string, never let the renderer call the daemon directly, never accept
+an executable path from a request, never branch on provider id outside `packages/agent-runtime`,
+never add a generic IPC passthrough to the preload bridge.
+
+## Testing requirements
+
+- Never make a test depend on a real, authenticated Claude/Codex CLI being present, and never make
+  one that spends real API credit — CI has neither. See
+  [DEVELOPMENT.md#testing-without-paid-providers](DEVELOPMENT.md#testing-without-paid-providers)
+  for the fixture-based pattern this project uses instead.
+- Never commit a fixture, test, or example that contains a real credential, token, or account
+  identifier — even a revoked or expired one. Provider CLI fixtures are small `node` scripts
+  standing in for the real CLI's I/O shape, never real recorded CLI output.
+- If your change affects the public contract — anything in
+  [docs/protocol-v1.md](docs/protocol-v1.md)'s "public/stable" list, `@agent-dock/client`'s exports,
+  or a daemon route's shape — update the relevant doc (`docs/protocol-v1.md`, `docs/client-sdk.md`,
+  or `docs/daemon.md`) in the same PR. A behavior change with no doc update for it isn't done.
 
 ## Before opening a PR
 
@@ -30,14 +54,16 @@ pnpm lint
 pnpm test        # must pass without a real Claude/Codex install or any paid API call
 pnpm build
 pnpm audit       # electron-builder's own build-time deps are a known, documented exception —
-                 # see docs/architecture.md#packaging; nothing shipped in the app should show up here
+                 # see docs/packaging.md; nothing shipped in the app should show up here
 ```
 
 If you touched anything under `apps/desktop/electron/` (main process, preload, or packaging
 config), also run `pnpm package:win` (Windows) and confirm the app still launches from
 `dist-packages/win-unpacked/AgentDock.exe` — packaging has its own failure modes that `pnpm build`
-alone won't catch (see [docs/architecture.md#packaging](docs/architecture.md#packaging) for two
-real ones this project already hit).
+alone won't catch (see [docs/packaging.md#verifying-a-packaging-sensitive-change](docs/packaging.md#verifying-a-packaging-sensitive-change)
+for real ones this project already hit).
+
+### Provider contribution checklist
 
 If you're touching a provider adapter (`packages/agent-runtime/src/providers/*`), add or update:
 
@@ -46,9 +72,9 @@ If you're touching a provider adapter (`packages/agent-runtime/src/providers/*`)
 - if the change affects process lifecycle (spawning, cancellation, exit handling), an
   **integration test** using a small `node` fixture script standing in for the real CLI (see
   `packages/agent-runtime/test/run-session.test.ts` and `test/fixtures/*.mjs`)
-
-Never make a test depend on a real, authenticated Claude/Codex CLI being present, and never make
-one that spends real API credit — CI has neither.
+- if you're adding a new provider entirely, the full checklist in
+  [docs/providers.md#adding-a-new-provider](docs/providers.md#adding-a-new-provider), including a
+  run of the shared `describeProviderContract()` suite against your adapter
 
 ## Code style
 

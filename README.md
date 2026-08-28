@@ -23,11 +23,24 @@ Renderer (React) ──IPC──▶ Electron main ──@agent-dock/client──
 
 The renderer never calls the daemon directly — only Electron's main process does, through the
 typed `@agent-dock/client` SDK. See
-[docs/security.md](docs/security.md#renderer-never-talks-to-the-daemon-directly) for why, and
+[SECURITY.md](SECURITY.md#renderer-never-talks-to-the-daemon-directly) for why, and
 [Client SDK](#client-sdk) below for what that package looks like from the outside.
 
 See [docs/architecture.md](docs/architecture.md) for the full breakdown, and
-[docs/security.md](docs/security.md) for exactly what protects the daemon and why.
+[SECURITY.md](SECURITY.md) for exactly what protects the daemon and why.
+
+## Where do I start?
+
+- **Just want to run it?** [Getting started](#getting-started) below.
+- **Want to contribute to this repo?** [DEVELOPMENT.md](DEVELOPMENT.md) — setup, an "I want to
+  change X" map of the codebase, and the common architectural rules that keep the security model
+  intact.
+- **Want to build your own product on top of AgentDock?** [Building your own product](#building-your-own-product-with-agentdock)
+  below.
+- **Want to add a provider (a third CLI besides Claude/Codex)?**
+  [docs/providers.md#adding-a-new-provider](docs/providers.md#adding-a-new-provider) — self-
+  contained, no daemon/client/desktop changes required.
+- **Something's not working?** [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## What this is not
 
@@ -81,7 +94,8 @@ curl http://127.0.0.1:<port>/health
 ```
 
 The daemon prints its listening URL and where it wrote its discovery file (port + auth token) on
-startup — see [docs/security.md](docs/security.md) for what that file is and why the token exists.
+startup — see [SECURITY.md](SECURITY.md#local-auth-token) for what that file is and why the token
+exists, and [docs/daemon.md](docs/daemon.md) for everything else about running it standalone.
 
 To run the full desktop demo (spawns the daemon automatically):
 
@@ -130,54 +144,20 @@ Produces, under `dist-packages/` at the repo root:
 - `dist-packages/AgentDock-Setup-<version>.exe` — the NSIS installer
 
 `pnpm package` (no `:win`) runs `electron-builder` for whatever platform you're on; today that's
-only meaningfully tested on Windows — see [Platform support](#platform-support) below. Both
-commands are non-interactive and safe to run from a clean checkout after `pnpm install`, with no
-signing configured (there's nothing to sign with in this repo — see
-[docs/architecture.md](docs/architecture.md#packaging) for what that means for a real release).
-
-### Runtime layout once packaged
-
-```
-AgentDock.exe                    (Electron; renderer + main process live in resources/app.asar)
-resources/
-  app.asar                       renderer (dist/) + main + preload — no node_modules needed,
-                                  everything is bundled at build time (see Production build above)
-  daemon/
-    index.js                     the daemon's own esbuild bundle, unmodified from apps/daemon/dist/
-```
-
-The daemon ships **outside** `app.asar`, as an electron-builder `extraResource`, because it's
-spawned as a separate OS process (`child_process.spawn`) rather than imported code — asar is a
-virtual filesystem Electron's own `fs` module knows how to read, but handing a path inside it to a
-freshly spawned process is exactly the kind of "happens to work" behavior this project avoids. See
-`apps/desktop/electron-builder.yml` and `apps/desktop/electron/resolve-daemon-entry.ts` for exactly
-how the packaged app locates it (`process.resourcesPath`), separately from how dev mode does
-(`tsx` against source) and how an unpacked-but-not-packaged build does (the daemon's own
-`dist/index.js` next to its source).
-
-## Platform support
-
-| | source / dev | production build | packaged app | installer | uninstall |
-|---|---|---|---|---|---|
-| **Windows** | ✅ verified | ✅ verified | ✅ verified (installed, launched, closed, relaunched, second-instance-blocked) | ✅ verified (NSIS, silent install/uninstall) | ✅ verified |
-| **macOS** | untested | untested | untested | not implemented | — |
-| **Linux** | untested | untested | untested | not implemented | — |
-
-Nothing in the code is deliberately Windows-only (path handling uses `node:path`, process
-management already has POSIX branches — see [docs/security.md](docs/security.md#process-hygiene)),
-but "should work" and "verified" are different claims; only Windows has actually been installed and
-exercised end to end. Adding `mac`/`linux` targets to `electron-builder.yml` (`dmg`/`zip`,
-`AppImage`/`deb`) is a reasonable next step but wasn't attempted here — see
-[docs/architecture.md](docs/architecture.md#known-limitations--v02-directions).
+only meaningfully tested on Windows. Both commands are non-interactive and safe to run from a clean
+checkout after `pnpm install`, with no signing configured. See
+[docs/packaging.md](docs/packaging.md) for the runtime layout once packaged, why the daemon ships
+outside `app.asar`, and the full Windows-only platform matrix.
 
 ## Client SDK
 
 `@agent-dock/client` is the typed way to talk to the daemon — it owns the HTTP request/response
 handling, bearer-token auth, incremental SSE parsing, and the protocol-version compatibility check
-(see [Protocol v1](docs/architecture.md#protocol-v1)), so a caller never hand-writes daemon URLs,
-headers, or event-stream parsing. It's a plain TypeScript package with no Electron or browser
-dependency — usable from Electron's main process (what this repo's own desktop app does), a Node
-CLI, or a future VS Code extension.
+(see [Protocol v1](docs/protocol-v1.md)), so a caller never hand-writes daemon URLs, headers, or
+event-stream parsing. It's a plain TypeScript package with no Electron or browser dependency —
+usable from Electron's main process (what this repo's own desktop app does), a Node CLI, or a
+future VS Code extension. See [docs/client-sdk.md](docs/client-sdk.md) for the full public API
+(including `sessions.get`/`sessions.delete`, not shown below) and design decisions.
 
 ```ts
 import { AgentDockClient } from '@agent-dock/client';
@@ -202,7 +182,7 @@ await client.sessions.cancel(session.id);
 Failures are typed — `DaemonUnavailableError`, `UnauthorizedError`, `ProtocolMismatchError`,
 `ValidationError`, `SessionNotFoundError`, `ProviderUnavailableError`, `DaemonError` — so a caller
 can `catch` and branch on `instanceof` instead of parsing error strings. See
-[packages/client](packages/client) and [docs/architecture.md#protocol-v1](docs/architecture.md#protocol-v1).
+[docs/client-sdk.md](docs/client-sdk.md) and [docs/protocol-v1.md](docs/protocol-v1.md).
 
 ## Adding a provider
 
@@ -210,12 +190,45 @@ See [docs/providers.md](docs/providers.md#adding-a-new-provider) — it's meant 
 adapter, declare its capabilities, write its parser + tests, run it against the shared provider
 contract suite, register it. No daemon, client, or desktop changes required.
 
+## Building your own product with AgentDock
+
+This repo's `apps/desktop` is a demo, not a product — it exists to prove the daemon and client
+work end to end, with no chat history, accounts, or specific workflow of its own. To build a real
+product on top of it:
+
+1. **Fork the repo** and treat `apps/desktop` as a starting point to replace, not extend in place
+   — keep `packages/shared`, `packages/agent-runtime`, `packages/client`, and `apps/daemon`
+   largely as-is; your own product's UI and any product-specific logic (persistence, accounts,
+   a specific end-user workflow) belongs in your own app, not upstream in these packages.
+2. **Talk to the daemon the same way this repo does** — through `@agent-dock/client` from a trusted
+   process (Electron main, a Node backend, a CLI), never from a browser/renderer context. See
+   [SECURITY.md](SECURITY.md#renderer-never-talks-to-the-daemon-directly) for why that boundary is
+   load-bearing, not optional, if your product also runs in a browser-based renderer.
+3. **Add product-specific persistence in your own layer**, not in `SessionStore` — this project's
+   `MemorySessionStore` is deliberately ephemeral (see
+   [docs/daemon.md#session-lifecycle-sessionmanager-sessionstore](docs/daemon.md#session-lifecycle-sessionmanager-sessionstore)).
+   If you need session history to survive a restart, that's a product concern to build in your own
+   app (e.g. by storing `AgentEventEnvelope`s as your product receives them over SSE), not something
+   to retrofit into the daemon.
+4. **Add a provider if you need one AgentDock doesn't ship** — see
+   [docs/providers.md#adding-a-new-provider](docs/providers.md#adding-a-new-provider).
+5. **Package it as your own app** — update `appId`, `productName`, and add an icon in
+   `apps/desktop/electron-builder.yml` (see [docs/packaging.md](docs/packaging.md)); the daemon and
+   client packages need no changes to ship under a different product name.
+
 ## Documentation
 
-- [docs/architecture.md](docs/architecture.md) — component responsibilities, protocol v1, session/event model, why these design choices
+- [DEVELOPMENT.md](DEVELOPMENT.md) — setup, an "I want to change X" map, common architectural rules
+- [docs/architecture.md](docs/architecture.md) — component responsibilities, runtime flow, trust boundaries, dependency graph
+- [docs/protocol-v1.md](docs/protocol-v1.md) — the `AgentEvent` union, wire format, ordering guarantees, what's public/stable
+- [docs/client-sdk.md](docs/client-sdk.md) — `@agent-dock/client`'s full public API and design decisions
 - [docs/providers.md](docs/providers.md) — how the Claude/Codex adapters work, provider capabilities, how to add another, the shared contract test suite
-- [docs/security.md](docs/security.md) — the daemon's threat model and local-auth mechanism
-- [CONTRIBUTING.md](CONTRIBUTING.md) — development workflow
+- [docs/daemon.md](docs/daemon.md) — running the daemon standalone, routes, session lifecycle, discovery file
+- [docs/electron.md](docs/electron.md) — the renderer/main/daemon boundary, IPC bridge, where to safely add native functionality
+- [docs/packaging.md](docs/packaging.md) — electron-builder/NSIS specifics, verified commands, platform support
+- [docs/troubleshooting.md](docs/troubleshooting.md) — common problems and how to diagnose them
+- [SECURITY.md](SECURITY.md) — the daemon's threat model and local-auth mechanism
+- [CONTRIBUTING.md](CONTRIBUTING.md) — contribution workflow and checklist
 
 ## License
 

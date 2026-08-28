@@ -15,10 +15,15 @@ export function registerSessionRoutes(
       reply.code(400).send({ error: 'invalid request body', details: parsed.error.flatten() });
       return;
     }
-    const { provider, cwd, prompt } = parsed.data;
+    const { provider, cwd, prompt, resumeProviderSessionId } = parsed.data;
 
-    if (!registry.get(provider)) {
+    const providerImpl = registry.get(provider);
+    if (!providerImpl) {
       reply.code(400).send({ error: `unsupported provider: ${provider}` });
+      return;
+    }
+    if (resumeProviderSessionId && !(await providerImpl.detect()).capabilities.resume) {
+      reply.code(400).send({ error: `provider does not support resume: ${provider}` });
       return;
     }
     if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
@@ -26,7 +31,7 @@ export function registerSessionRoutes(
       return;
     }
 
-    const session = sessionManager.create(provider, cwd, prompt);
+    const session = sessionManager.create(provider, cwd, prompt, resumeProviderSessionId);
     reply.code(201).send(session);
   });
 

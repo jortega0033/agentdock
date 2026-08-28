@@ -14,15 +14,17 @@ CLIs using the user's existing session. The installed CLI stays the sole authent
 provider boundary; this project never sees a password, token, or API key.
 
 ```
-Renderer (React) ──IPC──▶ Electron main ──HTTP+SSE, localhost, bearer token──▶ Local Daemon (Fastify)
-                                                                                       │
-                                                                          Unified Agent Runtime
-                                                                     ├── Claude Code adapter ──▶ claude CLI
-                                                                     └── Codex adapter ────────▶ codex CLI
+Renderer (React) ──IPC──▶ Electron main ──@agent-dock/client──▶ Local Daemon (Fastify, protocol v1)
+                                                                          │
+                                                             Unified Agent Runtime
+                                                        ├── Claude Code adapter ──▶ claude CLI
+                                                        └── Codex adapter ────────▶ codex CLI
 ```
 
-The renderer never calls the daemon directly — only Electron's main process does. See
-[docs/security.md](docs/security.md#renderer-never-talks-to-the-daemon-directly) for why.
+The renderer never calls the daemon directly — only Electron's main process does, through the
+typed `@agent-dock/client` SDK. See
+[docs/security.md](docs/security.md#renderer-never-talks-to-the-daemon-directly) for why, and
+[Client SDK](#client-sdk) below for what that package looks like from the outside.
 
 See [docs/architecture.md](docs/architecture.md) for the full breakdown, and
 [docs/security.md](docs/security.md) for exactly what protects the daemon and why.
@@ -45,7 +47,8 @@ apps/
   daemon/         Standalone local Node.js service (Fastify), runnable without Electron
 packages/
   agent-runtime/  Provider-neutral runtime: process management, adapters, normalized events
-  shared/         Types, Zod schemas, and the AgentEvent protocol shared by daemon + desktop
+  client/         @agent-dock/client — typed daemon SDK (HTTP+SSE, auth, protocol version check)
+  shared/         Types, Zod schemas, and the protocol v1 AgentEvent contract everything else uses
 ```
 
 ## Requirements
@@ -107,8 +110,9 @@ pnpm lint        # ESLint
   fixing, not just adding.
 - `apps/desktop/dist/` — the Vite production build of the React renderer
 - `apps/desktop/dist-electron/main.js`, `preload.js` — the Electron main process and preload
-  script, each bundled to a single file (`main.js` inlines `@agent-dock/shared` and `zod`;
-  `preload.js` is forced to CommonJS since Electron's sandboxed preload loader doesn't support ESM)
+  script, each bundled to a single file (`main.js` inlines `@agent-dock/client`,
+  `@agent-dock/shared`, and `zod`; `preload.js` is forced to CommonJS since Electron's sandboxed
+  preload loader doesn't support ESM)
 
 None of this is an installer yet — it's the "does the code actually compile to something runnable"
 step. `electron .` against `apps/desktop` at this point runs the app unpacked, useful for a quick
@@ -166,15 +170,50 @@ exercised end to end. Adding `mac`/`linux` targets to `electron-builder.yml` (`d
 `AppImage`/`deb`) is a reasonable next step but wasn't attempted here — see
 [docs/architecture.md](docs/architecture.md#known-limitations--v02-directions).
 
+## Client SDK
+
+`@agent-dock/client` is the typed way to talk to the daemon — it owns the HTTP request/response
+handling, bearer-token auth, incremental SSE parsing, and the protocol-version compatibility check
+(see [Protocol v1](docs/architecture.md#protocol-v1)), so a caller never hand-writes daemon URLs,
+headers, or event-stream parsing. It's a plain TypeScript package with no Electron or browser
+dependency — usable from Electron's main process (what this repo's own desktop app does), a Node
+CLI, or a future VS Code extension.
+
+```ts
+import { AgentDockClient } from '@agent-dock/client';
+
+const client = new AgentDockClient({ baseUrl: 'http://127.0.0.1:PORT', token });
+
+const providers = await client.providers.list();
+
+const session = await client.sessions.create({
+  provider: 'claude',
+  cwd: '/path/to/project',
+  prompt: 'Inspect this repository',
+});
+
+for await (const event of client.sessions.events(session.id)) {
+  console.log(event); // AgentEventEnvelope — a normalized AgentEvent plus sequence/timestamp
+}
+
+await client.sessions.cancel(session.id);
+```
+
+Failures are typed — `DaemonUnavailableError`, `UnauthorizedError`, `ProtocolMismatchError`,
+`ValidationError`, `SessionNotFoundError`, `ProviderUnavailableError`, `DaemonError` — so a caller
+can `catch` and branch on `instanceof` instead of parsing error strings. See
+[packages/client](packages/client) and [docs/architecture.md#protocol-v1](docs/architecture.md#protocol-v1).
+
 ## Adding a provider
 
 See [docs/providers.md](docs/providers.md#adding-a-new-provider) — it's meant to be: implement one
-adapter, write its parser + tests, register it. No daemon or desktop changes required.
+adapter, declare its capabilities, write its parser + tests, run it against the shared provider
+contract suite, register it. No daemon, client, or desktop changes required.
 
 ## Documentation
 
-- [docs/architecture.md](docs/architecture.md) — component responsibilities, session/event model, why these design choices
-- [docs/providers.md](docs/providers.md) — how the Claude/Codex adapters work, and how to add another
+- [docs/architecture.md](docs/architecture.md) — component responsibilities, protocol v1, session/event model, why these design choices
+- [docs/providers.md](docs/providers.md) — how the Claude/Codex adapters work, provider capabilities, how to add another, the shared contract test suite
 - [docs/security.md](docs/security.md) — the daemon's threat model and local-auth mechanism
 - [CONTRIBUTING.md](CONTRIBUTING.md) — development workflow
 

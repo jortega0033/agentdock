@@ -71,6 +71,9 @@ importers:
 
   apps/desktop:
     devDependencies:
+      '@agent-dock/client':
+        specifier: workspace:*
+        version: link:../../packages/client
       '@agent-dock/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -121,6 +124,19 @@ importers:
         version: 3.25.76
 
   packages/agent-runtime:
+    dependencies:
+      '@agent-dock/shared':
+        specifier: workspace:*
+        version: link:../shared
+    devDependencies:
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.6
+        version: 3.2.7(@types/debug@4.1.13)(@types/node@22.20.1)(jiti@2.7.0)(jsdom@25.0.1)(tsx@4.23.12)
+
+  packages/client:
     dependencies:
       '@agent-dock/shared':
         specifier: workspace:*

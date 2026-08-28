@@ -6,6 +6,26 @@ export type ProviderId = (typeof PROVIDER_IDS)[number];
 export type AuthStatus = boolean | 'unknown';
 
 /**
+ * What an AgentDock adapter actually does for a provider — not a marketing claim about the
+ * underlying model. A capability is `true` only if this codebase's adapter reliably implements
+ * and normalizes that behavior today; if support is flaky, partial, or untested, it's `false`.
+ * This is what lets a downstream client render "supports resume" / show a cancel button / expect
+ * usage numbers without ever writing `if (provider.id === 'claude')`.
+ */
+export interface ProviderCapabilities {
+  /** Can a session be started as a continuation of a prior `providerSessionId`? */
+  resume: boolean;
+  /** Can an in-progress session be cancelled, terminating the underlying process? */
+  cancellation: boolean;
+  /** Does the adapter normalize tool/command invocations into tool.started/tool.completed? */
+  tools: boolean;
+  /** Does the adapter normalize token/cost accounting into `usage` events? */
+  usage: boolean;
+  /** Does the adapter surface CLI-exposed reasoning as `thinking.delta` (only when the CLI itself makes it public)? */
+  thinking: boolean;
+}
+
+/**
  * Point-in-time read of whether a provider CLI is usable. `authenticated: 'unknown'` must never
  * be treated as `true` by callers — it means the daemon could not determine auth state (e.g. the
  * CLI has no machine-readable status command, or the check errored) and the user should be
@@ -16,6 +36,7 @@ export interface ProviderStatus {
   name: string;
   installed: boolean;
   authenticated: AuthStatus;
+  capabilities: ProviderCapabilities;
   executablePath?: string;
   version?: string;
   error?: string;

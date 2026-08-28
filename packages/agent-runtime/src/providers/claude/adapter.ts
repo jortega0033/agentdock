@@ -2,6 +2,7 @@ import type { ProviderStatus } from '@agent-dock/shared';
 import type { AgentProvider, ProviderSessionHandle, StartSessionOptions } from '../../types.js';
 import { type Logger, noopLogger } from '../../logger.js';
 import { runProviderSession } from '../common/run-session.js';
+import { buildClaudeArgs } from './build-args.js';
 import { detectClaude } from './detect.js';
 import { parseClaudeLine } from './parser.js';
 
@@ -25,15 +26,7 @@ export class ClaudeProvider implements AgentProvider {
       {
         providerId: 'claude',
         executableNames: ['claude'],
-        buildArgs: (opts) => {
-          const args = ['-p', opts.prompt, '--output-format', 'stream-json', '--verbose'];
-          if (opts.resumeProviderSessionId) {
-            args.push('--resume', opts.resumeProviderSessionId);
-          } else {
-            args.push('--session-id', opts.sessionId);
-          }
-          return args;
-        },
+        buildArgs: buildClaudeArgs,
         parseLine: parseClaudeLine,
       },
       options,

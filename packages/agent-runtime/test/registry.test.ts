@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ProviderRegistry } from '../src/registry.js';
-import { FakeProvider } from '../src/providers/fake/adapter.js';
+import { FAKE_PROVIDER_CAPABILITIES, FakeProvider } from '../src/providers/fake/adapter.js';
 
 describe('ProviderRegistry', () => {
   it('registers and retrieves providers by id', () => {
@@ -20,8 +20,24 @@ describe('ProviderRegistry', () => {
 
   it('detectAll runs detect() on every provider', async () => {
     const registry = new ProviderRegistry();
-    registry.register(new FakeProvider('claude', { id: 'claude', name: 'Claude', installed: true, authenticated: true }));
-    registry.register(new FakeProvider('codex', { id: 'codex', name: 'Codex', installed: false, authenticated: 'unknown' }));
+    registry.register(
+      new FakeProvider('claude', {
+        id: 'claude',
+        name: 'Claude',
+        installed: true,
+        authenticated: true,
+        capabilities: FAKE_PROVIDER_CAPABILITIES,
+      }),
+    );
+    registry.register(
+      new FakeProvider('codex', {
+        id: 'codex',
+        name: 'Codex',
+        installed: false,
+        authenticated: 'unknown',
+        capabilities: FAKE_PROVIDER_CAPABILITIES,
+      }),
+    );
     const statuses = await registry.detectAll();
     expect(statuses).toHaveLength(2);
     expect(statuses.find((s) => s.id === 'codex')?.installed).toBe(false);

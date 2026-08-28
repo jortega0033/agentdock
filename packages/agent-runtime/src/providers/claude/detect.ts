@@ -2,6 +2,7 @@ import type { ProviderStatus } from '@agent-dock/shared';
 import { execCapture } from '../../process/exec-capture.js';
 import { findExecutable } from '../../detect-executable.js';
 import type { Logger } from '../../logger.js';
+import { CLAUDE_CAPABILITIES } from './capabilities.js';
 
 const EXECUTABLE_NAMES = ['claude'];
 
@@ -12,7 +13,7 @@ const EXECUTABLE_NAMES = ['claude'];
  * cached login state — this never reads or touches Claude's credential storage directly.
  */
 export async function detectClaude(logger: Logger): Promise<ProviderStatus> {
-  const base = { id: 'claude' as const, name: 'Claude Code' };
+  const base = { id: 'claude' as const, name: 'Claude Code', capabilities: CLAUDE_CAPABILITIES };
 
   const executablePath = await findExecutable(EXECUTABLE_NAMES);
   if (!executablePath) {

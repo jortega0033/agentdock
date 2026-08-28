@@ -1,29 +1,37 @@
 import { randomUUID } from 'node:crypto';
-import type { AgentEvent, AgentSession, ProviderId } from '@agent-dock/shared';
+import type { AgentEvent, AgentEventEnvelope, AgentSession, ProviderId } from '@agent-dock/shared';
 import type { Logger, ProviderRegistry, ProviderSessionHandle } from '@agent-dock/agent-runtime';
+import { MemorySessionStore, type SessionStore } from './session-store.js';
 
-interface SessionEntry {
-  session: AgentSession;
+/**
+ * Live, non-persistable state for one session: its process handle and buffered event history.
+ * Deliberately kept out of SessionStore — see session-store.ts for why. Events are stored as the
+ * protocol's public `AgentEventEnvelope` (event + sequence + timestamp), stamped once here so
+ * every subscriber — live or replayed — sees the same sequence/timestamp for the same event.
+ */
+interface RuntimeState {
   handle: ProviderSessionHandle;
-  events: AgentEvent[];
-  listeners: Set<(index: number, event: AgentEvent) => void>;
+  events: AgentEventEnvelope[];
+  listeners: Set<(index: number, event: AgentEventEnvelope) => void>;
 }
 
 const MAX_STORED_EVENTS_PER_SESSION = 5_000;
 
 /**
- * In-memory session registry. Sessions and their event history live only for the daemon
- * process's lifetime — there is no persistence layer in the MVP, by design (see docs/architecture.md).
+ * Orchestrates session lifecycle: creates sessions via the provider registry, consumes their
+ * normalized event stream, and keeps `AgentSession` records up to date in a `SessionStore` (see
+ * session-store.ts — `MemorySessionStore` by default, and the only implementation for now).
  */
 export class SessionManager {
-  private readonly sessions = new Map<string, SessionEntry>();
+  private readonly runtime = new Map<string, RuntimeState>();
 
   constructor(
     private readonly registry: ProviderRegistry,
     private readonly logger: Logger,
+    private readonly store: SessionStore = new MemorySessionStore(),
   ) {}
 
-  create(provider: ProviderId, cwd: string, prompt: string): AgentSession {
+  create(provider: ProviderId, cwd: string, prompt: string, resumeProviderSessionId?: string): AgentSession {
     const providerImpl = this.registry.get(provider);
     if (!providerImpl) {
       throw new Error(`no provider registered for id: ${provider}`);
@@ -38,32 +46,45 @@ export class SessionManager {
       status: 'starting',
       startedAt: new Date().toISOString(),
     };
+    this.store.create(session);
 
-    const handle = providerImpl.startSession({ sessionId: id, cwd, prompt });
-    const entry: SessionEntry = { session, handle, events: [], listeners: new Set() };
-    this.sessions.set(id, entry);
+    const handle = providerImpl.startSession({ sessionId: id, cwd, prompt, resumeProviderSessionId });
+    this.runtime.set(id, { handle, events: [], listeners: new Set() });
 
-    void this.consume(entry);
+    void this.consume(id, handle);
 
-    this.logger.info('session created', { sessionId: id, provider });
+    this.logger.info('session created', { sessionId: id, provider, resumed: !!resumeProviderSessionId });
     return session;
   }
 
-  private async consume(entry: SessionEntry): Promise<void> {
-    entry.session.status = 'running';
-    for await (const event of entry.handle.events) {
-      this.applyStatusTransition(entry.session, event);
+  private async consume(id: string, handle: ProviderSessionHandle): Promise<void> {
+    const runtime = this.runtime.get(id);
+    if (!runtime) return;
 
-      if (entry.events.length < MAX_STORED_EVENTS_PER_SESSION) {
-        entry.events.push(event);
-        const index = entry.events.length - 1;
-        for (const listener of entry.listeners) listener(index, event);
+    this.mutateSession(id, (session) => {
+      session.status = 'running';
+    });
+
+    for await (const event of handle.events) {
+      this.mutateSession(id, (session) => this.applyStatusTransition(session, event));
+
+      if (runtime.events.length < MAX_STORED_EVENTS_PER_SESSION) {
+        const index = runtime.events.length;
+        const envelope: AgentEventEnvelope = { ...event, sequence: index, timestamp: new Date().toISOString() };
+        runtime.events.push(envelope);
+        for (const listener of runtime.listeners) listener(index, envelope);
       } else {
-        this.logger.warn('session event history full; further events will not be replayable', {
-          sessionId: entry.session.id,
-        });
+        this.logger.warn('session event history full; further events will not be replayable', { sessionId: id });
       }
     }
+  }
+
+  /** Reads the current record from the store, applies `fn`, writes it back — the store is the source of truth, never a mutated-in-place reference held elsewhere. */
+  private mutateSession(id: string, fn: (session: AgentSession) => void): void {
+    const session = this.store.get(id);
+    if (!session) return;
+    fn(session);
+    this.store.update(id, session);
   }
 
   private applyStatusTransition(session: AgentSession, event: AgentEvent): void {
@@ -88,53 +109,57 @@ export class SessionManager {
   }
 
   get(id: string): AgentSession | undefined {
-    return this.sessions.get(id)?.session;
+    return this.store.get(id);
   }
 
   list(): AgentSession[] {
-    return [...this.sessions.values()].map((entry) => entry.session);
+    return this.store.list();
   }
 
   /** Replays stored events from `sinceIndex` onward, then delivers live events as they arrive. */
   subscribe(
     id: string,
     sinceIndex: number,
-    listener: (index: number, event: AgentEvent) => void,
+    listener: (index: number, event: AgentEventEnvelope) => void,
   ): (() => void) | undefined {
-    const entry = this.sessions.get(id);
-    if (!entry) return undefined;
+    const runtime = this.runtime.get(id);
+    if (!runtime) return undefined;
 
-    for (let i = sinceIndex; i < entry.events.length; i++) {
-      listener(i, entry.events[i] as AgentEvent);
+    for (let i = sinceIndex; i < runtime.events.length; i++) {
+      listener(i, runtime.events[i] as AgentEventEnvelope);
     }
 
-    entry.listeners.add(listener);
-    return () => entry.listeners.delete(listener);
+    runtime.listeners.add(listener);
+    return () => runtime.listeners.delete(listener);
   }
 
   async cancel(id: string): Promise<boolean> {
-    const entry = this.sessions.get(id);
-    if (!entry) return false;
-    await entry.handle.cancel();
+    const runtime = this.runtime.get(id);
+    if (!runtime) return false;
+    await runtime.handle.cancel();
     return true;
   }
 
   async remove(id: string): Promise<boolean> {
-    const entry = this.sessions.get(id);
-    if (!entry) return false;
-    if (entry.session.status === 'starting' || entry.session.status === 'running') {
-      await entry.handle.cancel();
+    const session = this.store.get(id);
+    if (!session) return false;
+    const runtime = this.runtime.get(id);
+    if ((session.status === 'starting' || session.status === 'running') && runtime) {
+      await runtime.handle.cancel();
     }
-    this.sessions.delete(id);
+    this.runtime.delete(id);
+    this.store.delete(id);
     return true;
   }
 
   /** Cancels every in-flight session. Called on daemon shutdown to avoid orphaned CLI processes. */
   async cancelAll(): Promise<void> {
     await Promise.all(
-      [...this.sessions.values()]
-        .filter((entry) => entry.session.status === 'starting' || entry.session.status === 'running')
-        .map((entry) => entry.handle.cancel()),
+      this.store
+        .list()
+        .filter((session) => session.status === 'starting' || session.status === 'running')
+        .map((session) => this.runtime.get(session.id)?.handle.cancel())
+        .filter((p): p is Promise<void> => !!p),
     );
   }
 }

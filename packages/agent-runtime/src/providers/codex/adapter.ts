@@ -2,6 +2,7 @@ import type { ProviderStatus } from '@agent-dock/shared';
 import type { AgentProvider, ProviderSessionHandle, StartSessionOptions } from '../../types.js';
 import { type Logger, noopLogger } from '../../logger.js';
 import { runProviderSession } from '../common/run-session.js';
+import { buildCodexArgs } from './build-args.js';
 import { detectCodex } from './detect.js';
 import { parseCodexLine } from './parser.js';
 
@@ -30,12 +31,7 @@ export class CodexProvider implements AgentProvider {
       {
         providerId: 'codex',
         executableNames: ['codex'],
-        buildArgs: (opts) => {
-          if (opts.resumeProviderSessionId) {
-            return ['exec', 'resume', opts.resumeProviderSessionId, opts.prompt, '--json', '--skip-git-repo-check'];
-          }
-          return ['exec', opts.prompt, '--json', '--skip-git-repo-check'];
-        },
+        buildArgs: buildCodexArgs,
         parseLine: parseCodexLine,
       },
       options,

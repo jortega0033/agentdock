@@ -2,6 +2,7 @@ import type { ProviderStatus } from '@agent-dock/shared';
 import { execCapture } from '../../process/exec-capture.js';
 import { findExecutable } from '../../detect-executable.js';
 import type { Logger } from '../../logger.js';
+import { CODEX_CAPABILITIES } from './capabilities.js';
 
 const EXECUTABLE_NAMES = ['codex'];
 
@@ -12,7 +13,7 @@ const EXECUTABLE_NAMES = ['codex'];
  * than guessing, since a wrong "authenticated: true" is far worse than an honest "unknown".
  */
 export async function detectCodex(logger: Logger): Promise<ProviderStatus> {
-  const base = { id: 'codex' as const, name: 'Codex' };
+  const base = { id: 'codex' as const, name: 'Codex', capabilities: CODEX_CAPABILITIES };
 
   const executablePath = await findExecutable(EXECUTABLE_NAMES);
   if (!executablePath) {

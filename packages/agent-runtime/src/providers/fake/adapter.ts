@@ -1,8 +1,22 @@
-import type { AgentEvent, ProviderId, ProviderStatus } from '@agent-dock/shared';
+import type { AgentEvent, ProviderCapabilities, ProviderId, ProviderStatus } from '@agent-dock/shared';
 import { AsyncChannel } from '../../process/async-channel.js';
 import type { AgentProvider, ProviderSessionHandle, StartSessionOptions } from '../../types.js';
 
 export type FakeScenario = 'success' | 'failure' | 'hang-until-cancelled';
+
+/**
+ * Deliberately not a copy of the real adapters' capabilities: `resume`, `tools`, and `thinking`
+ * are `false` because FakeProvider genuinely doesn't implement them (no resume branching, no
+ * tool/thinking events emitted below) — that contrast is useful for tests asserting
+ * capability-gated behavior actually gates on the flag rather than always running.
+ */
+export const FAKE_PROVIDER_CAPABILITIES: ProviderCapabilities = {
+  resume: false,
+  cancellation: true,
+  tools: false,
+  usage: true,
+  thinking: false,
+};
 
 /**
  * In-process fake provider (spawns no subprocess) used by daemon and desktop tests so they never
@@ -21,6 +35,7 @@ export class FakeProvider implements AgentProvider {
       name: 'Fake Provider',
       installed: true,
       authenticated: true,
+      capabilities: FAKE_PROVIDER_CAPABILITIES,
     },
     private readonly scenario: FakeScenario = 'success',
   ) {

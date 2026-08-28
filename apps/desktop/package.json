@@ -15,6 +15,7 @@
     "package:win": "electron-builder --win nsis"
   },
   "devDependencies": {
+    "@agent-dock/client": "workspace:*",
     "@agent-dock/shared": "workspace:*",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.1.0",

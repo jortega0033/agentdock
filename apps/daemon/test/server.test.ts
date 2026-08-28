@@ -2,7 +2,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { FakeProvider, ProviderRegistry, noopLogger } from '@agent-dock/agent-runtime';
+import { FAKE_PROVIDER_CAPABILITIES, FakeProvider, ProviderRegistry, noopLogger } from '@agent-dock/agent-runtime';
+import { AGENT_DOCK_PROTOCOL_VERSION } from '@agent-dock/shared';
 import { buildServer } from '../src/server.js';
 import { SessionManager } from '../src/session-manager.js';
 
@@ -11,7 +12,11 @@ const TOKEN = 'test-token-123';
 function setup(scenario: 'success' | 'failure' | 'hang-until-cancelled' = 'success') {
   const registry = new ProviderRegistry();
   registry.register(
-    new FakeProvider('claude', { id: 'claude', name: 'Claude Code', installed: true, authenticated: true }, scenario),
+    new FakeProvider(
+      'claude',
+      { id: 'claude', name: 'Claude Code', installed: true, authenticated: true, capabilities: FAKE_PROVIDER_CAPABILITIES },
+      scenario,
+    ),
   );
   // codex intentionally left unregistered to exercise the "unsupported provider" path.
   const sessionManager = new SessionManager(registry, noopLogger);
@@ -35,6 +40,12 @@ describe('GET /health', () => {
     const res = await app.inject({ method: 'GET', url: '/health' });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ status: 'ok' });
+  });
+
+  it('reports the protocol version, so a client can check compatibility before using the API', async () => {
+    const { app } = setup();
+    const res = await app.inject({ method: 'GET', url: '/health' });
+    expect(res.json().protocolVersion).toBe(AGENT_DOCK_PROTOCOL_VERSION);
   });
 });
 
@@ -82,7 +93,7 @@ describe('GET /providers', () => {
     const res = await app.inject({ method: 'GET', url: '/providers', headers: { authorization: `Bearer ${TOKEN}` } });
     const body = res.json();
     expect(body.providers).toEqual([
-      { id: 'claude', name: 'Claude Code', installed: true, authenticated: true },
+      { id: 'claude', name: 'Claude Code', installed: true, authenticated: true, capabilities: FAKE_PROVIDER_CAPABILITIES },
     ]);
   });
 
@@ -173,6 +184,43 @@ describe('POST /sessions', () => {
     });
     expect(res.statusCode).toBe(404);
   });
+
+  it('rejects a resume request for a provider whose capabilities.resume is false', async () => {
+    // The default `setup()` FakeProvider uses FAKE_PROVIDER_CAPABILITIES, which has resume: false.
+    const { app } = setup();
+    const res = await app.inject({
+      method: 'POST',
+      url: '/sessions',
+      headers: { authorization: `Bearer ${TOKEN}` },
+      payload: { provider: 'claude', cwd, prompt: 'hi', resumeProviderSessionId: 'prior-thread' },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toMatch(/does not support resume/);
+  });
+
+  it('accepts a resume request for a provider whose capabilities.resume is true, and passes the id through', async () => {
+    const registry = new ProviderRegistry();
+    const resumableCapabilities = { ...FAKE_PROVIDER_CAPABILITIES, resume: true };
+    const provider = new FakeProvider('claude', {
+      id: 'claude',
+      name: 'Claude Code',
+      installed: true,
+      authenticated: true,
+      capabilities: resumableCapabilities,
+    });
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger);
+    const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/sessions',
+      headers: { authorization: `Bearer ${TOKEN}` },
+      payload: { provider: 'claude', cwd, prompt: 'hi', resumeProviderSessionId: 'prior-thread' },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(provider.startedOptions.at(-1)?.resumeProviderSessionId).toBe('prior-thread');
+  });
 });
 
 describe('SSE events + cancellation', () => {
@@ -197,6 +245,36 @@ describe('SSE events + cancellation', () => {
     expect(res.headers['content-type']).toContain('text/event-stream');
     expect(res.payload).toContain('event: session.started');
     expect(res.payload).toContain('event: session.completed');
+  });
+
+  it('stamps every event with a monotonic sequence and an ISO timestamp (protocol v1 envelope)', async () => {
+    const { app } = setup('success');
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/sessions',
+      headers: { authorization: `Bearer ${TOKEN}` },
+      payload: { provider: 'claude', cwd, prompt: 'hello' },
+    });
+    const sessionId = createRes.json().id;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/sessions/${sessionId}/events`,
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+
+    const dataLines = res.payload
+      .split('\n\n')
+      .map((frame) => frame.split('\n').find((line) => line.startsWith('data: ')))
+      .filter((line): line is string => !!line)
+      .map((line) => JSON.parse(line.slice('data: '.length)));
+
+    expect(dataLines.length).toBeGreaterThan(0);
+    dataLines.forEach((event, i) => {
+      expect(event.sequence).toBe(i);
+      expect(() => new Date(event.timestamp).toISOString()).not.toThrow();
+    });
   });
 
   it('cancels a running session', async () => {

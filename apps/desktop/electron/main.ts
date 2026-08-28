@@ -4,14 +4,8 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createSessionRequestSchema, sessionIdParamSchema, type AgentEvent } from '@agent-dock/shared';
-import {
-  cancelSession,
-  createSession,
-  listProviders,
-  streamSessionEvents,
-  type DaemonConnection,
-} from './daemon-client.js';
+import { createSessionRequestSchema, sessionIdParamSchema } from '@agent-dock/shared';
+import { AgentDockClient } from '@agent-dock/client';
 import { resolveDaemonEntry } from './resolve-daemon-entry.js';
 import { sendToRenderer } from './send-to-renderer.js';
 
@@ -28,13 +22,14 @@ if (!gotSingleInstanceLock) {
 
 /**
  * Renderer status only — never the token or base URL. The renderer talks to the daemon
- * exclusively through the IPC handlers below; `DaemonConnection` (which carries the bearer
- * token) never crosses into the renderer process. See docs/security.md.
+ * exclusively through the IPC handlers below, which delegate to `@agent-dock/client`; the
+ * `AgentDockClient` instance (which carries the bearer token) never crosses into the renderer
+ * process. See docs/security.md.
  */
 type DaemonStatus = { state: 'connecting' } | { state: 'ready' } | { state: 'unavailable'; error: string };
 
 let daemonChild: ChildProcess | undefined;
-let daemonConn: DaemonConnection | undefined;
+let client: AgentDockClient | undefined;
 let mainWindow: BrowserWindow | undefined;
 let activeSessionId: string | undefined;
 let activeStreamAbort: AbortController | undefined;
@@ -59,9 +54,9 @@ function spawnDaemon(): void {
   daemonChild = spawn(process.execPath, args, {
     cwd,
     // No AGENT_DOCK_ALLOWED_ORIGINS is set here on purpose: the renderer never calls the daemon
-    // directly (see daemon-client.ts), so the daemon needs no browser origin allowlisted at all,
-    // in dev or in production — closing off the CORS-preflight surface entirely rather than
-    // trying to enumerate which origins should be trusted.
+    // directly (it goes through this process's AgentDockClient instance instead), so the daemon
+    // needs no browser origin allowlisted at all, in dev or in production — closing off the
+    // CORS-preflight surface entirely rather than trying to enumerate which origins to trust.
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
@@ -75,8 +70,8 @@ function spawnDaemon(): void {
     console.error(`[daemon] ${chunk.toString('utf8').trim()}`);
   });
   daemonChild.on('exit', (code, signal) => {
-    if (!daemonConn) return; // never became ready; startup error already reported
-    daemonConn = undefined;
+    if (!client) return; // never became ready; startup error already reported
+    client = undefined;
     sendStatus({ state: 'unavailable', error: `daemon process exited unexpectedly (code ${code ?? 'null'}, signal ${signal ?? 'null'})` });
   });
 
@@ -93,15 +88,16 @@ async function waitForDaemonReady(spawnedAt: number, timeoutMs = 15_000): Promis
     if (existsSync(file) && statSync(file).mtimeMs >= spawnedAt - 1000) {
       try {
         const parsed = JSON.parse(readFileSync(file, 'utf8')) as { port: number; token: string };
-        const baseUrl = `http://127.0.0.1:${parsed.port}`;
-        const health = await fetch(`${baseUrl}/health`).catch(() => undefined);
-        if (health?.ok) {
-          daemonConn = { baseUrl, token: parsed.token };
-          sendStatus({ state: 'ready' });
-          return;
-        }
+        const candidate = new AgentDockClient({ baseUrl: `http://127.0.0.1:${parsed.port}`, token: parsed.token });
+        // health() also verifies protocol compatibility (see @agent-dock/client) — this doubles
+        // as both the readiness check and the version-compatibility check in one call.
+        await candidate.health();
+        client = candidate;
+        sendStatus({ state: 'ready' });
+        return;
       } catch {
-        // discovery file mid-write or daemon not reachable yet; keep polling
+        // discovery file mid-write, daemon not reachable yet, or (in dev only, across a protocol
+        // bump) a stale daemon still shutting down — keep polling rather than fail on one miss
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -111,31 +107,34 @@ async function waitForDaemonReady(spawnedAt: number, timeoutMs = 15_000): Promis
 
 /** Streams one session's events to the renderer and clears `activeSessionId` at its terminal event. */
 function forwardSessionEvents(sessionId: string): void {
-  if (!daemonConn) return;
+  if (!client) return;
   const controller = new AbortController();
   activeStreamAbort = controller;
+  const activeClient = client;
 
-  const onEvent = (event: AgentEvent) => {
-    sendToRenderer(mainWindow, 'daemon:session-event', { sessionId, event });
-    if (event.type === 'session.completed' || event.type === 'session.failed' || event.type === 'session.cancelled') {
-      if (activeSessionId === sessionId) activeSessionId = undefined;
+  void (async () => {
+    try {
+      for await (const event of activeClient.sessions.events(sessionId, { signal: controller.signal })) {
+        sendToRenderer(mainWindow, 'daemon:session-event', { sessionId, event });
+        if (event.type === 'session.completed' || event.type === 'session.failed' || event.type === 'session.cancelled') {
+          if (activeSessionId === sessionId) activeSessionId = undefined;
+        }
+      }
+    } catch (err) {
+      if (controller.signal.aborted) return;
+      sendToRenderer(mainWindow, 'daemon:session-event', {
+        sessionId,
+        event: { type: 'error', message: `event stream failed: ${(err as Error).message}`, recoverable: false },
+      });
     }
-  };
-
-  streamSessionEvents(daemonConn, sessionId, onEvent, controller.signal).catch((err: Error) => {
-    if (controller.signal.aborted) return;
-    sendToRenderer(mainWindow, 'daemon:session-event', {
-      sessionId,
-      event: { type: 'error', message: `event stream failed: ${err.message}`, recoverable: false },
-    });
-  });
+  })();
 }
 
 async function killDaemon(): Promise<void> {
   activeStreamAbort?.abort();
-  if (activeSessionId && daemonConn) {
+  if (activeSessionId && client) {
     try {
-      await cancelSession(daemonConn, activeSessionId);
+      await client.sessions.cancel(activeSessionId);
     } catch {
       // best effort; the daemon's own shutdown handler is the fallback (SIGTERM on POSIX)
     }
@@ -177,30 +176,34 @@ function createWindow(): void {
   }
 
   mainWindow.webContents.on('did-finish-load', () => {
-    if (daemonConn) sendStatus({ state: 'ready' });
+    if (client) sendStatus({ state: 'ready' });
   });
 }
 
-ipcMain.handle('daemon:get-status', (): DaemonStatus => (daemonConn ? { state: 'ready' } : { state: 'connecting' }));
+ipcMain.handle('daemon:get-status', (): DaemonStatus => (client ? { state: 'ready' } : { state: 'connecting' }));
 
 ipcMain.handle('daemon:list-providers', async () => {
-  if (!daemonConn) throw new Error('daemon is not ready yet');
-  return listProviders(daemonConn);
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.providers.list();
 });
 
 ipcMain.handle('daemon:create-session', async (_event, input: unknown) => {
-  if (!daemonConn) throw new Error('daemon is not ready yet');
+  if (!client) throw new Error('daemon is not ready yet');
+  // Validated here too, at the IPC boundary from the (untrusted) renderer — @agent-dock/client
+  // validates again before it ever builds a request, but that's a different concern (protecting
+  // the client's own contract), not a substitute for validating what crossed the privileged
+  // boundary from the renderer in the first place.
   const parsed = createSessionRequestSchema.parse(input);
-  const session = await createSession(daemonConn, parsed);
+  const session = await client.sessions.create(parsed);
   activeSessionId = session.id;
   forwardSessionEvents(session.id);
   return session;
 });
 
 ipcMain.handle('daemon:cancel-session', async (_event, input: unknown) => {
-  if (!daemonConn) throw new Error('daemon is not ready yet');
+  if (!client) throw new Error('daemon is not ready yet');
   const { sessionId } = sessionIdParamSchema.parse({ sessionId: input });
-  await cancelSession(daemonConn, sessionId);
+  await client.sessions.cancel(sessionId);
 });
 
 ipcMain.handle('dialog:select-directory', async () => {

@@ -12,14 +12,15 @@ directories:
   output: ../../dist-packages
 
 # main.js and preload.js are already self-contained bundles (vite-plugin-electron/esbuild inline
-# every dependency, including the workspace @agent-dock/shared package, at build time — see
-# vite.config.ts). The renderer (dist/) is a normal Vite production build, also self-contained.
-# So the packaged app needs none of node_modules at runtime. Two things enforce that: this
-# explicit "files" list (no node_modules glob at all), AND react/react-dom/zod/@agent-dock/shared
-# living in package.json's "devDependencies" rather than "dependencies" — electron-builder embeds
-# whatever's listed under "dependencies" into the package by walking node_modules itself,
-# independently of "files", so leaving them there would have silently doubled the packaged app
-# with an unused, unbundled copy of each (this was caught by inspecting a real packaged build).
+# every dependency, including the workspace @agent-dock/shared and @agent-dock/client packages, at
+# build time — see vite.config.ts). The renderer (dist/) is a normal Vite production build, also
+# self-contained. So the packaged app needs none of node_modules at runtime. Two things enforce
+# that: this explicit "files" list (no node_modules glob at all), AND
+# react/react-dom/zod/@agent-dock/shared/@agent-dock/client living in package.json's
+# "devDependencies" rather than "dependencies" — electron-builder embeds whatever's listed under
+# "dependencies" into the package by walking node_modules itself, independently of "files", so
+# leaving them there would have silently doubled the packaged app with an unused, unbundled copy
+# of each (this was caught by inspecting a real packaged build).
 files:
   - dist/**/*
   - dist-electron/**/*

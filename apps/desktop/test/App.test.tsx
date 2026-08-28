@@ -1,20 +1,30 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AgentEvent, AgentSession, ProviderStatus } from '@agent-dock/shared';
+import type { AgentEvent, AgentSession, ProviderCapabilities, ProviderStatus } from '@agent-dock/shared';
 import { App } from '../src/App.js';
 import type { AgentDockBridge, DaemonStatus } from '../src/window.js';
+
+const TEST_CAPABILITIES: ProviderCapabilities = {
+  resume: true,
+  cancellation: true,
+  tools: true,
+  usage: true,
+  thinking: true,
+};
 
 const CLAUDE_INSTALLED: ProviderStatus = {
   id: 'claude',
   name: 'Claude Code',
   installed: true,
   authenticated: true,
+  capabilities: TEST_CAPABILITIES,
 };
 const CODEX_NOT_INSTALLED: ProviderStatus = {
   id: 'codex',
   name: 'Codex',
   installed: false,
   authenticated: 'unknown',
+  capabilities: TEST_CAPABILITIES,
 };
 
 function installBridge(overrides: Partial<AgentDockBridge> = {}): AgentDockBridge {

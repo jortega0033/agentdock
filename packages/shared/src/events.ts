@@ -26,3 +26,23 @@ export type AgentEvent =
   | { type: 'session.cancelled' };
 
 export type AgentEventType = AgentEvent['type'];
+
+/**
+ * Ordering/correlation metadata the daemon stamps onto an AgentEvent when it records and
+ * broadcasts one — never something a provider adapter produces itself. `sequence` is a
+ * per-session, zero-based, monotonically increasing index (it *is* the SSE `id:` field on the
+ * wire, and what `Last-Event-ID`-based reconnection resumes from); `timestamp` is when the daemon
+ * observed the event, not when the provider CLI produced it.
+ */
+export interface AgentEventMeta {
+  sequence: number;
+  timestamp: string;
+}
+
+/**
+ * What actually crosses the daemon → client boundary: a normalized AgentEvent plus the ordering
+ * metadata above, flattened into one object. This is the protocol v1 wire/public shape — see
+ * docs/architecture.md#protocol-v1 for the ordering guarantees every session's event stream
+ * upholds (exactly one terminal event, always last; nothing emitted after it).
+ */
+export type AgentEventEnvelope = AgentEvent & AgentEventMeta;

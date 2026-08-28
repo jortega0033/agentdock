@@ -10,10 +10,17 @@
               │ Electron IPC (contextBridge, same machine, no network)
               ▼
 ┌─────────────────────────┐
-│   Electron Main            │   Spawns/discovers the daemon. Owns the daemon connection
-│   (electron/main.ts)       │   and makes every HTTP/SSE call on the renderer's behalf.
+│   Electron Main            │   Spawns/discovers the daemon. Owns one AgentDockClient
+│   (electron/main.ts)       │   instance and makes every daemon call through it.
 └─────────────┬────────────┘
-              │ HTTP + SSE, http://127.0.0.1:<port>, Bearer token
+              │ @agent-dock/client
+              ▼
+┌─────────────────────────┐
+│   AgentDockClient           │   Typed daemon SDK: HTTP+SSE, bearer auth, protocol-
+│   (packages/client)        │   version compatibility check. No Electron dependency —
+│                             │   usable from any Node process. See docs below.
+└─────────────┬────────────┘
+              │ HTTP + SSE, http://127.0.0.1:<port>, Bearer token, protocol v1
               ▼
 ┌─────────────────────────┐
 │   Local Daemon             │   Fastify HTTP server. Provider discovery, session
@@ -30,8 +37,11 @@
 ```
 
 `packages/shared` sits underneath all of this: it's the one place `ProviderId`, `ProviderStatus`,
-`AgentSession`, `AgentEvent`, and the Zod request schemas are defined, so the daemon and desktop
-app can never drift from what agent-runtime actually produces.
+`ProviderCapabilities`, `AgentSession`, `AgentEvent`/`AgentEventEnvelope`, the protocol version,
+and the Zod request/response schemas are defined, so the daemon, `@agent-dock/client`, and the
+desktop app can never drift from what agent-runtime actually produces. `packages/client` depends
+on `packages/shared` only — never on `agent-runtime` or `apps/daemon` — so the dependency graph
+stays acyclic: `shared ← agent-runtime ← daemon`, and separately `shared ← client ← desktop`.
 
 **The renderer never calls the daemon's HTTP+SSE API directly** — only Electron's main process
 does. This isn't a style preference; a renderer `fetch()` to the daemon cannot actually succeed
@@ -69,18 +79,28 @@ type AgentSession = {
 };
 ```
 
-Sessions live in an in-memory `Map` inside `SessionManager`
-([apps/daemon/src/session-manager.ts](../apps/daemon/src/session-manager.ts)). **This is
-deliberate for the MVP**: persistence adds a real design surface (schema, migrations, what
-happens to a resumed session after a crash) that the spec explicitly defers. Restarting the
-daemon loses every session and its event history. A v0.2 that wants durability should add a
-pluggable `SessionStore` interface behind `SessionManager` rather than reaching for SQLite
-directly — see [Known limitations](#known-limitations--v02-directions).
+A session's `AgentSession` record lives behind a `SessionStore` interface — see
+[SessionStore](#sessionstore) below — while its live process handle and buffered event history are
+kept as separate, non-persistable runtime state inside `SessionManager`
+([apps/daemon/src/session-manager.ts](../apps/daemon/src/session-manager.ts)). **Persistence is
+deliberately out of scope**: it adds a real design surface (schema, migrations, what happens to a
+resumed session after a crash) that both the original MVP spec and the v0.2 backbone milestone
+explicitly deferred. Restarting the daemon loses every session and its event history —
+`resumeProviderSessionId` lets you continue a provider-native thread, but only within the same
+daemon process's lifetime.
 
-## Event protocol
+## Protocol v1
+
+`AGENT_DOCK_PROTOCOL_VERSION` (`packages/shared/src/protocol.ts`, currently `1`) is the daemon's
+public contract version, reported at `GET /health`. It covers two things together: the HTTP+SSE
+API shape and the `AgentEvent`/`AgentEventEnvelope` wire format. `@agent-dock/client` checks it
+automatically before the first real request (see [Client SDK](#client-sdk)) and throws
+`ProtocolMismatchError` on a mismatch — deliberately exact-match comparison, not a semver range or
+a negotiation handshake, since this is a boilerplate shipping one daemon and one bundled client
+together, not a multi-version ecosystem yet.
 
 Every provider adapter normalizes its CLI's native JSONL into the same `AgentEvent` union (defined
-once, in `packages/shared/src/events.ts`):
+once, in `packages/shared/src/events.ts`) — this is the frozen v1 contract:
 
 ```ts
 type AgentEvent =
@@ -98,14 +118,138 @@ type AgentEvent =
   | { type: 'session.cancelled' };
 ```
 
-The desktop UI renders this union with a single `switch (event.type)`
+What actually crosses the daemon → client boundary is `AgentEventEnvelope` — an `AgentEvent` with
+two fields the daemon stamps on once, when it records and broadcasts the event (never something a
+provider adapter produces):
+
+```ts
+type AgentEventEnvelope = AgentEvent & {
+  sequence: number; // per-session, zero-based, monotonically increasing — the SSE `id:` field too
+  timestamp: string; // ISO 8601, when the daemon observed the event (not when the CLI produced it)
+};
+```
+
+**Ordering guarantees**, upheld by `SessionManager` and enforced structurally by
+`runProviderSession()` (see [Process management](#process-management)):
+
+- events within one session are emitted in `sequence` order, and every subscriber — live or
+  replayed via `Last-Event-ID` — sees the same `sequence`/`timestamp` for the same event
+- exactly one of `session.completed` / `session.failed` / `session.cancelled` occurs per session
+- that terminal event is always last — nothing is ever emitted after it
+- `@agent-dock/client`'s `sessions.events()` iterator ends when the terminal event arrives; it does
+  not auto-reconnect (see [Client SDK](#client-sdk) for why a bare retry is sufficient instead)
+
+Runtime validation: `packages/shared/src/schemas.ts` exports `agentEventEnvelopeSchema` (and
+`providerStatusSchema`, `providerCapabilitiesSchema`, `agentSessionSchema`, `healthResponseSchema`)
+— Zod schemas mirroring every public type field-for-field. `@agent-dock/client` validates every SSE
+frame and every JSON response against these before handing it to a caller, so a daemon-side
+contract violation surfaces as a typed `ValidationError`, never a silent shape mismatch.
+
+**What's public/stable**: the `AgentEvent`/`AgentEventEnvelope` union, `ProviderStatus`,
+`ProviderCapabilities`, `AgentSession`, the Zod schemas above, and the four route shapes
+(`/health`, `/providers`, `/sessions`, `/sessions/:id/events`) — all versioned together under
+`AGENT_DOCK_PROTOCOL_VERSION`. **What's internal**: `SessionManager`'s `RuntimeState`, the
+`SessionStore` interface's exact method signatures, and anything under `providers/*/parser.ts` —
+none of it is exported from a package's public entry point, and none of it is what
+`AGENT_DOCK_PROTOCOL_VERSION` promises stability for.
+
+The desktop UI renders `AgentEvent` with a single `switch (event.type)`
 ([apps/desktop/src/components/EventLog.tsx](../apps/desktop/src/components/EventLog.tsx)) — it
 never branches on which provider produced an event. Provider-specific parsing lives entirely in
-`packages/agent-runtime/src/providers/*/parser.ts` and never leaks past that package.
+`packages/agent-runtime/src/providers/*/parser.ts` and never leaks past that package (the provider
+contract suite — see [providers.md](providers.md#provider-contract-tests) — asserts this directly:
+every event a real fixture run produces must have a `type` from the `AgentEvent` union, nothing else).
 
 `thinking.delta` is only ever emitted for reasoning content the CLI itself already puts in its
-public, user-visible output stream (Claude Code's `thinking` content blocks). Neither adapter
-attempts to reconstruct or expose anything the CLI treats as private.
+public, user-visible output stream (Claude Code's `thinking` content blocks; Codex's `reasoning`
+items). Neither adapter attempts to reconstruct or expose anything the CLI treats as private.
+
+## Client SDK
+
+`@agent-dock/client` (`packages/client`) is the typed way anything talks to the daemon —
+Electron's main process, a future Node CLI, a future VS Code extension. It has no Electron or
+browser dependency (Node 18+'s global `fetch` is all it needs), and its `package.json` declares an
+`"exports"` map with only `"."` — there is no `@agent-dock/client/src/internal/...` to reach into,
+by construction, not just convention.
+
+Design decisions worth knowing if you're extending it:
+
+- **The compatibility check is lazy, not in the constructor.** `new AgentDockClient(...)` is
+  synchronous and does no I/O; the first call to `health()` *or any other method* runs the
+  `GET /health` + protocol-version check once, caches the result for the client's lifetime, and
+  re-tries on the next call if it failed (a daemon still starting up shouldn't permanently poison a
+  client instance created a moment too early).
+- **No automatic reconnect.** `sessions.events()` opens exactly one SSE connection and ends when
+  the daemon closes it (the session's terminal event) or the caller's `AbortSignal` fires. If the
+  connection drops for any other reason, the generator throws and the caller decides whether to
+  retry — see [Protocol v1](#protocol-v1) for why a bare retry is already a correct, complete
+  "reconnect": the daemon replays its full stored event history to a fresh subscriber.
+- **Errors are typed by transport-level category, never by sniffing a message string.**
+  `DaemonUnavailableError` (fetch itself failed), `UnauthorizedError` (401), `SessionNotFoundError`
+  / `ProviderUnavailableError` (404 on the corresponding route), `ValidationError` (400, or a
+  response/SSE frame that fails its Zod schema), `ProtocolMismatchError`, and `DaemonError` (any
+  other non-2xx) — seven classes, chosen to match what the v0.2 spec asked to be able to
+  distinguish, not expanded further without a concrete need.
+- **The token never appears in a URL.** `sessions.events()` sends it as an `Authorization` header
+  like every other call, via `fetch` + a manual `ReadableStream` reader (`src/sse.ts`) rather than
+  the browser `EventSource` API, which can't set custom headers at all.
+
+Electron's main process (`apps/desktop/electron/main.ts`) owns exactly one `AgentDockClient`
+instance, constructed once the daemon's discovery file is readable. It's the only thing in the
+desktop app that imports `@agent-dock/client` — the renderer only ever reaches it through the five
+IPC handlers in `main.ts`, and the preload bridge (`electron/preload.ts`) exposes those five
+functions and nothing shaped like a generic request passthrough. See
+[security.md](security.md#renderer-never-talks-to-the-daemon-directly) for the full boundary.
+
+## Provider capabilities
+
+`ProviderStatus.capabilities` (`packages/shared/src/provider.ts`) is what lets a downstream client
+ask "does this provider support X" instead of writing `if (provider.id === 'claude')`:
+
+```ts
+interface ProviderCapabilities {
+  resume: boolean;
+  cancellation: boolean;
+  tools: boolean;
+  usage: boolean;
+  thinking: boolean;
+}
+```
+
+Each adapter declares its own (`providers/claude/capabilities.ts`, `providers/codex/capabilities.ts`)
+based on what that adapter actually implements — never a claim about the underlying model. See
+[providers.md#provider-capabilities](providers.md#provider-capabilities) for exactly which fields
+are true for Claude and Codex and why. The daemon enforces `capabilities.resume` server-side too:
+`POST /sessions` rejects a `resumeProviderSessionId` for a provider whose capability is `false`
+with `400`, rather than silently ignoring it.
+
+## SessionStore
+
+`SessionManager` depends on a `SessionStore` interface (`apps/daemon/src/session-store.ts`), not
+directly on a `Map`:
+
+```ts
+interface SessionStore {
+  create(session: AgentSession): void;
+  get(id: string): AgentSession | undefined;
+  update(id: string, session: AgentSession): void;
+  delete(id: string): void;
+  list(): AgentSession[];
+}
+```
+
+`SessionManager → SessionStore → MemorySessionStore` — `MemorySessionStore` is the only
+implementation and the daemon's default, and it's fully synchronous (so is the interface — see the
+comment in session-store.ts for why an untested `Promise<void>` union isn't added speculatively).
+**Persistence remains explicitly out of scope for this milestone**: swapping in a real store (e.g.
+a future `SQLiteSessionStore`) should only require implementing this interface, not touching
+`SessionManager`'s lifecycle logic — but that interface would likely need to become async at that
+point, which is a deliberate, larger change left for when it's actually needed.
+
+The store owns only `AgentSession` records. A session's live process handle (an `AsyncGenerator`
+plus a `cancel()` closure — not serializable at all) and its buffered event history stay as
+separate runtime-only state inside `SessionManager`, specifically so `SessionStore` never grows
+into an accidental event-history database with its own schema-design questions.
 
 ## Process management
 

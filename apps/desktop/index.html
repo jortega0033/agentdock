@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      connect-src is just 'self': the renderer never talks to the daemon over HTTP/SSE directly
+      (that would require the daemon to answer CORS preflight requests, which it deliberately
+      never does — see docs/security.md). All daemon calls go through the Electron main process
+      via IPC (electron/main.ts + electron/preload.ts), which isn't subject to this CSP at all.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Agent Dock</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

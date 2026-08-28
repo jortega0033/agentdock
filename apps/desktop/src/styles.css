@@ -1,0 +1,162 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+.app {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+h1 {
+  margin-bottom: 0;
+}
+
+.subtitle {
+  color: #888;
+  margin-top: 4px;
+}
+
+section {
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid #3333;
+}
+
+label {
+  display: block;
+  margin-bottom: 12px;
+  font-weight: 600;
+}
+
+input[type='text'],
+textarea,
+select {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  font: inherit;
+  padding: 6px 8px;
+  box-sizing: border-box;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.row input {
+  flex: 1;
+}
+
+button {
+  font: inherit;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.banner {
+  padding: 8px 12px;
+  border-radius: 4px;
+  margin: 8px 0;
+}
+
+.banner--info {
+  background: #3b82f61a;
+}
+
+.banner--error {
+  background: #ef44441a;
+  color: #b91c1c;
+}
+
+.provider-panel {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.provider-card {
+  border: 1px solid #3333;
+  border-radius: 6px;
+  padding: 12px;
+  min-width: 180px;
+}
+
+.provider-card__name {
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.provider-card__error {
+  color: #b91c1c;
+  font-size: 0.85em;
+}
+
+.status--completed {
+  color: #16a34a;
+}
+
+.status--failed {
+  color: #dc2626;
+}
+
+.status--cancelled {
+  color: #6b7280;
+}
+
+.status--running,
+.status--starting {
+  color: #2563eb;
+}
+
+.event-log {
+  border: 1px solid #3333;
+  border-radius: 6px;
+  padding: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85em;
+}
+
+.event-log--empty {
+  color: #888;
+  padding: 8px;
+}
+
+.event-line {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+  border-bottom: 1px solid #3332;
+}
+
+.event-line--error {
+  color: #dc2626;
+}
+
+.event-line--success {
+  color: #16a34a;
+}
+
+.event-line--muted {
+  color: #6b7280;
+}
+
+.event-type {
+  color: #888;
+  min-width: 140px;
+  flex-shrink: 0;
+}

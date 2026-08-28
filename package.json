@@ -1,0 +1,38 @@
+{
+  "name": "agent-dock",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Boilerplate for desktop AI apps that bring their own Claude Code / Codex CLI subscription",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter=./packages/* --filter=./apps/* run build",
+    "dev:daemon": "pnpm --filter @agent-dock/daemon run dev",
+    "dev:desktop": "pnpm --filter @agent-dock/desktop run dev",
+    "daemon": "pnpm --filter @agent-dock/daemon run start",
+    "test": "pnpm -r --filter=./packages/* --filter=./apps/* run test",
+    "typecheck": "pnpm -r run typecheck",
+    "lint": "eslint .",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "@types/node": "^22.10.5",
+    "eslint": "^9.18.0",
+    "globals": "^15.14.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.19.1",
+    "vitest": "^3.2.6"
+  },
+  "packageManager": "pnpm@10.29.2",
+  "pnpm": {
+    "overrides": {
+      "vite": "^6.0.7",
+      "@types/node": "^22.10.5"
+    }
+  }
+}

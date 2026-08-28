@@ -1,0 +1,230 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { AgentEvent } from '@agent-dock/shared';
+import { noopLogger } from '../src/logger.js';
+import { runProviderSession } from '../src/providers/common/run-session.js';
+import { parseClaudeLine } from '../src/providers/claude/parser.js';
+import { parseCodexLine } from '../src/providers/codex/parser.js';
+
+const fixturesDir = fileURLToPath(new URL('./fixtures', import.meta.url));
+
+async function collectEvents(events: AsyncGenerator<AgentEvent, void, void>): Promise<AgentEvent[]> {
+  const out: AgentEvent[] = [];
+  for await (const event of events) out.push(event);
+  return out;
+}
+
+let cwd: string;
+
+beforeEach(() => {
+  cwd = mkdtempSync(join(tmpdir(), 'agent-dock-run-session-'));
+});
+
+afterEach(() => {
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+describe('runProviderSession (spawns real node child processes via fixtures)', () => {
+  it('runs a successful session end to end, tolerating split JSONL chunks', async () => {
+    const handle = runProviderSession(
+      {
+        providerId: 'claude',
+        executableNames: [process.execPath],
+        buildArgs: () => [join(fixturesDir, 'fake-claude-success.mjs')],
+        parseLine: parseClaudeLine,
+      },
+      { sessionId: 'test-session-1', cwd, prompt: 'hello' },
+      noopLogger,
+    );
+
+    const events = await collectEvents(handle.events);
+    expect(events[0]).toEqual({ type: 'session.started', sessionId: 'test-session-1', provider: 'claude' });
+    expect(events).toContainEqual({ type: 'assistant.message', text: 'hello from fixture' });
+    const completed = events.at(-1);
+    expect(completed).toMatchObject({ type: 'session.completed', providerSessionId: 'claude-fixture-session-id' });
+  });
+
+  it('surfaces a non-zero exit as session.failed with stderr in the error message', async () => {
+    const handle = runProviderSession(
+      {
+        providerId: 'claude',
+        executableNames: [process.execPath],
+        buildArgs: () => [join(fixturesDir, 'fake-claude-failure.mjs')],
+        parseLine: parseClaudeLine,
+        describeFailure: (stderr) => stderr.trim(),
+      },
+      { sessionId: 'test-session-2', cwd, prompt: 'hello' },
+      noopLogger,
+    );
+
+    const events = await collectEvents(handle.events);
+    expect(events.some((e) => e.type === 'error')).toBe(true);
+    const failed = events.at(-1);
+    expect(failed).toMatchObject({ type: 'session.failed', message: 'fatal: something went wrong' });
+  });
+
+  it('includes a stderr snippet in the default failure message when the adapter has no describeFailure (both real adapters currently rely on this default)', async () => {
+    const handle = runProviderSession(
+      {
+        providerId: 'claude',
+        executableNames: [process.execPath],
+        buildArgs: () => [join(fixturesDir, 'fake-claude-failure.mjs')],
+        parseLine: parseClaudeLine,
+        // no describeFailure — this is exactly how providers/claude/adapter.ts and
+        // providers/codex/adapter.ts are configured in production.
+      },
+      { sessionId: 'test-session-2b', cwd, prompt: 'hello' },
+      noopLogger,
+    );
+
+    const events = await collectEvents(handle.events);
+    const failed = events.at(-1);
+    expect(failed).toMatchObject({ type: 'session.failed' });
+    expect((failed as { message: string }).message).toContain('fatal: something went wrong');
+    expect((failed as { message: string }).message).toContain('exited with code');
+  });
+
+  it('logs a bounded stderr snippet at warn level on a non-zero exit, even when describeFailure is not provided', async () => {
+    const logger = { debug: () => {}, info: () => {}, warn: vi.fn(), error: () => {} };
+    const handle = runProviderSession(
+      {
+        providerId: 'claude',
+        executableNames: [process.execPath],
+        buildArgs: () => [join(fixturesDir, 'fake-claude-failure.mjs')],
+        parseLine: parseClaudeLine,
+      },
+      { sessionId: 'test-session-2c', cwd, prompt: 'hello' },
+      logger,
+    );
+    await collectEvents(handle.events);
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('process exited non-zero'),
+      expect.objectContaining({ stderrSnippet: expect.stringContaining('fatal: something went wrong') }),
+    );
+  });
+
+  it('normalizes codex fixture output through the same skeleton', async () => {
+    const handle = runProviderSession(
+      {
+        providerId: 'codex',
+        executableNames: [process.execPath],
+        buildArgs: () => [join(fixturesDir, 'fake-codex-success.mjs')],
+        parseLine: parseCodexLine,
+      },
+      { sessionId: 'test-session-3', cwd, prompt: 'hello' },
+      noopLogger,
+    );
+
+    const events = await collectEvents(handle.events);
+    expect(events).toContainEqual({
+      type: 'tool.completed',
+      toolName: 'shell',
+      toolCallId: 'item_0',
+      result: { command: 'echo hi', output: 'hi\n', exitCode: 0 },
+      isError: false,
+    });
+    expect(events.at(-1)).toMatchObject({ type: 'session.completed', providerSessionId: 'codex-fixture-thread-id' });
+  });
+
+  it('rejects a nonexistent working directory without spawning anything', async () => {
+    const handle = runProviderSession(
+      {
+        providerId: 'claude',
+        executableNames: [process.execPath],
+        buildArgs: () => [join(fixturesDir, 'fake-claude-success.mjs')],
+        parseLine: parseClaudeLine,
+      },
+      { sessionId: 'test-session-4', cwd: join(cwd, 'does-not-exist'), prompt: 'hello' },
+      noopLogger,
+    );
+
+    const events = await collectEvents(handle.events);
+    expect(events.some((e) => e.type === 'error' && e.code === 'INVALID_CWD')).toBe(true);
+    expect(events.at(-1)).toEqual({ type: 'session.failed', message: 'invalid working directory' });
+  });
+
+  it('reports PROVIDER_NOT_INSTALLED when the executable cannot be found', async () => {
+    const handle = runProviderSession(
+      {
+        providerId: 'claude',
+        executableNames: ['definitely-not-a-real-cli-xyz-123'],
+        buildArgs: () => [],
+        parseLine: parseClaudeLine,
+      },
+      { sessionId: 'test-session-5', cwd, prompt: 'hello' },
+      noopLogger,
+    );
+
+    const events = await collectEvents(handle.events);
+    expect(events.some((e) => e.type === 'error' && e.code === 'PROVIDER_NOT_INSTALLED')).toBe(true);
+  });
+
+  it('cancels a long-running session and terminates the child process', async () => {
+    const handle = runProviderSession(
+      {
+        providerId: 'codex',
+        executableNames: [process.execPath],
+        buildArgs: () => [join(fixturesDir, 'fake-hang.mjs')],
+        parseLine: parseCodexLine,
+      },
+      { sessionId: 'test-session-6', cwd, prompt: 'hello' },
+      noopLogger,
+    );
+
+    const collected: AgentEvent[] = [];
+    const iterator = handle.events;
+    // Wait for the first event so we know the process has actually started.
+    const first = await iterator.next();
+    if (!first.done) collected.push(first.value);
+
+    await handle.cancel();
+
+    for await (const event of iterator) collected.push(event);
+
+    expect(collected.at(-1)).toEqual({ type: 'session.cancelled' });
+  }, 10_000);
+
+  it('kills a grandchild process on cancellation, not just the direct child (no orphaned tool subprocess)', async () => {
+    const markerPath = join(cwd, 'grandchild-marker.txt');
+
+    const handle = runProviderSession(
+      {
+        providerId: 'codex',
+        executableNames: [process.execPath],
+        buildArgs: () => [join(fixturesDir, 'fake-spawns-grandchild.mjs'), markerPath],
+        parseLine: parseCodexLine,
+      },
+      { sessionId: 'test-session-7', cwd, prompt: 'hello' },
+      noopLogger,
+    );
+
+    const iterator = handle.events;
+
+    // Wait until the grandchild has actually started writing its marker file (real spawn +
+    // process startup latency, not just our own process.started event).
+    const deadline = Date.now() + 5000;
+    while (!existsSync(markerPath) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(existsSync(markerPath)).toBe(true);
+
+    await handle.cancel();
+    // Drain remaining events so the session fully reaches its terminal state.
+    for await (const _event of iterator) {
+      // no-op; just drain
+    }
+
+    // The grandchild writes a fresh timestamp to the marker file every 100ms. If cancellation
+    // only killed the direct child (e.g. `child.kill()` without process-tree/group semantics),
+    // the grandchild would keep running and keep updating this file indefinitely.
+    const valueRightAfterCancel = readFileSync(markerPath, 'utf8');
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    const valueOneSecondLater = readFileSync(markerPath, 'utf8');
+
+    expect(valueOneSecondLater).toBe(valueRightAfterCancel);
+  }, 15_000);
+});

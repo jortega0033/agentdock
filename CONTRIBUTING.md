@@ -63,6 +63,13 @@ config), also run `pnpm package:win` (Windows) and confirm the app still launche
 alone won't catch (see [docs/packaging.md#verifying-a-packaging-sensitive-change](docs/packaging.md#verifying-a-packaging-sensitive-change)
 for real ones this project already hit).
 
+These same commands run automatically in CI on every push and pull request
+(`.github/workflows/ci.yml`) — `pnpm install --frozen-lockfile`, `lint`, `typecheck`, `test`,
+`build`, in that order, on Linux. A separate workflow (`.github/workflows/package-windows.yml`)
+runs `pnpm package:win` on Windows for every push and PR too, and fails if the NSIS installer
+doesn't actually get produced. Neither workflow installs or authenticates a real Claude/Codex CLI
+— see [Testing requirements](#testing-requirements) above for why that's never necessary.
+
 ### Provider contribution checklist
 
 If you're touching a provider adapter (`packages/agent-runtime/src/providers/*`), add or update:

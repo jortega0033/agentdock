@@ -1,0 +1,66 @@
+name: Windows Packaging
+
+# Proves the NSIS packaging pipeline (electron-builder) still produces a real installer — the
+# one thing Core CI's `pnpm build` alone doesn't exercise. See docs/packaging.md for why a
+# packaging-sensitive change needs this and not just a plain build. No signing, no publishing,
+# no release automation — this only verifies packaging still works.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package-win:
+    name: Package Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Package (electron-builder, NSIS)
+        run: pnpm package:win
+
+      # `pnpm package:win` can exit 0 without electron-builder actually having produced an
+      # installer (e.g. a silently-skipped target) — fail the job explicitly rather than trust
+      # the exit code alone.
+      - name: Verify installer was produced
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Path "dist-packages" -Filter "AgentDock-Setup-*.exe" -ErrorAction SilentlyContinue
+          if (-not $installer) {
+            Write-Error "No NSIS installer found matching dist-packages/AgentDock-Setup-*.exe"
+            exit 1
+          }
+          Write-Host "Found installer: $($installer.FullName)"
+
+          $exePath = "dist-packages/win-unpacked/AgentDock.exe"
+          if (-not (Test-Path $exePath)) {
+            Write-Error "Unpacked executable not found at $exePath"
+            exit 1
+          }
+          Write-Host "Found unpacked executable: $exePath"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgentDock-Windows-CI
+          path: dist-packages/AgentDock-Setup-*.exe
+          retention-days: 7
+          if-no-files-found: error

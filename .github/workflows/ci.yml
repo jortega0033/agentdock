@@ -1,0 +1,48 @@
+name: CI
+
+# The everyday quality gate: the same four commands documented in CONTRIBUTING.md's
+# "Before opening a PR" checklist, run automatically on every push and pull request.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Lint, typecheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # No `version:` pinned here on purpose — this reads the pnpm version straight from the
+      # repo's own `packageManager` field (package.json), so the workflow can't silently drift
+      # from what `pnpm install` locally actually uses.
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build

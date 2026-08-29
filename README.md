@@ -112,6 +112,10 @@ pnpm test        # unit + integration tests (no real CLI calls; see docs/provide
 pnpm lint        # ESLint
 ```
 
+These four also run in CI on every push and pull request, plus a separate Windows job that runs
+`pnpm package:win` and checks a real installer came out — see
+[CONTRIBUTING.md](CONTRIBUTING.md#before-opening-a-pr).
+
 ## Production build
 
 `pnpm build` compiles every package in dependency order and produces:

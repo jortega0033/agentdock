@@ -16,7 +16,7 @@ const CLAUDE_INSTALLED: ProviderStatus = {
   id: 'claude',
   name: 'Claude Code',
   installed: true,
-  authenticated: true,
+  authenticated: 'authenticated',
   capabilities: TEST_CAPABILITIES,
 };
 const CODEX_NOT_INSTALLED: ProviderStatus = {
@@ -87,19 +87,10 @@ describe('App', () => {
     expect(runButton).toBeEnabled();
   });
 
-  it('never receives a daemon token or base URL through the bridge', async () => {
-    const bridge = installBridge();
-    render(<App />);
-    await waitFor(() => expect(bridge.getDaemonStatus).toHaveBeenCalled());
-
-    // The whole point of routing daemon calls through main-process IPC is that the renderer's
-    // bridge surface never carries connection secrets. Assert the resolved status/session shapes
-    // contain no such fields, so a future regression (e.g. reintroducing getDaemonInfo) fails here.
-    const status = await bridge.getDaemonStatus();
-    expect(status).not.toHaveProperty('token');
-    expect(status).not.toHaveProperty('baseUrl');
-    expect(Object.keys(bridge)).not.toContain('getDaemonInfo');
-  });
+  // The real "does the bridge leak a token" regression now lives in test/preload.test.ts (AD-07),
+  // exercising the actual electron/preload.ts module against a stubbed ipcRenderer rather than a
+  // mock this test file constructed itself — a mock built by the test can't fail for the reason
+  // its name claims, since the test controls both sides of the assertion.
 
   it('runs a session end to end and reflects completion + streamed events', async () => {
     let sessionEventCallback: ((sessionId: string, event: AgentEvent) => void) | undefined;

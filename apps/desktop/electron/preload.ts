@@ -26,20 +26,33 @@ export interface AgentDockBridge {
   selectDirectory(): Promise<string | null>;
 }
 
-function isDaemonStatus(value: unknown): value is DaemonStatus {
-  if (!value || typeof value !== 'object') return false;
-  const state = (value as { state?: unknown }).state;
-  return state === 'connecting' || state === 'ready' || state === 'unavailable';
+/**
+ * Reconstructs a clean `DaemonStatus` from whatever main sent, rather than validating its shape
+ * and then passing the original object through unchanged (AD-07). The difference matters: the
+ * previous `isDaemonStatus` type guard only checked that `state` was one of the three known
+ * values and then returned the raw object as-is — so an extra field on that object (a token, a
+ * base URL, anything) would have crossed into the renderer completely untouched. Building a fresh
+ * object with only the fields each variant is actually supposed to carry means an accidental
+ * extra property on the main-process side can never reach here, structurally, regardless of what
+ * main.ts's `daemon:get-status`/`daemon:status` handlers ever get changed to send.
+ */
+function toDaemonStatus(value: unknown): DaemonStatus {
+  const state = value && typeof value === 'object' ? (value as { state?: unknown }).state : undefined;
+  if (state === 'ready') return { state: 'ready' };
+  if (state === 'unavailable') {
+    const error = (value as { error?: unknown }).error;
+    return { state: 'unavailable', error: typeof error === 'string' ? error : 'unknown error' };
+  }
+  return { state: 'connecting' };
 }
 
 const api: AgentDockBridge = {
   async getDaemonStatus() {
-    const status: unknown = await ipcRenderer.invoke('daemon:get-status');
-    return isDaemonStatus(status) ? status : { state: 'connecting' };
+    return toDaemonStatus(await ipcRenderer.invoke('daemon:get-status'));
   },
   onDaemonStatus(callback) {
     const listener = (_event: Electron.IpcRendererEvent, status: unknown) => {
-      if (isDaemonStatus(status)) callback(status);
+      callback(toDaemonStatus(status));
     };
     ipcRenderer.on('daemon:status', listener);
     return () => ipcRenderer.removeListener('daemon:status', listener);

@@ -30,7 +30,6 @@
     "typescript": "^5.7.3",
     "vite": "^6.0.7",
     "vite-plugin-electron": "^0.29.0",
-    "vitest": "^3.2.6",
-    "zod": "^3.24.1"
+    "vitest": "^3.2.6"
   }
 }

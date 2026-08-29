@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FAKE_PROVIDER_CAPABILITIES, FakeProvider, ProviderRegistry, noopLogger } from '@agent-dock/agent-runtime';
 import { AGENT_DOCK_PROTOCOL_VERSION } from '@agent-dock/shared';
 import { buildServer } from '../src/server.js';
@@ -14,7 +14,7 @@ function setup(scenario: 'success' | 'failure' | 'hang-until-cancelled' = 'succe
   registry.register(
     new FakeProvider(
       'claude',
-      { id: 'claude', name: 'Claude Code', installed: true, authenticated: true, capabilities: FAKE_PROVIDER_CAPABILITIES },
+      { id: 'claude', name: 'Claude Code', installed: true, authenticated: 'authenticated', capabilities: FAKE_PROVIDER_CAPABILITIES },
       scenario,
     ),
   );
@@ -93,7 +93,7 @@ describe('GET /providers', () => {
     const res = await app.inject({ method: 'GET', url: '/providers', headers: { authorization: `Bearer ${TOKEN}` } });
     const body = res.json();
     expect(body.providers).toEqual([
-      { id: 'claude', name: 'Claude Code', installed: true, authenticated: true, capabilities: FAKE_PROVIDER_CAPABILITIES },
+      { id: 'claude', name: 'Claude Code', installed: true, authenticated: 'authenticated', capabilities: FAKE_PROVIDER_CAPABILITIES },
     ]);
   });
 
@@ -205,7 +205,7 @@ describe('POST /sessions', () => {
       id: 'claude',
       name: 'Claude Code',
       installed: true,
-      authenticated: true,
+      authenticated: 'authenticated',
       capabilities: resumableCapabilities,
     });
     registry.register(provider);
@@ -277,6 +277,78 @@ describe('SSE events + cancellation', () => {
     });
   });
 
+  it('Last-Event-ID resumes the stream from the next sequence, not a full replay (protocol v1 documented behavior)', async () => {
+    const { app } = setup('success');
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/sessions',
+      headers: { authorization: `Bearer ${TOKEN}` },
+      payload: { provider: 'claude', cwd, prompt: 'hello' },
+    });
+    const sessionId = createRes.json().id;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    function parseFrames(payload: string) {
+      return payload
+        .split('\n\n')
+        .filter((frame) => frame.startsWith('id: '))
+        .map((frame) => {
+          const idLine = frame.split('\n').find((l) => l.startsWith('id: '));
+          const dataLine = frame.split('\n').find((l) => l.startsWith('data: '));
+          return { sequence: Number(idLine?.slice('id: '.length)), event: JSON.parse(dataLine?.slice('data: '.length) ?? '{}') };
+        });
+    }
+
+    // A full, fresh subscription — this is what "the client saw sequence N" is based on.
+    const fullRes = await app.inject({
+      method: 'GET',
+      url: `/sessions/${sessionId}/events`,
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    const fullFrames = parseFrames(fullRes.payload);
+    expect(fullFrames.length).toBeGreaterThan(2); // the fake "success" scenario emits several events
+
+    const n = fullFrames[0]!.sequence; // pretend the client got disconnected right after the first event
+
+    // Reconnect with Last-Event-ID: n — must receive n+1 onward, not the full replay again.
+    const resumedRes = await app.inject({
+      method: 'GET',
+      url: `/sessions/${sessionId}/events`,
+      headers: { authorization: `Bearer ${TOKEN}`, 'last-event-id': String(n) },
+    });
+    const resumedFrames = parseFrames(resumedRes.payload);
+
+    expect(resumedFrames.map((f) => f.sequence)).toEqual(fullFrames.slice(1).map((f) => f.sequence));
+    expect(resumedFrames.every((f) => f.sequence > n)).toBe(true);
+    expect(resumedFrames.map((f) => f.event.type)).toEqual(fullFrames.slice(1).map((f) => f.event.type));
+  });
+
+  it('ends the SSE response cleanly instead of hanging forever if the session is removed between the existence check and subscribe() (AD-11 race)', async () => {
+    const { app, sessionManager } = setup('success');
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/sessions',
+      headers: { authorization: `Bearer ${TOKEN}` },
+      payload: { provider: 'claude', cwd, prompt: 'hello' },
+    });
+    const sessionId = createRes.json().id;
+
+    // Simulates losing the race: the existence check (sessionManager.get) inside the route
+    // handler passes, but by the time subscribe() runs, the runtime state is already gone.
+    const subscribeSpy = vi.spyOn(sessionManager, 'subscribe').mockReturnValueOnce(undefined);
+
+    const res = await app.inject({
+      method: 'GET',
+      url: `/sessions/${sessionId}/events`,
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+
+    // The key assertion is that inject() resolved at all (didn't time out) with a real ended
+    // response — before the fix, this exact scenario left an already-200'd stream open forever.
+    expect(res.statusCode).toBe(200);
+    subscribeSpy.mockRestore();
+  });
+
   it('cancels a running session', async () => {
     const { app, sessionManager } = setup('hang-until-cancelled');
     const createRes = await app.inject({
@@ -307,6 +379,53 @@ describe('SSE events + cancellation', () => {
       headers: { authorization: `Bearer ${TOKEN}` },
     });
     expect(res.statusCode).toBe(404);
+  });
+
+  it('404s cancelling a session that already completed, rather than reporting a misleading success (AD-11)', async () => {
+    const { app } = setup('success');
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/sessions',
+      headers: { authorization: `Bearer ${TOKEN}` },
+      payload: { provider: 'claude', cwd, prompt: 'hello' },
+    });
+    const sessionId = createRes.json().id;
+    await new Promise((resolve) => setTimeout(resolve, 30)); // let the fake "success" scenario finish
+
+    const cancelRes = await app.inject({
+      method: 'POST',
+      url: `/sessions/${sessionId}/cancel`,
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(cancelRes.statusCode).toBe(404);
+  });
+
+  it('POST /sessions/cancel-all cancels every in-flight session and leaves completed ones alone', async () => {
+    const { app, sessionManager } = setup('hang-until-cancelled');
+    const createRes = await app.inject({
+      method: 'POST',
+      url: '/sessions',
+      headers: { authorization: `Bearer ${TOKEN}` },
+      payload: { provider: 'claude', cwd, prompt: 'hello' },
+    });
+    const sessionId = createRes.json().id;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/sessions/cancel-all',
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.statusCode).toBe(202);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(sessionManager.get(sessionId)?.status).toBe('cancelled');
+  });
+
+  it('POST /sessions/cancel-all requires a valid token like every other privileged route', async () => {
+    const { app } = setup();
+    const res = await app.inject({ method: 'POST', url: '/sessions/cancel-all' });
+    expect(res.statusCode).toBe(401);
   });
 });
 
@@ -353,6 +472,42 @@ describe('adversarial input handling', () => {
     const { app } = setup();
     const res = await app.inject({ method: 'GET', url: '/providers', headers: { authorization: `Bearer ${TOKEN}` } });
     expect(res.statusCode).toBe(200);
+  });
+
+  it('rejects an https Origin even with a valid token (AD-04)', async () => {
+    const { app } = setup();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/providers',
+      headers: { authorization: `Bearer ${TOKEN}`, origin: 'https://evil.example' },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('rejects a chrome-extension:// Origin even with a valid token — the exact gap the old http(s)-only check missed (AD-04)', async () => {
+    const { app } = setup();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/providers',
+      headers: { authorization: `Bearer ${TOKEN}`, origin: 'chrome-extension://abcdefghijklmnop' },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('rejects a malformed/unrecognized-scheme Origin rather than letting it fall through unrecognized (AD-04)', async () => {
+    const { app } = setup();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/providers',
+      headers: { authorization: `Bearer ${TOKEN}`, origin: 'moz-extension://whatever' },
+    });
+    expect(res.statusCode).toBe(403);
+  });
+
+  it('rejects a missing token independently of Origin — omitting Origin does not bypass auth', async () => {
+    const { app } = setup();
+    const res = await app.inject({ method: 'GET', url: '/providers' });
+    expect(res.statusCode).toBe(401);
   });
 
   it('rejects a simple cross-origin POST with no auth header even with a browser-safelisted Content-Type (the no-preflight CSRF vector)', async () => {

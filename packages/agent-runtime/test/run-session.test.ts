@@ -188,6 +188,76 @@ describe('runProviderSession (spawns real node child processes via fixtures)', (
     expect(collected.at(-1)).toEqual({ type: 'session.cancelled' });
   }, 10_000);
 
+  describe('prompt via stdin (AD-05)', () => {
+    async function runStdinEcho(prompt: string) {
+      const handle = runProviderSession(
+        {
+          providerId: 'claude',
+          executableNames: [process.execPath],
+          buildArgs: () => [join(fixturesDir, 'fake-stdin-echo.mjs')],
+          parseLine: parseClaudeLine,
+          promptViaStdin: true,
+        },
+        { sessionId: 'stdin-echo-session', cwd, prompt },
+        noopLogger,
+      );
+      const events = await collectEvents(handle.events);
+      const message = events.find((e) => e.type === 'assistant.message') as { text: string } | undefined;
+      return { events, receivedText: message?.text };
+    }
+
+    it('delivers the prompt to the child over stdin, not argv, and it round-trips exactly', async () => {
+      const { receivedText } = await runStdinEcho('a perfectly ordinary prompt');
+      expect(receivedText).toBe('a perfectly ordinary prompt');
+    });
+
+    it('preserves spaces, quotes, and embedded newlines exactly', async () => {
+      const prompt = 'line one\nline "two" with quotes\n  leading spaces and trailing   ';
+      const { receivedText } = await runStdinEcho(prompt);
+      expect(receivedText).toBe(prompt);
+    });
+
+    it('preserves multi-byte Unicode exactly', async () => {
+      const prompt = 'emoji 🎉🚀, CJK 日本語テスト, accents café résumé';
+      const { receivedText } = await runStdinEcho(prompt);
+      expect(receivedText).toBe(prompt);
+    });
+
+    it('handles a prompt far larger than any argv limit (well past Windows argv ~32,767 chars)', async () => {
+      const prompt = 'y'.repeat(200_000); // the shared schema's own max
+      const { receivedText } = await runStdinEcho(prompt);
+      expect(receivedText).toBe(prompt);
+      expect(receivedText?.length).toBe(200_000);
+    }, 10_000);
+
+    it('still reaches session.completed normally with stdin transport', async () => {
+      const { events } = await runStdinEcho('hi');
+      expect(events.at(-1)).toMatchObject({ type: 'session.completed' });
+    });
+
+    it('cancellation still works when the prompt is delivered via stdin', async () => {
+      const handle = runProviderSession(
+        {
+          providerId: 'claude',
+          executableNames: [process.execPath],
+          buildArgs: () => [join(fixturesDir, 'fake-hang.mjs')],
+          parseLine: parseClaudeLine,
+          promptViaStdin: true,
+        },
+        { sessionId: 'stdin-cancel-session', cwd, prompt: 'hi' },
+        noopLogger,
+      );
+      const iterator = handle.events;
+      const first = await iterator.next();
+      const collected: AgentEvent[] = first.done ? [] : [first.value];
+
+      await handle.cancel();
+      for await (const event of iterator) collected.push(event);
+
+      expect(collected.at(-1)).toEqual({ type: 'session.cancelled' });
+    }, 10_000);
+  });
+
   it('kills a grandchild process on cancellation, not just the direct child (no orphaned tool subprocess)', async () => {
     const markerPath = join(cwd, 'grandchild-marker.txt');
 

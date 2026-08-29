@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createSessionRequestSchema, sessionIdParamSchema } from '@agent-dock/shared';
 import { AgentDockClient } from '@agent-dock/client';
 import { resolveDaemonEntry } from './resolve-daemon-entry.js';
@@ -34,8 +34,16 @@ let mainWindow: BrowserWindow | undefined;
 let activeSessionId: string | undefined;
 let activeStreamAbort: AbortController | undefined;
 
+// Namespaces the daemon rendezvous per application (AD-02) — see apps/daemon/src/discovery-file.ts
+// for the daemon side of this. A fork shipping its own product under a different name should set
+// this to its own id (env var, or hardcode a different literal here) so it doesn't collide with
+// another AgentDock-based app's daemon on the same machine; the reference app just uses the
+// default. The daemon validates/sanitizes this value itself and refuses to start on an invalid
+// one, so it isn't duplicated here.
+const APP_ID = process.env.AGENT_DOCK_APP_ID?.trim() || 'agent-dock';
+
 function discoveryFilePath(): string {
-  return join(tmpdir(), 'agent-dock', 'daemon.json');
+  return join(tmpdir(), 'agent-dock', `${APP_ID}.json`);
 }
 
 function sendStatus(status: DaemonStatus): void {
@@ -53,11 +61,7 @@ function spawnDaemon(): void {
 
   daemonChild = spawn(process.execPath, args, {
     cwd,
-    // No AGENT_DOCK_ALLOWED_ORIGINS is set here on purpose: the renderer never calls the daemon
-    // directly (it goes through this process's AgentDockClient instance instead), so the daemon
-    // needs no browser origin allowlisted at all, in dev or in production — closing off the
-    // CORS-preflight surface entirely rather than trying to enumerate which origins to trust.
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', AGENT_DOCK_APP_ID: APP_ID },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
@@ -132,14 +136,42 @@ function forwardSessionEvents(sessionId: string): void {
 
 async function killDaemon(): Promise<void> {
   activeStreamAbort?.abort();
-  if (activeSessionId && client) {
+  if (client) {
     try {
-      await client.sessions.cancel(activeSessionId);
+      // Cancels every in-flight session over HTTP, not just `activeSessionId` — on Windows,
+      // daemonChild.kill() below maps to TerminateProcess, which never gives the daemon's own
+      // SIGTERM handler (and its cancelAll()) a chance to run, so this HTTP call is the only
+      // reliable way to stop every session's CLI process on that platform. Tracking a single
+      // `activeSessionId` was previously the only thing cancelled here, which orphaned every
+      // other session's process for any fork that runs more than one at a time (AD-12).
+      await client.sessions.cancelAll();
     } catch {
       // best effort; the daemon's own shutdown handler is the fallback (SIGTERM on POSIX)
     }
   }
   daemonChild?.kill();
+}
+
+const packagedEntryUrl = pathToFileURL(join(__dirname, '..', 'dist', 'index.html')).href;
+
+/**
+ * Scopes `will-navigate` to exactly the app's own content instead of "any http(s) origin that
+ * happens to start with the dev-server URL" or "any file:// path at all" — both of the previous
+ * checks were prefix-based (`url.startsWith(...)`), which a URL like
+ * `http://localhost:5173.evil.example` passes against an allowed `http://localhost:5173`. Real
+ * origin comparison (dev) and exact-path comparison against the one file this app ever loads
+ * (packaged) close that gap.
+ */
+function isAllowedNavigationTarget(url: string): boolean {
+  const devServerUrl = process.env.VITE_DEV_SERVER_URL;
+  if (devServerUrl) {
+    try {
+      return new URL(url).origin === new URL(devServerUrl).origin;
+    } catch {
+      return false;
+    }
+  }
+  return url === packagedEntryUrl;
 }
 
 function createWindow(): void {
@@ -162,11 +194,17 @@ function createWindow(): void {
     return { action: 'deny' };
   });
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    const allowed = process.env.VITE_DEV_SERVER_URL;
-    if (allowed && url.startsWith(allowed)) return;
-    if (url.startsWith('file://')) return;
+    if (isAllowedNavigationTarget(url)) return;
     event.preventDefault();
     void shell.openExternal(url);
+  });
+
+  // Deny every permission request by default — nothing in this UI currently asks for camera,
+  // microphone, geolocation, notifications, etc, so there's no legitimate request to allow.
+  // Electron's own per-permission/per-platform defaults are inconsistent; this makes the policy
+  // explicit and uniform instead of relying on them.
+  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => {
+    callback(false);
   });
 
   if (process.env.VITE_DEV_SERVER_URL) {

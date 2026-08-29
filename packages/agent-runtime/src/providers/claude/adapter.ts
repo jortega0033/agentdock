@@ -28,6 +28,7 @@ export class ClaudeProvider implements AgentProvider {
         executableNames: ['claude'],
         buildArgs: buildClaudeArgs,
         parseLine: parseClaudeLine,
+        promptViaStdin: true,
       },
       options,
       this.logger,

@@ -11,8 +11,6 @@ export interface BuildServerOptions {
   sessionManager: SessionManager;
   token: string;
   logger: Logger;
-  /** http(s) origins allowed to call privileged endpoints, e.g. a Vite dev server during development. */
-  allowedDevOrigins?: string[];
 }
 
 /**
@@ -29,20 +27,21 @@ export interface BuildServerOptions {
 export function buildServer(opts: BuildServerOptions): FastifyInstance {
   const app = Fastify({ logger: false, trustProxy: false });
   const startedAt = Date.now();
-  const allowedDevOrigins = new Set(opts.allowedDevOrigins ?? []);
 
   app.addHook('onRequest', async (req, reply) => {
-    const origin = req.headers.origin;
-    // "null" is what browsers send for a sandboxed iframe, a data: URI, or some file:// contexts
-    // — reject it explicitly rather than letting it fall through to "no Origin header" handling.
-    // (This isn't the only thing standing between an attacker and the daemon — see SECURITY.md
-    // for why the bearer token and the total absence of CORS response headers are what actually
-    // stop a browser from completing a privileged request — but a null-origin request is still a
-    // browser-controlled context we have no reason to treat as trusted, so we say so explicitly.)
-    const isBrowserOrigin = typeof origin === 'string' && (origin === 'null' || /^https?:\/\//i.test(origin));
-    if (isBrowserOrigin && !allowedDevOrigins.has(origin)) {
-      opts.logger.warn('rejected request with disallowed origin', { origin, url: req.url });
-      reply.code(403).send({ error: 'origin not allowed' });
+    // AD-04: any Origin header at all is treated as browser-authored and rejected outright — a
+    // non-browser client (curl, Electron main's own fetch, another local process) never sends
+    // one. The previous version only recognized the literal `null` and `http(s)://` schemes, so a
+    // `chrome-extension://` origin (or any other future scheme) fell straight through
+    // unrecognized. There is no legitimate browser-originated caller of this API today — the
+    // renderer talks to the daemon only through Electron main, never directly (see SECURITY.md)
+    // — so there's nothing to allowlist. An `AGENT_DOCK_ALLOWED_ORIGINS` escape hatch used to
+    // exist for a hypothetical dev-server case, but nothing ever paired it with a real CORS
+    // response header, so an allowlisted origin still couldn't complete a request; it was dead
+    // configuration and has been removed rather than fixed, since nothing currently needs it.
+    if (req.headers.origin !== undefined) {
+      opts.logger.warn('rejected request carrying an Origin header', { origin: req.headers.origin, url: req.url });
+      reply.code(403).send({ error: 'browser-originated requests are not allowed' });
       return reply;
     }
   });

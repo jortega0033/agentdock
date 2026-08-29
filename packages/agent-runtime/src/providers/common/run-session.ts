@@ -18,6 +18,13 @@ export interface ProviderRunConfig {
   buildArgs(options: StartSessionOptions): string[];
   parseLine(raw: unknown, logger: Logger): ParsedLine;
   describeFailure?(stderr: string, code: number | null, signal: NodeJS.Signals | null): string;
+  /**
+   * When true, the prompt is written to the child's stdin instead of appearing anywhere in argv
+   * (AD-05) — set by an adapter whose CLI supports reading its prompt from stdin. Adapters that
+   * don't set this keep the previous behavior (`buildArgs` embeds the prompt itself; stdin is
+   * closed immediately with nothing written).
+   */
+  promptViaStdin?: boolean;
 }
 
 /**
@@ -35,43 +42,67 @@ export function runProviderSession(
   let spawned: ReturnType<typeof spawnProcess> | undefined;
   let cancelled = false;
 
+  /**
+   * Enqueues an EVENT_OVERFLOW error followed by session.failed, bypassing the channel's normal
+   * cap (see AsyncChannel.closeWith) — the fix for AD-10: an overflowed channel must still
+   * deliver exactly one terminal event, not silently strand every subscriber in "running".
+   */
+  function closeWithOverflow(): void {
+    channel.closeWith([
+      { type: 'error', code: 'EVENT_OVERFLOW', message: 'session event buffer overflowed', recoverable: false },
+      { type: 'session.failed', message: 'session event buffer overflowed' },
+    ]);
+  }
+
   async function run() {
-    channel.push({ type: 'session.started', sessionId: options.sessionId, provider: config.providerId });
+    if (!channel.push({ type: 'session.started', sessionId: options.sessionId, provider: config.providerId })) {
+      closeWithOverflow();
+      return;
+    }
 
     if (!existsSync(options.cwd) || !statSync(options.cwd).isDirectory()) {
-      channel.push({
-        type: 'error',
-        code: 'INVALID_CWD',
-        message: `working directory does not exist: ${options.cwd}`,
-        recoverable: false,
-      });
-      channel.push({ type: 'session.failed', message: 'invalid working directory' });
-      channel.close();
+      channel.closeWith([
+        {
+          type: 'error',
+          code: 'INVALID_CWD',
+          message: `working directory does not exist: ${options.cwd}`,
+          recoverable: false,
+        },
+        { type: 'session.failed', message: 'invalid working directory' },
+      ]);
       return;
     }
 
     const exePath = await findExecutable(config.executableNames);
     if (!exePath) {
-      channel.push({
-        type: 'error',
-        code: 'PROVIDER_NOT_INSTALLED',
-        message: `${config.executableNames[0]} executable not found on this machine`,
-        recoverable: false,
-      });
-      channel.push({ type: 'session.failed', message: 'provider executable not found' });
-      channel.close();
+      channel.closeWith([
+        {
+          type: 'error',
+          code: 'PROVIDER_NOT_INSTALLED',
+          message: `${config.executableNames[0]} executable not found on this machine`,
+          recoverable: false,
+        },
+        { type: 'session.failed', message: 'provider executable not found' },
+      ]);
       return;
     }
 
     if (cancelled) {
-      channel.push({ type: 'session.cancelled' });
-      channel.close();
+      channel.closeWith([{ type: 'session.cancelled' }]);
       return;
     }
 
     const args = config.buildArgs(options);
     logger.info(`${config.providerId}: starting session`, { sessionId: options.sessionId });
     spawned = spawnProcess(exePath, args, { cwd: options.cwd, env: options.env });
+    // AD-05: when the adapter supports it, the prompt travels over stdin rather than argv — see
+    // ProviderRunConfig.promptViaStdin and build-args.ts for why. `.write()` followed immediately
+    // by `.end()` is safe and standard: Node buffers and flushes the write before actually
+    // closing the stream, no explicit wait needed here, and preserves the string exactly
+    // (spaces, quotes, newlines, unicode) since it's a plain UTF-8 write, not shell-parsed.
+    if (config.promptViaStdin) {
+      spawned.child.stdin.write(options.prompt, 'utf8');
+    }
     spawned.child.stdin.end();
 
     let providerSessionId: string | undefined;
@@ -84,6 +115,7 @@ export function runProviderSession(
       }
     });
 
+    let overflowed = false;
     try {
       for await (const line of readLines(spawned.child.stdout)) {
         let raw: unknown;
@@ -95,7 +127,13 @@ export function runProviderSession(
         }
         const parsed = config.parseLine(raw, logger);
         if (parsed.providerSessionId) providerSessionId = parsed.providerSessionId;
-        for (const event of parsed.events) channel.push(event);
+        for (const event of parsed.events) {
+          if (!channel.push(event)) {
+            overflowed = true;
+            break;
+          }
+        }
+        if (overflowed) break;
       }
     } catch (err) {
       channel.push({
@@ -106,13 +144,20 @@ export function runProviderSession(
       });
     }
 
+    if (overflowed) {
+      spawned.kill();
+      await spawned.exit;
+      closeWithOverflow();
+      return;
+    }
+
     const { code, signal } = await spawned.exit;
     logger.info(`${config.providerId}: process exited`, { sessionId: options.sessionId, code, signal });
 
     if (cancelled) {
-      channel.push({ type: 'session.cancelled' });
+      channel.closeWith([{ type: 'session.cancelled' }]);
     } else if (code === 0) {
-      channel.push({ type: 'session.completed', providerSessionId });
+      channel.closeWith([{ type: 'session.completed', providerSessionId }]);
     } else {
       const stderrText = stderrChunks.join('');
       if (stderrText.trim()) {
@@ -128,17 +173,19 @@ export function runProviderSession(
         });
       }
       const message = config.describeFailure?.(stderrText, code, signal) ?? defaultFailureMessage(config.providerId, stderrText, code, signal);
-      channel.push({ type: 'error', code: 'PROCESS_EXIT', message, recoverable: false });
-      channel.push({ type: 'session.failed', message });
+      channel.closeWith([
+        { type: 'error', code: 'PROCESS_EXIT', message, recoverable: false },
+        { type: 'session.failed', message },
+      ]);
     }
-    channel.close();
   }
 
   run().catch((err) => {
     logger.error(`${config.providerId}: adapter crashed`, { message: (err as Error).message });
-    channel.push({ type: 'error', code: 'ADAPTER_CRASH', message: 'internal adapter error', recoverable: false });
-    channel.push({ type: 'session.failed', message: 'internal adapter error' });
-    channel.close();
+    channel.closeWith([
+      { type: 'error', code: 'ADAPTER_CRASH', message: 'internal adapter error', recoverable: false },
+      { type: 'session.failed', message: 'internal adapter error' },
+    ]);
   });
 
   return {

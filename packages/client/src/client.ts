@@ -72,6 +72,10 @@ export class AgentDockClient {
       this.streamSessionEvents(id, options),
     cancel: (id: string): Promise<void> => this.cancelSession(id),
     delete: (id: string): Promise<void> => this.deleteSession(id),
+    /** Cancels every in-flight session on the daemon. Used by the desktop shutdown path so
+     * quitting the app doesn't orphan any session besides the one it happens to be tracking —
+     * see electron/main.ts#killDaemon. */
+    cancelAll: (): Promise<void> => this.cancelAllSessions(),
   };
 
   constructor(options: AgentDockClientOptions) {
@@ -228,6 +232,10 @@ export class AgentDockClient {
       { method: 'DELETE' },
       { notFound: () => new SessionNotFoundError(id) },
     );
+  }
+
+  private async cancelAllSessions(): Promise<void> {
+    await this.request<unknown>('/sessions/cancel-all', { method: 'POST' });
   }
 }
 

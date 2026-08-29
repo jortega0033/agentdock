@@ -1,10 +1,28 @@
-import type { ProviderStatus } from '@agent-dock/shared';
+import type { AuthStatus, ProviderStatus } from '@agent-dock/shared';
 import { execCapture } from '../../process/exec-capture.js';
 import { findExecutable } from '../../detect-executable.js';
 import type { Logger } from '../../logger.js';
 import { CLAUDE_CAPABILITIES } from './capabilities.js';
 
 const EXECUTABLE_NAMES = ['claude'];
+
+/**
+ * Pure parsing of `claude auth status --json`'s stdout (AD-16) — split out from `detectClaude` so
+ * it's testable with captured output strings, no CLI or account needed. Never optimistically
+ * returns `'authenticated'`: any shape other than a genuine `{ "loggedIn": boolean }` (malformed
+ * JSON, a missing/non-boolean field, empty output) falls through to `'unknown'`.
+ */
+export function parseClaudeAuthStatus(rawStdout: string): AuthStatus {
+  try {
+    const parsed = JSON.parse(rawStdout) as { loggedIn?: unknown };
+    if (typeof parsed.loggedIn === 'boolean') {
+      return parsed.loggedIn ? 'authenticated' : 'unauthenticated';
+    }
+  } catch {
+    // fall through to unknown
+  }
+  return 'unknown';
+}
 
 /**
  * Detects the Claude Code CLI and, separately, whether it's authenticated. These are two
@@ -39,20 +57,10 @@ export async function detectClaude(logger: Logger): Promise<ProviderStatus> {
   if (authResult.timedOut) {
     return { ...base, installed: true, authenticated: 'unknown', executablePath, version, error: 'auth status check timed out' };
   }
-  try {
-    const parsed = JSON.parse(authResult.stdout) as { loggedIn?: unknown };
-    if (typeof parsed.loggedIn === 'boolean') {
-      return { ...base, installed: true, authenticated: parsed.loggedIn, executablePath, version };
-    }
-  } catch {
-    // fall through to unknown
+
+  const authenticated = parseClaudeAuthStatus(authResult.stdout);
+  if (authenticated === 'unknown') {
+    return { ...base, installed: true, authenticated, executablePath, version, error: 'could not parse claude auth status output' };
   }
-  return {
-    ...base,
-    installed: true,
-    authenticated: 'unknown',
-    executablePath,
-    version,
-    error: 'could not parse claude auth status output',
-  };
+  return { ...base, installed: true, authenticated, executablePath, version };
 }

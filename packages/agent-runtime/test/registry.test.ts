@@ -25,7 +25,7 @@ describe('ProviderRegistry', () => {
         id: 'claude',
         name: 'Claude',
         installed: true,
-        authenticated: true,
+        authenticated: 'authenticated',
         capabilities: FAKE_PROVIDER_CAPABILITIES,
       }),
     );

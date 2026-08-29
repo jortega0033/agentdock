@@ -34,7 +34,7 @@ export class FakeProvider implements AgentProvider {
       id,
       name: 'Fake Provider',
       installed: true,
-      authenticated: true,
+      authenticated: 'authenticated',
       capabilities: FAKE_PROVIDER_CAPABILITIES,
     },
     private readonly scenario: FakeScenario = 'success',

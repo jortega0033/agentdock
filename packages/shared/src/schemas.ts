@@ -3,19 +3,27 @@ import { PROVIDER_IDS } from './provider.js';
 
 export const providerIdSchema = z.enum(PROVIDER_IDS);
 
-export const providerCapabilitiesSchema = z.object({
-  resume: z.boolean(),
-  cancellation: z.boolean(),
-  tools: z.boolean(),
-  usage: z.boolean(),
-  thinking: z.boolean(),
-});
+// AD-15: every key is optional and unknown keys pass through rather than being rejected or
+// silently stripped — "absent means unsupported" is a documented, valid state (see
+// ProviderCapabilities), not a validation failure. This is what makes adding a 6th capability
+// additive: a client built against a newer @agent-dock/shared can validate an older daemon's
+// response (missing the new key) without error, and an older client validating a newer daemon's
+// response keeps whatever future keys it doesn't understand rather than losing them.
+export const providerCapabilitiesSchema = z
+  .object({
+    resume: z.boolean().optional(),
+    cancellation: z.boolean().optional(),
+    tools: z.boolean().optional(),
+    usage: z.boolean().optional(),
+    thinking: z.boolean().optional(),
+  })
+  .catchall(z.boolean());
 
 export const providerStatusSchema = z.object({
   id: providerIdSchema,
   name: z.string(),
   installed: z.boolean(),
-  authenticated: z.union([z.boolean(), z.literal('unknown')]),
+  authenticated: z.enum(['authenticated', 'unauthenticated', 'unknown']),
   capabilities: providerCapabilitiesSchema,
   executablePath: z.string().optional(),
   version: z.string().optional(),
@@ -73,10 +81,6 @@ export const agentEventEnvelopeSchema = z.discriminatedUnion('type', [
     type: z.literal('status'),
     status: z.string(),
     detail: z.string().optional(),
-  }),
-  agentEventBaseSchema.extend({
-    type: z.literal('assistant.delta'),
-    text: z.string(),
   }),
   agentEventBaseSchema.extend({
     type: z.literal('assistant.message'),

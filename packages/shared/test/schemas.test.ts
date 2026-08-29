@@ -63,14 +63,43 @@ describe('createSessionRequestSchema', () => {
 });
 
 describe('providerCapabilitiesSchema', () => {
-  it('requires every capability to be a boolean', () => {
+  it('accepts every known capability explicitly set to a boolean', () => {
     const valid = { resume: true, cancellation: true, tools: false, usage: true, thinking: false };
     expect(providerCapabilitiesSchema.safeParse(valid).success).toBe(true);
   });
 
-  it('rejects a missing capability field', () => {
+  it('rejects a non-boolean value for a known capability', () => {
+    const invalid = { resume: 'yes', cancellation: true, tools: false, usage: true, thinking: false };
+    expect(providerCapabilitiesSchema.safeParse(invalid).success).toBe(false);
+  });
+
+  // AD-15: every known key is optional — absent means unsupported, the same as `false` — so a
+  // client built against a newer @agent-dock/shared can still validate an older daemon's
+  // response that predates a since-added capability, without that capability being present.
+  it('accepts a status with a capability key omitted entirely', () => {
     const incomplete = { resume: true, cancellation: true, tools: false, usage: true };
-    expect(providerCapabilitiesSchema.safeParse(incomplete).success).toBe(false);
+    const result = providerCapabilitiesSchema.safeParse(incomplete);
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.thinking).toBeUndefined();
+  });
+
+  it('accepts an entirely empty capabilities object', () => {
+    expect(providerCapabilitiesSchema.safeParse({}).success).toBe(true);
+  });
+
+  // AD-15: unknown keys survive validation (via `.catchall`) rather than being silently stripped
+  // or rejected, so a client one version behind a daemon that's grown a 6th capability still gets
+  // to see it, instead of losing the information.
+  it('preserves an unknown future capability key rather than stripping or rejecting it', () => {
+    const withFutureCapability = { resume: true, modelSelection: true };
+    const result = providerCapabilitiesSchema.safeParse(withFutureCapability);
+    expect(result.success).toBe(true);
+    if (result.success) expect((result.data as Record<string, unknown>).modelSelection).toBe(true);
+  });
+
+  it('still rejects a non-boolean value for an unknown future capability key', () => {
+    const invalid = { modelSelection: 'sonnet' };
+    expect(providerCapabilitiesSchema.safeParse(invalid).success).toBe(false);
   });
 });
 
@@ -80,7 +109,7 @@ describe('providerStatusSchema', () => {
       id: 'claude',
       name: 'Claude Code',
       installed: true,
-      authenticated: true,
+      authenticated: 'authenticated',
       capabilities: { resume: true, cancellation: true, tools: true, usage: true, thinking: true },
       version: '1.0.0',
     };
@@ -110,7 +139,7 @@ describe('providerStatusSchema', () => {
   });
 
   it('rejects a status missing capabilities', () => {
-    const status = { id: 'claude', name: 'Claude Code', installed: true, authenticated: true };
+    const status = { id: 'claude', name: 'Claude Code', installed: true, authenticated: 'authenticated' };
     expect(providerStatusSchema.safeParse(status).success).toBe(false);
   });
 });
@@ -126,7 +155,6 @@ describe('agentEventEnvelopeSchema', () => {
     const events = [
       { ...base, type: 'session.started', sessionId: 's1', provider: 'claude' },
       { ...base, type: 'status', status: 'running' },
-      { ...base, type: 'assistant.delta', text: 'hi' },
       { ...base, type: 'assistant.message', text: 'hi' },
       { ...base, type: 'thinking.delta', text: 'pondering' },
       { ...base, type: 'tool.started', toolName: 'Bash' },
@@ -145,6 +173,13 @@ describe('agentEventEnvelopeSchema', () => {
 
   it('rejects an unrecognized event type', () => {
     const event = { type: 'provider.raw_jsonl', sequence: 0, timestamp: '2026-01-01T00:00:00.000Z' };
+    expect(agentEventEnvelopeSchema.safeParse(event).success).toBe(false);
+  });
+
+  // AD-14: assistant.delta was removed from protocol v1 before any adapter ever emitted it — see
+  // packages/shared/src/events.ts. This pins the removal so it can't silently come back.
+  it('rejects assistant.delta — removed from protocol v1 (AD-14), never re-add without deliberately updating this test', () => {
+    const event = { type: 'assistant.delta', text: 'hi', sequence: 0, timestamp: '2026-01-01T00:00:00.000Z' };
     expect(agentEventEnvelopeSchema.safeParse(event).success).toBe(false);
   });
 

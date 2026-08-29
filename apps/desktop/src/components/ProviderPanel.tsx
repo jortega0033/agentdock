@@ -1,8 +1,9 @@
 import type { ProviderStatus } from '@agent-dock/shared';
 
 function authLabel(status: ProviderStatus): string {
-  if (status.authenticated === 'unknown') return 'unknown';
-  return status.authenticated ? 'yes' : 'no';
+  if (status.authenticated === 'authenticated') return 'yes';
+  if (status.authenticated === 'unauthenticated') return 'no';
+  return 'unknown';
 }
 
 export function ProviderPanel({ providers }: { providers: ProviderStatus[] }) {

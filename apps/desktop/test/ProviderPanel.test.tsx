@@ -17,7 +17,7 @@ describe('ProviderPanel', () => {
 
   it('shows installed-but-unauthenticated state distinctly from unknown', () => {
     const providers: ProviderStatus[] = [
-      { id: 'codex', name: 'Codex', installed: true, authenticated: false, version: '1.2.3', capabilities: CAPS },
+      { id: 'codex', name: 'Codex', installed: true, authenticated: 'unauthenticated', version: '1.2.3', capabilities: CAPS },
     ];
     render(<ProviderPanel providers={providers} />);
     expect(screen.getByText('Installed: Yes')).toBeInTheDocument();
@@ -27,7 +27,7 @@ describe('ProviderPanel', () => {
 
   it('shows installed-and-authenticated state', () => {
     const providers: ProviderStatus[] = [
-      { id: 'claude', name: 'Claude Code', installed: true, authenticated: true, capabilities: CAPS },
+      { id: 'claude', name: 'Claude Code', installed: true, authenticated: 'authenticated', capabilities: CAPS },
     ];
     render(<ProviderPanel providers={providers} />);
     expect(screen.getByText('Authenticated: yes')).toBeInTheDocument();

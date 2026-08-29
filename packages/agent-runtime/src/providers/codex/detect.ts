@@ -1,4 +1,4 @@
-import type { ProviderStatus } from '@agent-dock/shared';
+import type { AuthStatus, ProviderStatus } from '@agent-dock/shared';
 import { execCapture } from '../../process/exec-capture.js';
 import { findExecutable } from '../../detect-executable.js';
 import type { Logger } from '../../logger.js';
@@ -7,10 +7,24 @@ import { CODEX_CAPABILITIES } from './capabilities.js';
 const EXECUTABLE_NAMES = ['codex'];
 
 /**
+ * Pure parsing of `codex login status`'s combined stdout+stderr (AD-16) — split out from
+ * `detectCodex` so it's testable with captured output strings, no CLI or account needed. `codex
+ * login status` has no `--json` flag, so this is a conservative regex match against short
+ * human-readable lines rather than guessing: falls back to `'unknown'` for anything that doesn't
+ * clearly say one way or the other, since a wrong "authenticated: 'authenticated'" is far worse
+ * than an honest "unknown".
+ */
+export function parseCodexLoginStatus(output: string): AuthStatus {
+  if (/logged in/i.test(output) && !/not logged in/i.test(output)) return 'authenticated';
+  if (/not logged in|not authenticated|no credentials/i.test(output)) return 'unauthenticated';
+  return 'unknown';
+}
+
+/**
  * Detects the Codex CLI and its login state via `codex login status`, which prints a short
  * human-readable line ("Logged in using ChatGPT" / "Logged in using API key" / not-logged-in
  * variants) rather than JSON. We pattern-match conservatively and fall back to 'unknown' rather
- * than guessing, since a wrong "authenticated: true" is far worse than an honest "unknown".
+ * than guessing, since a wrong "authenticated: 'authenticated'" is far worse than an honest "unknown".
  */
 export async function detectCodex(logger: Logger): Promise<ProviderStatus> {
   const base = { id: 'codex' as const, name: 'Codex', capabilities: CODEX_CAPABILITIES };
@@ -47,11 +61,9 @@ export async function detectCodex(logger: Logger): Promise<ProviderStatus> {
   }
 
   const output = `${statusResult.stdout}\n${statusResult.stderr}`.trim();
-  if (/logged in/i.test(output) && !/not logged in/i.test(output)) {
-    return { ...base, installed: true, authenticated: true, executablePath, version };
-  }
-  if (/not logged in|not authenticated|no credentials/i.test(output)) {
-    return { ...base, installed: true, authenticated: false, executablePath, version };
+  const authenticated = parseCodexLoginStatus(output);
+  if (authenticated !== 'unknown') {
+    return { ...base, installed: true, authenticated, executablePath, version };
   }
 
   return {

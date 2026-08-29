@@ -141,7 +141,7 @@ describe('AgentDockClient — transport and auth errors', () => {
 
 describe('AgentDockClient — providers', () => {
   it('lists providers', async () => {
-    const provider = { id: 'claude', name: 'Claude Code', installed: true, authenticated: true, capabilities: CAPS };
+    const provider = { id: 'claude', name: 'Claude Code', installed: true, authenticated: 'authenticated', capabilities: CAPS };
     const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
       if (url.endsWith('/health')) return healthOk();
       if (url.endsWith('/providers')) return jsonResponse(200, { providers: [provider] });

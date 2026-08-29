@@ -32,16 +32,25 @@ webPreferences: {
 ```
 
 `webSecurity` is never overridden. `setWindowOpenHandler` denies every `window.open`/`target=_blank`
-popup and opens the URL in the OS browser instead; `will-navigate` blocks in-window navigation away
-from the dev-server origin or `file://`, redirecting anywhere else to the OS browser too. Neither
-matters for the *current* UI (it renders no untrusted content or links), but it's cheap defense in
-depth for a fork that later adds either — see [SECURITY.md](../SECURITY.md#electron-hardening).
+popup and opens the URL in the OS browser instead. `will-navigate` (`isAllowedNavigationTarget()`
+in `main.ts`) allows only: in dev mode, the exact dev-server *origin* (a real `new URL(...).origin`
+comparison, not a `startsWith` prefix match — the earlier prefix check would have let
+`http://localhost:5173.evil.example` through against an allowed `http://localhost:5173`); in
+packaged mode, the exact `file://` URL of the app's own `dist/index.html`, not any local file path.
+Anything else redirects to the OS browser instead. A `session.setPermissionRequestHandler` denies
+every permission request by default (camera, mic, geolocation, notifications, ...). None of this
+matters for the *current* UI (it renders no untrusted content or links, and requests no
+permissions), but it's cheap defense in depth for a fork that later adds either — see
+[SECURITY.md](../SECURITY.md#electron-hardening).
 
 ## The preload bridge
 
-`electron/preload.ts` exposes exactly five functions on `window.agentDock` via `contextBridge` —
+`electron/preload.ts` exposes exactly seven functions on `window.agentDock` via `contextBridge` —
 never a generic "invoke this channel with this payload" tunnel, and never the daemon's base URL or
-bearer token:
+bearer token. `getDaemonStatus`/`onDaemonStatus` specifically reconstruct a clean status object
+from the IPC payload rather than passing it through once its shape looks roughly right, so an
+accidental extra field on the main-process side (a token, a base URL) can never ride along even by
+mistake — see `apps/desktop/test/preload.test.ts` for the regression test against this real module:
 
 ```ts
 interface AgentDockBridge {
@@ -76,9 +85,11 @@ daemon internals.
 instead of opening a second one — which would otherwise spawn a second daemon and lose the
 single-instance race described in [daemon.md#single-instance-behavior](daemon.md#single-instance-behavior).
 
-On quit, `killDaemon()` aborts the active SSE subscription, best-effort cancels the one active
-session over HTTP, then kills the daemon child process. See
-[daemon.md#shutdown](daemon.md#shutdown) for the Windows-specific limitation this works around.
+On quit, `killDaemon()` aborts the active SSE subscription, best-effort calls
+`POST /sessions/cancel-all` over HTTP to cancel *every* in-flight session (not just the one the UI
+happens to be tracking), then kills the daemon child process. This exists specifically because
+Windows' `child.kill()` doesn't deliver a real `SIGTERM` the daemon's own shutdown handler could
+otherwise catch — see [daemon.md#shutdown](daemon.md#shutdown) for the full explanation.
 
 ## Renderer trust assumptions
 

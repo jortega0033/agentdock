@@ -60,6 +60,7 @@ for await (const event of client.sessions.events(session.id)) {
 const current = await client.sessions.get(session.id); // re-fetch the AgentSession record
 await client.sessions.cancel(session.id);               // cancel an in-flight session
 await client.sessions.delete(session.id);                // cancel (if running) and forget it
+await client.sessions.cancelAll();                       // cancel every in-flight session
 ```
 
 Errors are typed, so a caller can branch on `instanceof` instead of parsing strings:
@@ -79,10 +80,13 @@ try {
 ```
 
 Full API: `providers.list()`, `providers.get(id)`, `sessions.create(input)`, `sessions.get(id)`,
-`sessions.events(id, options?)`, `sessions.cancel(id)`, `sessions.delete(id)`, and `health()`.
-`SessionEventsOptions` accepts an `AbortSignal` (to stop consuming early) and a `lastEventId` (to
-resume a stream instead of replaying from the start — see
-[protocol-v1.md](protocol-v1.md#ordering-guarantees)).
+`sessions.events(id, options?)`, `sessions.cancel(id)`, `sessions.delete(id)`,
+`sessions.cancelAll()`, and `health()`. `SessionEventsOptions` accepts an `AbortSignal` (to stop
+consuming early) and a `lastEventId` (to resume a stream instead of replaying from the start — see
+[protocol-v1.md](protocol-v1.md#ordering-guarantees)). `sessions.cancelAll()` exists specifically
+for a desktop shutdown path (Electron calls it before force-killing the daemon on Windows, where a
+process signal alone can't reach the daemon's own graceful-shutdown handler — see
+[daemon.md#shutdown](daemon.md#shutdown)); most callers only ever need `sessions.cancel(id)`.
 
 ## Design decisions
 
@@ -112,17 +116,25 @@ Worth knowing if you're extending this package:
 
 Electron's main process (`apps/desktop/electron/main.ts`) owns exactly one `AgentDockClient`
 instance, constructed once the daemon's discovery file is readable. It's the only thing in the
-desktop app that imports `@agent-dock/client` — the renderer only ever reaches it through five IPC
-handlers in `main.ts`, and the preload bridge (`electron/preload.ts`) exposes those five functions
+desktop app that imports `@agent-dock/client` — the renderer only ever reaches it through seven IPC
+handlers in `main.ts`, and the preload bridge (`electron/preload.ts`) exposes those seven functions
 and nothing shaped like a generic request passthrough. See
 [SECURITY.md](../SECURITY.md#renderer-never-talks-to-the-daemon-directly) for the full boundary,
 and [electron.md](electron.md) for how the main process wires this client to IPC.
 
-## Using it outside this repo's Electron app
+## Using it from a workspace/fork, not from outside the repo
 
-Nothing about `@agent-dock/client` depends on Electron. A plain Node script can use it directly,
-provided you have the daemon's port and token (from the daemon's own discovery file, or from
-whatever process spawned it):
+Nothing about `@agent-dock/client`'s own code depends on Electron — a plain Node script (a future
+CLI, an editor extension) can use it exactly like `main.ts` does. But `@agent-dock/client` is not a
+published npm package: it's `private: true`, and its `main`/`types` point at raw TypeScript source
+(`./src/index.ts`), not a built `dist/`. This works today only because everything that imports it
+lives in the same pnpm workspace (or a fork of this repo, which is the same thing). An external
+project outside this repo's workspace **cannot** `npm install @agent-dock/client` and get something
+resolvable — see [architecture.md#project-identity](architecture.md#project-identity) for the
+fork-vs-publish decision this follows from.
+
+If you're building a new consumer (a CLI, an editor extension) as another package inside this same
+workspace, or in a fork of this repo, it's exactly as simple as it looks:
 
 ```ts
 import { AgentDockClient } from '@agent-dock/client';
@@ -131,5 +143,6 @@ const client = new AgentDockClient({ baseUrl: 'http://127.0.0.1:5173', token: '.
 const health = await client.health(); // throws ProtocolMismatchError / DaemonUnavailableError early
 ```
 
-This is the intended integration point for a future CLI or editor extension — see
-[architecture.md](architecture.md#why-a-separate-daemon-instead-of-running-the-cli-logic-in-electrons-main-process).
+See [architecture.md#why-a-separate-daemon-instead-of-running-the-cli-logic-in-electrons-main-process](architecture.md#why-a-separate-daemon-instead-of-running-the-cli-logic-in-electrons-main-process)
+for why the daemon+client split is what makes a second, non-Electron consumer like this possible at
+all without touching the daemon or the provider adapters.

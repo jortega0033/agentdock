@@ -10,7 +10,7 @@ links out rather than duplicating any of those.
 
 ```
 ┌─────────────────────────┐
-│   Renderer (React)        │   window.agentDock.* — five narrow IPC capabilities only.
+│   Renderer (React)        │   window.agentDock.* — seven narrow IPC capabilities only.
 │                            │   Never sees the daemon's token or base URL.
 └─────────────┬────────────┘
               │ Electron IPC (contextBridge, same machine, no network)
@@ -80,7 +80,7 @@ Three boundaries matter, in decreasing order of "who might be hostile":
 2. **The renderer → Electron main.** The renderer is this repo's own code, not adversarial, but
    it's still validated as if it might send something malformed — every IPC input is re-checked
    against the Zod schemas at the `ipcMain.handle` boundary (see [electron.md](electron.md)), and
-   it structurally cannot reach the daemon's token or make an arbitrary daemon call, only the five
+   it structurally cannot reach the daemon's token or make an arbitrary daemon call, only the seven
    functions the preload bridge exposes.
 3. **The daemon → the provider CLI.** The daemon trusts the CLI it spawns (it's the user's own,
    already-authenticated installation) but never trusts *what a request asked it to spawn* — the
@@ -206,9 +206,11 @@ each is also listed as out of scope in [CONTRIBUTING.md](../CONTRIBUTING.md#scop
 - **No persistence.** Sessions and their event history are lost on daemon restart (see
   [Sessions](#sessions) above) — adding it means designing a schema, migrations, and "what happens
   to a resumed session after a crash," none of which this milestone needed to answer.
-- **One daemon per machine, enforced**, rather than a per-instance discovery path that would allow
-  two independent copies of an app built on this boilerplate to run side by side — nothing
-  currently needs that.
+- **One daemon per app id, enforced** (see [Project identity](#project-identity) and
+  [daemon.md#single-instance-behavior](daemon.md#single-instance-behavior)) — two different
+  products built on this boilerplate coexist by using different app ids, but two instances of the
+  *same* product still can't run side by side. A richer scheme (e.g. a random per-launch id) isn't
+  needed for what this boilerplate currently supports.
 - **No API-key/cloud provider mode.** Everything here assumes a locally authenticated CLI; adding a
   second auth model is a different product shape, not an extension of this one.
 - **No auto-update, telemetry, or crash reporting.** Each adds its own trust and privacy surface
@@ -216,14 +218,35 @@ each is also listed as out of scope in [CONTRIBUTING.md](../CONTRIBUTING.md#scop
 - **Packaging targets Windows only** — see [packaging.md#platform-matrix](packaging.md#platform-matrix).
 - **No installer signing** — see [packaging.md#unsigned-installer-and-smartscreen](packaging.md#unsigned-installer-and-smartscreen).
 
+## Project identity
+
+**AgentDock is an open-source boilerplate containing a reusable local runtime and internal typed
+workspace SDK boundaries. It is intended to be forked/customized today**, not consumed as a set of
+independently-installable npm packages. This is a decision, written down here so it doesn't have to
+be inferred (AD-03): every workspace package (`shared`, `agent-runtime`, `client`, plus the two
+apps) is `private: true` with `main`/`types` pointing at raw TypeScript source, not a built `dist/`
+with a `files` allowlist — nothing here is set up to be `npm install`-ed from outside this
+workspace.
+
+That doesn't make the internal boundaries decorative. `packages/shared`'s types and Zod schemas,
+`AGENT_DOCK_PROTOCOL_VERSION`, and `@agent-dock/client`'s typed surface exist to keep the daemon,
+the client, and the desktop app honest with each other *inside* this repo (and inside a fork of
+it) — a change to the wire format has to go through one shared definition, not get silently
+duplicated three ways. Protocol v1 currently governs the daemon/client pair as shipped together in
+this repository; it is not (yet) a promise to arbitrary external consumers.
+
+External npm publication is a real option later, but a deliberately deferred one — see
+[client-sdk.md](client-sdk.md#using-it-from-a-workspacefork-not-from-outside-the-repo) for exactly
+what would need to change first (a `dist`-based `exports` map, a `files` allowlist, `zod` moved to
+a peer dependency in `shared`, dropping `private`), and don't treat "it looks like a normal typed
+package" as an invitation to publish it without that work.
+
 ## Known limitations
 
 - **Electron's own graceful-shutdown path is best-effort on Windows** — see
   [daemon.md#shutdown](daemon.md#shutdown).
 - **Process-tree cancellation was empirically verified on Windows only** — see
   [SECURITY.md](../SECURITY.md#process-hygiene).
-- **`assistant.delta` is defined but unused.** Both current adapters only ever emit complete
-  `assistant.message` events — see [protocol-v1.md](protocol-v1.md#the-agentevent-union).
 
 If you're extending this project, [DEVELOPMENT.md](../DEVELOPMENT.md) is the practical
 "I want to change X, start here" guide; this file is the map, not the walkthrough.

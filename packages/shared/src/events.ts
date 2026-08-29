@@ -4,11 +4,16 @@ import type { ProviderId } from './provider.js';
  * Provider-neutral streaming event protocol. Every adapter in packages/agent-runtime normalizes
  * its CLI's native output into this union. Nothing above the agent-runtime package (the daemon,
  * the desktop UI) should ever branch on provider id to interpret an event.
+ *
+ * AD-14: a token-streaming `assistant.delta` variant was deliberately removed before v1 — no
+ * adapter ever emitted it, nothing tested it, and it lacked the message-boundary id a real
+ * streaming provider would need to correlate deltas with their eventual `assistant.message`.
+ * Reserved-but-unspecified surface in a version-frozen public union is worse than adding it later
+ * once a real adapter needs it (and can specify it properly).
  */
 export type AgentEvent =
   | { type: 'session.started'; sessionId: string; provider: ProviderId; providerSessionId?: string }
   | { type: 'status'; status: string; detail?: string }
-  | { type: 'assistant.delta'; text: string }
   | { type: 'assistant.message'; text: string }
   | { type: 'thinking.delta'; text: string }
   | { type: 'tool.started'; toolName: string; toolCallId?: string; input?: unknown }

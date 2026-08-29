@@ -10,7 +10,6 @@ function formatEvent(event: AgentEvent): string {
       return `session started (${event.provider})`;
     case 'status':
       return `status: ${event.status}${event.detail ? ` — ${event.detail}` : ''}`;
-    case 'assistant.delta':
     case 'assistant.message':
       return event.text;
     case 'thinking.delta':

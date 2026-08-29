@@ -10,5 +10,3 @@
  * and when that stops being true.
  */
 export const AGENT_DOCK_PROTOCOL_VERSION = 1;
-
-export type AgentDockProtocolVersion = typeof AGENT_DOCK_PROTOCOL_VERSION;

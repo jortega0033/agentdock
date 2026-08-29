@@ -13,7 +13,6 @@ const fixturesDir = fileURLToPath(new URL('../fixtures', import.meta.url));
 const KNOWN_EVENT_TYPES = new Set<AgentEvent['type']>([
   'session.started',
   'status',
-  'assistant.delta',
   'assistant.message',
   'thinking.delta',
   'tool.started',

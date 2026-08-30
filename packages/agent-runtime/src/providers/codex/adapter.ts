@@ -9,7 +9,7 @@ import { parseCodexLine } from './parser.js';
 /**
  * Codex CLI adapter. Runs `codex exec --json ...` (or `codex exec resume <id> --json ...` to
  * continue a prior thread) and normalizes its JSONL event stream. Authentication is entirely
- * owned by the `codex` binary via `codex login` — this adapter never reads Codex's credential
+ * owned by the `codex` binary via `codex login`; this adapter never reads Codex's credential
  * storage and never passes an API key.
  *
  * Command construction is isolated to `buildArgs` below specifically so a future migration to

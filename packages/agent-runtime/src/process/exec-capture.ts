@@ -9,7 +9,7 @@ export interface ExecResult {
 
 /**
  * Runs a short-lived command (version checks, auth status) and captures its output. Not for
- * long-running sessions — use spawnProcess + readLines for those. Always bounded by a timeout
+ * long-running sessions; use spawnProcess + readLines for those. Always bounded by a timeout
  * so a hung CLI can't stall provider detection indefinitely.
  */
 export async function execCapture(

@@ -37,7 +37,7 @@ function itemEvent(kind: 'started' | 'completed', item: Record<string, unknown>)
       return undefined;
     case 'error':
       // Codex surfaces item-level "error" entries for non-fatal warnings too (e.g. a config
-      // quirk) — the turn keeps going and can still complete successfully after one. A genuinely
+      // quirk); the turn keeps going and can still complete successfully after one. A genuinely
       // fatal error comes through as turn.failed instead, so this is marked recoverable.
       if (kind === 'completed') {
         return {

@@ -7,7 +7,7 @@ export type FakeScenario = 'success' | 'failure' | 'hang-until-cancelled';
 /**
  * Deliberately not a copy of the real adapters' capabilities: `resume`, `tools`, and `thinking`
  * are `false` because FakeProvider genuinely doesn't implement them (no resume branching, no
- * tool/thinking events emitted below) — that contrast is useful for tests asserting
+ * tool/thinking events emitted below); that contrast is useful for tests asserting
  * capability-gated behavior actually gates on the flag rather than always running.
  */
 export const FAKE_PROVIDER_CAPABILITIES: ProviderCapabilities = {

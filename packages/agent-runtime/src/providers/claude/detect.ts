@@ -7,7 +7,7 @@ import { CLAUDE_CAPABILITIES } from './capabilities.js';
 const EXECUTABLE_NAMES = ['claude'];
 
 /**
- * Pure parsing of `claude auth status --json`'s stdout (AD-16) — split out from `detectClaude` so
+ * Pure parsing of `claude auth status --json`'s stdout (AD-16), split out from `detectClaude` so
  * it's testable with captured output strings, no CLI or account needed. Never optimistically
  * returns `'authenticated'`: any shape other than a genuine `{ "loggedIn": boolean }` (malformed
  * JSON, a missing/non-boolean field, empty output) falls through to `'unknown'`.
@@ -28,7 +28,7 @@ export function parseClaudeAuthStatus(rawStdout: string): AuthStatus {
  * Detects the Claude Code CLI and, separately, whether it's authenticated. These are two
  * independent questions: an installed-but-unauthenticated CLI is a distinct, expected state,
  * not an error. Auth is read via `claude auth status --json`, which reports the CLI's own
- * cached login state — this never reads or touches Claude's credential storage directly.
+ * cached login state; this never reads or touches Claude's credential storage directly.
  */
 export async function detectClaude(logger: Logger): Promise<ProviderStatus> {
   const base = { id: 'claude' as const, name: 'Claude Code', capabilities: CLAUDE_CAPABILITIES };

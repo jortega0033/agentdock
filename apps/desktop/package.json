@@ -1,7 +1,7 @@
 {
   "name": "@agent-dock/desktop",
   "version": "0.1.0",
-  "description": "AgentDock desktop client — Electron + React demo for the AgentDock boilerplate",
+  "description": "AgentDock desktop client: Electron + React demo for the AgentDock boilerplate",
   "author": "AgentDock contributors",
   "private": true,
   "type": "module",

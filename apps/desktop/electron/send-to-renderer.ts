@@ -1,5 +1,5 @@
 /**
- * Structural subset of Electron's BrowserWindow that matters here — kept minimal and separate
+ * Structural subset of Electron's BrowserWindow that matters here, kept minimal and separate
  * from an `import type { BrowserWindow } from 'electron'` so this file (and its guard logic) is
  * testable with a plain fake object, no Electron runtime required.
  */
@@ -13,7 +13,7 @@ export interface DestroyableWindow {
 
 /**
  * The daemon child's 'exit' event (and the SSE stream's error path) can fire *after* the window
- * has already closed — e.g. during shutdown, killing the daemon races with window teardown.
+ * has already closed, e.g. during shutdown, killing the daemon races with window teardown.
  * `webContents.send()` on an already-destroyed window throws, and an uncaught throw from inside a
  * child_process event handler crashes the whole main process. Reproduced against a real packaged
  * build: closing the window while a daemon-exit event was in flight left a native crash dialog

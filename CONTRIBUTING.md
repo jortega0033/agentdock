@@ -36,7 +36,7 @@ Dependencies only flow in that direction.
 
 ## Architecture rules
 
-These aren't style preferences — breaking them tends to break the security model or the layering
+These aren't style preferences: breaking them tends to break the security model or the layering
 the tests assume. The full list, with the reasoning behind each, is
 [DEVELOPMENT.md#common-architectural-rules](DEVELOPMENT.md#common-architectural-rules); briefly:
 never build a shell command string, never let the renderer call the daemon directly, never accept
@@ -46,15 +46,15 @@ never add a generic IPC passthrough to the preload bridge.
 ## Testing requirements
 
 - Never make a test depend on a real, authenticated Claude/Codex CLI being present, and never make
-  one that spends real API credit — CI has neither. See
+  one that spends real API credit. CI has neither. See
   [DEVELOPMENT.md#testing-without-paid-providers](DEVELOPMENT.md#testing-without-paid-providers)
   for the fixture-based pattern this project uses instead.
 - Never commit a fixture, test, or example that contains a real credential, token, or account
-  identifier — even a revoked or expired one. Provider CLI fixtures are small `node` scripts
+  identifier, even a revoked or expired one. Provider CLI fixtures are small `node` scripts
   standing in for the real CLI's I/O shape, never real recorded CLI output.
-- If your change affects the public contract — anything in
+- If your change affects the public contract (anything in
   [docs/protocol-v1.md](docs/protocol-v1.md)'s "public/stable" list, `@agent-dock/client`'s exports,
-  or a daemon route's shape — update the relevant doc (`docs/protocol-v1.md`, `docs/client-sdk.md`,
+  or a daemon route's shape), update the relevant doc (`docs/protocol-v1.md`, `docs/client-sdk.md`,
   or `docs/daemon.md`) in the same PR. A behavior change with no doc update for it isn't done.
 
 ## Before opening a PR
@@ -70,16 +70,16 @@ pnpm audit       # electron-builder's own build-time deps are a known, documente
 
 If you touched anything under `apps/desktop/electron/` (main process, preload, or packaging
 config), also run `pnpm package:win` (Windows) and confirm the app still launches from
-`dist-packages/win-unpacked/AgentDock.exe` — packaging has its own failure modes that `pnpm build`
+`dist-packages/win-unpacked/AgentDock.exe`, since packaging has its own failure modes that `pnpm build`
 alone won't catch (see [docs/packaging.md#verifying-a-packaging-sensitive-change](docs/packaging.md#verifying-a-packaging-sensitive-change)
 for real ones this project already hit).
 
 These same commands run automatically in CI on every push and pull request
-(`.github/workflows/ci.yml`) — `pnpm install --frozen-lockfile`, `lint`, `typecheck`, `test`,
+(`.github/workflows/ci.yml`): `pnpm install --frozen-lockfile`, `lint`, `typecheck`, `test`,
 `build`, in that order, on Linux. A separate workflow (`.github/workflows/package-windows.yml`)
 runs `pnpm package:win` on Windows for every push and PR too, and fails if the NSIS installer
-doesn't actually get produced. Neither workflow installs or authenticates a real Claude/Codex CLI
-— see [Testing requirements](#testing-requirements) above for why that's never necessary.
+doesn't actually get produced. Neither workflow installs or authenticates a real Claude/Codex CLI.
+See [Testing requirements](#testing-requirements) above for why that's never necessary.
 
 ### Provider contribution checklist
 
@@ -97,11 +97,11 @@ If you're touching a provider adapter (`packages/agent-runtime/src/providers/*`)
 ## Code style
 
 - TypeScript strict mode, no `any` unless there's a comment explaining why it's unavoidable.
-- No comments explaining *what* code does — name things so that's obvious. A comment is for a
+- No comments explaining *what* code does: name things so that's obvious. A comment is for a
   non-obvious *why*: a constraint, an invariant, a workaround for a specific CLI quirk.
 - Small, focused modules over one big file. If you're adding a provider, follow the existing
   `detect.ts` / `parser.ts` / `adapter.ts` split (see [docs/providers.md](docs/providers.md#adding-a-new-provider)).
-- No new abstraction or config surface for a hypothetical future need — this is boilerplate that
+- No new abstraction or config surface for a hypothetical future need: this is boilerplate that
   should stay easy to fork and delete parts of, not a framework.
 
 ## Scope
@@ -109,7 +109,7 @@ If you're touching a provider adapter (`packages/agent-runtime/src/providers/*`)
 Please open an issue before working on anything that would add: persistence (SQLite/a database),
 authentication of the app's own users, telemetry/analytics, a new heavy dependency, or a new
 provider mode (API-key based, cloud-hosted). These are explicitly out of scope for the current
-version — see the README's "What this is not" section — and may or may not be a direction the
+version (see the README's "What this is not" section) and may or may not be a direction the
 project wants to take.
 
 ## License

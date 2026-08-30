@@ -8,7 +8,7 @@ import { parseClaudeLine } from './parser.js';
 
 /**
  * Claude Code CLI adapter. Runs `claude -p ... --output-format stream-json --verbose` and
- * normalizes its JSONL output. Authentication is entirely owned by the `claude` binary — this
+ * normalizes its JSONL output. Authentication is entirely owned by the `claude` binary; this
  * adapter never reads Claude's credential storage and never passes an API key.
  */
 export class ClaudeProvider implements AgentProvider {

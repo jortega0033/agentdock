@@ -10,3 +10,8 @@
  * and when that stops being true.
  */
 export const AGENT_DOCK_PROTOCOL_VERSION = 1;
+
+/** Versions the current daemon/client can negotiate; the legacy scalar above remains v1 forever. */
+export const AGENT_DOCK_SUPPORTED_PROTOCOL_VERSIONS = [1, 2] as const;
+
+export type AgentDockProtocolVersion = (typeof AGENT_DOCK_SUPPORTED_PROTOCOL_VERSIONS)[number];

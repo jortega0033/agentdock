@@ -45,7 +45,13 @@ export const sessionIdParamSchema = z.object({
   sessionId: z.string().uuid(),
 });
 
-export const sessionStatusSchema = z.enum(['starting', 'running', 'completed', 'failed', 'cancelled']);
+export const sessionStatusSchema = z.enum([
+  'starting',
+  'running',
+  'completed',
+  'failed',
+  'cancelled',
+]);
 
 export const agentSessionSchema = z.object({
   id: z.string().uuid(),
@@ -133,4 +139,17 @@ export const healthResponseSchema = z.object({
   status: z.literal('ok'),
   uptimeSeconds: z.number(),
   protocolVersion: z.number(),
+  /** Optional for compatibility with pre-v2 daemons; new daemons emit `[1, 2]`. */
+  supportedProtocolVersions: z
+    .array(z.number().int().positive())
+    .min(1)
+    .superRefine((versions, ctx) => {
+      if (new Set(versions).size !== versions.length) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'supported protocol versions must be unique',
+        });
+      }
+    })
+    .optional(),
 });

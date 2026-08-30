@@ -61,7 +61,7 @@ discovery file <path>). Only one daemon per app id is supported at a time, stop 
 This is a **per app id** guarantee, not a machine-global one. `AGENT_DOCK_APP_ID` (default
 `agent-dock`) namespaces the discovery filename, so two different products built on this
 boilerplate, each launched with its own app id, run their own daemons side by side without
-colliding; two daemons started with the *same* app id still race for the same file and the second
+colliding; two daemons started with the _same_ app id still race for the same file and the second
 one refuses to start, which is the actual invariant this exists to guarantee. The app id is
 validated before it's used to build a path: 1–64 characters, letters/digits/`-`/`_` only, must
 start with a letter or digit: rejected outright (the daemon fails to start with a clear error)
@@ -76,17 +76,17 @@ another app id's daemon, since they're different files. See
 
 ## Routes
 
-| Route | Auth | Behavior |
-|---|---|---|
-| `GET /health` | none | `{ status: 'ok', uptimeSeconds, protocolVersion }` |
-| `GET /providers` | required | `{ providers: ProviderStatus[] }`, runs each adapter's `detect()` |
-| `GET /providers/:providerId` | required | One `ProviderStatus`, or `404` for an unregistered id |
-| `POST /sessions` | required | Body validated against `createSessionRequestSchema`. `400` for an unknown provider, a `resumeProviderSessionId` on a provider whose `capabilities.resume` is `false`, or a `cwd` that doesn't exist. `201` + `AgentSession` on success |
-| `GET /sessions/:sessionId` | required | Current `AgentSession` record, or `404` |
-| `GET /sessions/:sessionId/events` | required | SSE stream, see [Event history and replay](#event-history-and-replay) below |
-| `POST /sessions/:sessionId/cancel` | required | `202` + `{ status: 'cancelling' }`. `404` for an unknown id **or** a session that's already terminal: cancelling a finished session is never reported as a success |
-| `POST /sessions/cancel-all` | required | Cancels every in-flight session. Narrow and single-purpose (not a generic process-control endpoint): exists specifically for Electron's shutdown path, see [Shutdown](#shutdown) below. `202` + `{ status: 'cancelling' }` |
-| `DELETE /sessions/:sessionId` | required | Cancels if still running, then removes the record. `204`, or `404` |
+| Route                              | Auth     | Behavior                                                                                                                                                                                                                               |
+| ---------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /health`                      | none     | `{ status: 'ok', uptimeSeconds, protocolVersion: 1, supportedProtocolVersions: [1, 2] }`                                                                                                                                               |
+| `GET /providers`                   | required | `{ providers: ProviderStatus[] }`, runs each adapter's `detect()`                                                                                                                                                                      |
+| `GET /providers/:providerId`       | required | One `ProviderStatus`, or `404` for an unregistered id                                                                                                                                                                                  |
+| `POST /sessions`                   | required | Body validated against `createSessionRequestSchema`. `400` for an unknown provider, a `resumeProviderSessionId` on a provider whose `capabilities.resume` is `false`, or a `cwd` that doesn't exist. `201` + `AgentSession` on success |
+| `GET /sessions/:sessionId`         | required | Current `AgentSession` record, or `404`                                                                                                                                                                                                |
+| `GET /sessions/:sessionId/events`  | required | SSE stream, see [Event history and replay](#event-history-and-replay) below                                                                                                                                                            |
+| `POST /sessions/:sessionId/cancel` | required | `202` + `{ status: 'cancelling' }`. `404` for an unknown id **or** a session that's already terminal: cancelling a finished session is never reported as a success                                                                     |
+| `POST /sessions/cancel-all`        | required | Cancels every in-flight v1 session. Narrow and single-purpose (not a generic process-control endpoint): exists specifically for Electron's shutdown path, see [Shutdown](#shutdown) below. `202` + `{ status: 'cancelling' }`          |
+| `DELETE /sessions/:sessionId`      | required | Cancels if still running, then removes the record. `204`, or `404`                                                                                                                                                                     |
 
 Every request body/param is Zod-validated before touching any handler logic
 (`packages/shared/src/schemas.ts`); invalid input gets a `4xx` with a short JSON error message,
@@ -95,6 +95,11 @@ never a stack trace. See the full request-validation and error-handler behavior 
 
 Wire shapes (route bodies, the `AgentEvent`/`AgentEventEnvelope` format) are documented in
 [protocol-v1.md](protocol-v1.md), not duplicated here.
+
+Protocol v2 is additive: authenticated `/v2/providers` and `/v2/sessions` routes expose scoped
+capability records, negotiate before starting provider work, and stream validated v2 envelopes.
+The unversioned routes above remain the v1 compatibility and rollback path. The complete v2 route,
+status, and wire-shape tables live in [protocol-v2.md](protocol-v2.md).
 
 ## Session lifecycle: SessionManager, SessionStore
 
@@ -142,7 +147,7 @@ per session (`MAX_STORED_EVENTS_PER_SESSION`). `GET /sessions/:id/events`:
    `session.cancelled`) is written: the client never has to guess whether more events might still
    arrive.
 
-Past 5,000 buffered events, further events are no longer available to replay to a *new*
+Past 5,000 buffered events, further events are no longer available to replay to a _new_
 subscriber, but they are always still delivered live to every currently-connected subscriber,
 including the terminal event: the cap only ever bounds replay history, never live delivery.
 `sequence` is stamped from a counter independent of the history buffer's length, so it keeps
@@ -191,7 +196,7 @@ waits (bounded, 5 seconds by default) for their processes to actually exit
 (`SessionManager.cancelAll()`), closes the Fastify server, removes the discovery file, then exits.
 This is idempotent: a second signal while shutdown is already in progress is a no-op. The bounded
 wait means shutdown won't hang forever if a child ignores termination, but also won't return
-instantly while a child is still mid-teardown: `cancel()` on a runtime handle only *initiates*
+instantly while a child is still mid-teardown: `cancel()` on a runtime handle only _initiates_
 termination (fires a signal/`taskkill` and returns), so without the wait the daemon could exit
 while a process was still alive.
 
@@ -199,9 +204,9 @@ while a process was still alive.
 deliver a real `SIGTERM` the daemon's own shutdown handler can catch, so when Electron kills the
 daemon child process directly (e.g. on app quit), the daemon's own `cancelAll()` above never runs
 at all on that platform. Electron compensates by calling `POST /sessions/cancel-all` over HTTP
-*before* killing the daemon child process (HTTP is a request Windows can deliver reliably, unlike
-a signal to the daemon's own process), so every in-flight session is confirmed cancelled before the
-daemon process is force-killed, not just the one session the desktop UI happens to be tracking. See
+_before_ killing the daemon child process (HTTP is a request Windows can deliver reliably, unlike
+a signal to the daemon's own process), so every in-flight v1 session is confirmed cancelled before
+the daemon process is force-killed, not just the one session the desktop UI happens to be tracking. See
 `killDaemon()` in `apps/desktop/electron/main.ts` and
 [architecture.md#known-limitations](architecture.md#known-limitations) for what this does and
 doesn't cover on POSIX. The daemon process itself has always been confirmed to exit alongside the

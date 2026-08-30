@@ -20,16 +20,20 @@ convention. Only what `index.ts` exports is the public surface.
 
 ```ts
 import { AgentDockClient } from '@agent-dock/client';
-import type { AgentDockClientOptions, HealthResponse, SessionEventsOptions } from '@agent-dock/client';
+import type {
+  AgentDockClientOptions,
+  HealthResponse,
+  SessionEventsOptions,
+} from '@agent-dock/client';
 import {
   AgentDockClientError, // base class every error below extends
-  DaemonError,          // any other non-2xx response
+  DaemonError, // any other non-2xx response
   DaemonUnavailableError, // fetch itself failed, or the daemon didn't respond
-  ProtocolMismatchError,  // GET /health reported a different AGENT_DOCK_PROTOCOL_VERSION
+  ProtocolMismatchError, // GET /health reported a different AGENT_DOCK_PROTOCOL_VERSION
   ProviderUnavailableError, // 404 on a /providers/:id route
-  SessionNotFoundError,     // 404 on a /sessions/:id route
-  UnauthorizedError,        // 401, bad or missing token
-  ValidationError,          // 400, or a response/SSE frame that failed its Zod schema
+  SessionNotFoundError, // 404 on a /sessions/:id route
+  UnauthorizedError, // 401, bad or missing token
+  ValidationError, // 400, or a response/SSE frame that failed its Zod schema
 } from '@agent-dock/client';
 ```
 
@@ -43,8 +47,8 @@ import { AgentDockClient } from '@agent-dock/client';
 
 const client = new AgentDockClient({ baseUrl: 'http://127.0.0.1:PORT', token });
 
-const providers = await client.providers.list();       // ProviderStatus[]
-const provider = await client.providers.get('claude');  // ProviderStatus
+const providers = await client.providers.list(); // ProviderStatus[]
+const provider = await client.providers.get('claude'); // ProviderStatus
 
 const session = await client.sessions.create({
   provider: 'claude',
@@ -58,10 +62,31 @@ for await (const event of client.sessions.events(session.id)) {
 }
 
 const current = await client.sessions.get(session.id); // re-fetch the AgentSession record
-await client.sessions.cancel(session.id);               // cancel an in-flight session
-await client.sessions.delete(session.id);                // cancel (if running) and forget it
-await client.sessions.cancelAll();                       // cancel every in-flight session
+await client.sessions.cancel(session.id); // cancel an in-flight session
+await client.sessions.delete(session.id); // cancel (if running) and forget it
+await client.sessions.cancelAll(); // cancel every in-flight v1 session
 ```
+
+The existing top-level namespaces stay pinned to protocol v1. Capability-negotiated callers use
+the explicit v2 namespace:
+
+```ts
+const providersV2 = await client.v2.providers.list();
+const sessionV2 = await client.v2.sessions.create({
+  provider: 'claude',
+  cwd: '/path/to/project',
+  prompt: 'Inspect this repository',
+  // capabilities omitted: use the safe one-shot default request
+});
+
+for await (const event of client.v2.sessions.events(sessionV2.id)) {
+  console.log(event); // validated AgentEventV2Envelope
+}
+```
+
+`client.v2.sessions` also exposes `get`, `cancel`, and `delete`. Command dispatch intentionally
+isn't exposed until the bidirectional supervisor implements it. See
+[protocol-v2.md](protocol-v2.md) for the complete contract.
 
 Errors are typed, so a caller can branch on `instanceof` instead of parsing strings:
 
@@ -88,6 +113,10 @@ for a desktop shutdown path (Electron calls it before force-killing the daemon o
 process signal alone can't reach the daemon's own graceful-shutdown handler; see
 [daemon.md#shutdown](daemon.md#shutdown)); most callers only ever need `sessions.cancel(id)`.
 
+The v2 API is `v2.providers.list()`, `v2.providers.get(id)`, `v2.sessions.create(input)`,
+`v2.sessions.get(id)`, `v2.sessions.events(id, options?)`, `v2.sessions.cancel(id)`, and
+`v2.sessions.delete(id)`.
+
 ## Design decisions
 
 Worth knowing if you're extending this package:
@@ -96,7 +125,9 @@ Worth knowing if you're extending this package:
   synchronous and does no I/O; the first call to `health()` (or any other method) runs the
   `GET /health` + protocol-version check once, caches the result for the client's lifetime, and
   retries on the next call if it failed. A daemon still starting up shouldn't permanently poison a
-  client instance created a moment too early.
+  client instance created a moment too early. Discovery intersects the daemon's additive
+  `supportedProtocolVersions` list with the client's list and selects the highest shared version;
+  an older daemon without that list falls back to its legacy scalar.
 - **No automatic reconnect.** `sessions.events()` opens exactly one SSE connection and ends when
   the daemon closes it (the session's terminal event) or the caller's `AbortSignal` fires. If the
   connection drops for any other reason, the generator throws and the caller decides whether to

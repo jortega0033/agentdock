@@ -1,7 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import type { AgentEvent, AgentEventEnvelope, ProviderId, ProviderStatus } from '@agent-dock/shared';
+import type {
+  AgentEvent,
+  AgentEventEnvelope,
+  ProviderId,
+  ProviderStatus,
+} from '@agent-dock/shared';
 import { ProviderRegistry, noopLogger } from '@agent-dock/agent-runtime';
-import type { AgentProvider, ProviderSessionHandle, StartSessionOptions } from '@agent-dock/agent-runtime';
+import type {
+  AgentProvider,
+  ProviderSessionHandle,
+  StartSessionOptions,
+} from '@agent-dock/agent-runtime';
 import { SessionManager } from '../src/session-manager.js';
 
 const TERMINAL_TYPES = new Set(['session.completed', 'session.failed', 'session.cancelled']);
@@ -39,7 +48,9 @@ function makeControllableSession() {
         continue;
       }
       if (closed) return;
-      const result = await new Promise<IteratorResult<AgentEvent>>((resolve) => waiters.push(resolve));
+      const result = await new Promise<IteratorResult<AgentEvent>>((resolve) =>
+        waiters.push(resolve),
+      );
       if (result.done) return;
       yield result.value;
     }
@@ -96,7 +107,10 @@ function tick(ms = 0): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function collectUntilTerminal(sessionManager: SessionManager, id: string): Promise<AgentEventEnvelope[]> {
+function collectUntilTerminal(
+  sessionManager: SessionManager,
+  id: string,
+): Promise<AgentEventEnvelope[]> {
   return new Promise((resolve) => {
     const out: AgentEventEnvelope[] = [];
     const unsubscribe = sessionManager.subscribe(id, 0, (_index, event) => {
@@ -132,7 +146,9 @@ describe('SessionManager — normal lifecycle', () => {
     testSession.push({ type: 'assistant.message', text: 'hello' });
     await tick();
 
-    expect(received).toEqual([{ type: 'assistant.message', text: 'hello', sequence: 0, timestamp: received[0]?.timestamp }]);
+    expect(received).toEqual([
+      { type: 'assistant.message', text: 'hello', sequence: 0, timestamp: received[0]?.timestamp },
+    ]);
   });
 
   it('transitions to "completed" on session.completed', async () => {
@@ -184,7 +200,9 @@ describe('SessionManager — terminal guarantees', () => {
     testSession.finish();
 
     const events = await collected;
-    const terminalIndices = events.map((e, i) => (TERMINAL_TYPES.has(e.type) ? i : -1)).filter((i) => i >= 0);
+    const terminalIndices = events
+      .map((e, i) => (TERMINAL_TYPES.has(e.type) ? i : -1))
+      .filter((i) => i >= 0);
     expect(terminalIndices).toEqual([events.length - 1]);
   });
 
@@ -228,11 +246,14 @@ describe('SessionManager — past the history cap (AD-01)', () => {
     const session = sessionManager.create('claude', '/tmp', 'hi');
     const testSession = provider.sessions.get(session.id)!;
 
-    for (let i = 0; i < 5_005; i++) testSession.push({ type: 'assistant.message', text: `msg ${i}` });
+    for (let i = 0; i < 5_005; i++)
+      testSession.push({ type: 'assistant.message', text: `msg ${i}` });
     await tick(20); // let the history buffer actually fill and cap out before subscribing
 
     const received: AgentEventEnvelope[] = [];
-    const unsubscribe = sessionManager.subscribe(session.id, 0, (_i, event) => received.push(event));
+    const unsubscribe = sessionManager.subscribe(session.id, 0, (_i, event) =>
+      received.push(event),
+    );
     expect(unsubscribe).toBeDefined(); // session still exists — replay just has nothing past the cap to offer
     expect(received.length).toBe(5_000); // exactly MAX_STORED_EVENTS_PER_SESSION replayed
 

@@ -1,9 +1,9 @@
 # Architecture
 
 This is the map of the repository: what each layer does, why it's shaped this way, and where to
-find the deeper detail. Protocol wire-format detail lives in [protocol-v1.md](protocol-v1.md), the
-planned v2 trust and capability gate in
-[capability-security-v2.md](capability-security-v2.md), the client's own design decisions in
+find the deeper detail. Wire-format detail lives in [protocol-v1.md](protocol-v1.md) and
+[protocol-v2.md](protocol-v2.md), while the v2 trust and capability decisions live in
+[capability-security-v2.md](capability-security-v2.md). The client's own design decisions are in
 [client-sdk.md](client-sdk.md), and packaging specifics in [packaging.md](packaging.md); this file
 stays at the "how do the pieces fit together" level and links out rather than duplicating any of
 those.
@@ -62,14 +62,14 @@ Nothing depends "sideways" or "up": `apps/daemon` never imports from `apps/deskt
 
 ## What belongs where
 
-| If you're changing... | It belongs in | Not in |
-|---|---|---|
-| A type, Zod schema, or the protocol version | `packages/shared` | anywhere downstream: every other package imports these, none redefines them |
-| Provider process spawning, CLI-native parsing, an `AgentEvent` normalization rule | `packages/agent-runtime` | `apps/daemon`: the daemon never parses a provider's raw output itself |
-| A route, session lifecycle, auth/origin checks, SSE framing | `apps/daemon` | `packages/agent-runtime`: the runtime knows nothing about HTTP |
-| Anything the daemon exposes to a caller (HTTP/SSE handling, error typing) | `packages/client` | `apps/desktop/electron/main.ts`: main should only ever call `AgentDockClient` methods, never hand-roll a daemon request |
-| Electron main-process logic, IPC handlers, the daemon sidecar lifecycle | `apps/desktop/electron/main.ts` | the renderer, see [electron.md](electron.md) |
-| UI rendering, provider/session forms | `apps/desktop/src/` (renderer) | never a place that imports `@agent-dock/client` or touches the daemon's token |
+| If you're changing...                                                             | It belongs in                   | Not in                                                                                                                  |
+| --------------------------------------------------------------------------------- | ------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| A type, Zod schema, or the protocol version                                       | `packages/shared`               | anywhere downstream: every other package imports these, none redefines them                                             |
+| Provider process spawning, CLI-native parsing, an `AgentEvent` normalization rule | `packages/agent-runtime`        | `apps/daemon`: the daemon never parses a provider's raw output itself                                                   |
+| A route, session lifecycle, auth/origin checks, SSE framing                       | `apps/daemon`                   | `packages/agent-runtime`: the runtime knows nothing about HTTP                                                          |
+| Anything the daemon exposes to a caller (HTTP/SSE handling, error typing)         | `packages/client`               | `apps/desktop/electron/main.ts`: main should only ever call `AgentDockClient` methods, never hand-roll a daemon request |
+| Electron main-process logic, IPC handlers, the daemon sidecar lifecycle           | `apps/desktop/electron/main.ts` | the renderer, see [electron.md](electron.md)                                                                            |
+| UI rendering, provider/session forms                                              | `apps/desktop/src/` (renderer)  | never a place that imports `@agent-dock/client` or touches the daemon's token                                           |
 
 ## Trust boundaries
 
@@ -86,7 +86,7 @@ might be hostile":
    it structurally cannot reach the daemon's token or make an arbitrary daemon call, only the seven
    functions the preload bridge exposes.
 3. **The daemon → the provider CLI.** The daemon trusts the CLI it spawns (it's the user's own,
-   already-authenticated installation) but never trusts *what a request asked it to spawn*: the
+   already-authenticated installation) but never trusts _what a request asked it to spawn_: the
    executable is always resolved internally via `findExecutable()`, never from request input, and
    arguments are always an argv array, never a shell string.
 
@@ -230,7 +230,7 @@ each is also listed as out of scope in [CONTRIBUTING.md](../CONTRIBUTING.md#scop
 - **One daemon per app id, enforced** (see [Project identity](#project-identity) and
   [daemon.md#single-instance-behavior](daemon.md#single-instance-behavior)): two different
   products built on this boilerplate coexist by using different app ids, but two instances of the
-  *same* product still can't run side by side. A richer scheme (e.g. a random per-launch id) isn't
+  _same_ product still can't run side by side. A richer scheme (e.g. a random per-launch id) isn't
   needed for what this boilerplate currently supports.
 - **No API-key/cloud provider mode.** Everything here assumes a locally authenticated CLI; adding a
   second auth model is a different product shape, not an extension of this one.
@@ -251,7 +251,7 @@ workspace.
 
 That doesn't make the internal boundaries decorative. `packages/shared`'s types and Zod schemas,
 `AGENT_DOCK_PROTOCOL_VERSION`, and `@agent-dock/client`'s typed surface exist to keep the daemon,
-the client, and the desktop app honest with each other *inside* this repo (and inside a fork of
+the client, and the desktop app honest with each other _inside_ this repo (and inside a fork of
 it), a change to the wire format has to go through one shared definition, not get silently
 duplicated three ways. Protocol v1 currently governs the daemon/client pair as shipped together in
 this repository; it is not (yet) a promise to arbitrary external consumers.

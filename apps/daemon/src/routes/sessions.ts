@@ -41,7 +41,7 @@ export function registerSessionRoutes(
       reply.code(400).send({ error: 'invalid session id' });
       return;
     }
-    const session = sessionManager.get(params.data.sessionId);
+    const session = sessionManager.get(params.data.sessionId, 1);
     if (!session) {
       reply.code(404).send({ error: 'session not found' });
       return;
@@ -55,7 +55,7 @@ export function registerSessionRoutes(
       reply.code(400).send({ error: 'invalid session id' });
       return;
     }
-    if (!sessionManager.get(params.data.sessionId)) {
+    if (!sessionManager.get(params.data.sessionId, 1)) {
       reply.code(404).send({ error: 'session not found' });
       return;
     }
@@ -84,12 +84,17 @@ export function registerSessionRoutes(
       Number.isFinite(sinceIndex) ? sinceIndex : 0,
       (index, event) => {
         reply.raw.write(`id: ${index}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
-        if (event.type === 'session.completed' || event.type === 'session.failed' || event.type === 'session.cancelled') {
+        if (
+          event.type === 'session.completed' ||
+          event.type === 'session.failed' ||
+          event.type === 'session.cancelled'
+        ) {
           ended = true;
           unsubscribe?.();
           reply.raw.end();
         }
       },
+      1,
     );
 
     if (!unsubscribe) {
@@ -113,7 +118,7 @@ export function registerSessionRoutes(
       reply.code(400).send({ error: 'invalid session id' });
       return;
     }
-    const ok = await sessionManager.cancel(params.data.sessionId);
+    const ok = await sessionManager.cancel(params.data.sessionId, 1);
     if (!ok) {
       reply.code(404).send({ error: 'session not found' });
       return;
@@ -127,7 +132,7 @@ export function registerSessionRoutes(
   // TerminateProcess on Windows, so the daemon's own SIGTERM handler never runs there; see
   // apps/desktop/electron/main.ts#killDaemon and SECURITY.md). AD-12.
   app.post('/sessions/cancel-all', async (_req, reply) => {
-    await sessionManager.cancelAll();
+    await sessionManager.cancelAll(5_000, 1);
     reply.code(202).send({ status: 'cancelling' });
   });
 
@@ -137,7 +142,7 @@ export function registerSessionRoutes(
       reply.code(400).send({ error: 'invalid session id' });
       return;
     }
-    const ok = await sessionManager.remove(params.data.sessionId);
+    const ok = await sessionManager.remove(params.data.sessionId, 1);
     if (!ok) {
       reply.code(404).send({ error: 'session not found' });
       return;

@@ -14,6 +14,7 @@
   "dependencies": {
     "@agent-dock/agent-runtime": "workspace:*",
     "@agent-dock/shared": "workspace:*",
+    "@fastify/rate-limit": "11.2.0",
     "fastify": "^5.2.1",
     "zod": "^3.24.1"
   },

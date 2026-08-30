@@ -2,15 +2,17 @@
 
 This is the map of the repository: what each layer does, why it's shaped this way, and where to
 find the deeper detail. Protocol wire-format detail lives in [protocol-v1.md](protocol-v1.md), the
-client's own design decisions in [client-sdk.md](client-sdk.md), and packaging specifics in
-[packaging.md](packaging.md); this file stays at the "how do the pieces fit together" level and
-links out rather than duplicating any of those.
+planned v2 trust and capability gate in
+[capability-security-v2.md](capability-security-v2.md), the client's own design decisions in
+[client-sdk.md](client-sdk.md), and packaging specifics in [packaging.md](packaging.md); this file
+stays at the "how do the pieces fit together" level and links out rather than duplicating any of
+those.
 
 ## Component diagram
 
 ```
 ┌─────────────────────────┐
-│   Renderer (React)        │   window.agentDock.* — seven narrow IPC capabilities only.
+│   Renderer (React)        │   window.agentDock.*: currently seven narrow IPC capabilities.
 │                            │   Never sees the daemon's token or base URL.
 └─────────────┬────────────┘
               │ Electron IPC (contextBridge, same machine, no network)
@@ -71,7 +73,8 @@ Nothing depends "sideways" or "up": `apps/daemon` never imports from `apps/deskt
 
 ## Trust boundaries
 
-Three boundaries matter, in decreasing order of "who might be hostile":
+For the current protocol v1 implementation, three boundaries matter, in decreasing order of "who
+might be hostile":
 
 1. **The public internet / an arbitrary webpage → the daemon.** This is the one the whole
    architecture is built around, see [SECURITY.md](../SECURITY.md). The daemon binds
@@ -90,6 +93,12 @@ Three boundaries matter, in decreasing order of "who might be hostile":
 Explicitly **not** a trust boundary this project defends: another process running as the same OS
 user. See [SECURITY.md](../SECURITY.md#what-this-does-not-claim-to-protect-against).
 
+Protocol v2 adds workspace files, provider SDK/app-server transports, MCP servers, OAuth browser
+flows, and persisted history as explicit boundaries. It also keeps provider permissions, OS
+sandboxing, approvals, and worktree isolation as separate states. See the complete
+[v2 boundary inventory](capability-security-v2.md#execution-and-data-boundaries). This is an
+implementation gate, not a claim that v1 already enforces those controls.
+
 ## Why a separate daemon instead of running the CLI logic in Electron's main process
 
 Three reasons, in order of importance:
@@ -104,6 +113,8 @@ Three reasons, in order of importance:
    server, and no GUI test harness required.
 
 ## Runtime flow: what happens when a user presses "Run"
+
+This is the current protocol v1 one-shot flow. The v2 supervisor has not been implemented.
 
 1. Renderer calls `window.agentDock.createSession({ provider, cwd, prompt })`.
 2. Preload forwards it over IPC to `ipcMain.handle('daemon:create-session', ...)` in `main.ts`.
@@ -157,16 +168,22 @@ same daemon process's lifetime.
 
 ## Provider capabilities
 
-`ProviderStatus.capabilities` is what lets a downstream client ask "does this provider support X"
-instead of writing `if (provider.id === 'claude')`. See
+In protocol v1, `ProviderStatus.capabilities` lets a downstream client ask "does this provider
+support X" instead of writing `if (provider.id === 'claude')`. See
 [providers.md#provider-capabilities](providers.md#provider-capabilities) for the full
 `ProviderCapabilities` shape and exactly which fields are true for Claude and Codex and why. The
 daemon enforces `capabilities.resume` server-side too: `POST /sessions` rejects a
 `resumeProviderSessionId` for a provider whose capability is `false` with `400`, rather than
 silently ignoring it.
 
+Protocol v2 replaces booleans with scoped, evidence-backed support records while preserving opaque
+unknown IDs and provider-neutral negotiation. The canonical IDs, evidence rules, and safe defaults
+are fixed in [capability-security-v2.md](capability-security-v2.md#canonical-capability-catalog).
+They are not implemented by the current `ProviderStatus` schema.
+
 ## Process management
 
+For the current one-shot CLI adapters,
 `packages/agent-runtime/src/providers/common/run-session.ts` is the one place every provider's
 spawn/parse/normalize lifecycle happens. It:
 
@@ -184,6 +201,10 @@ spawn/parse/normalize lifecycle happens. It:
   [daemon.md#cancellation-and-process-tree-kill](daemon.md#cancellation-and-process-tree-kill)
 - always terminates the event stream with exactly one of `session.completed` / `session.failed` /
   `session.cancelled`, so callers never have to guess whether more events might still arrive
+
+Rich SDK/app-server transports will use the same provider-neutral contract but require a separate
+bidirectional supervisor. They must preserve the terminal-event invariant and the v2
+[accepted-work fallback boundary](capability-security-v2.md#transport-fallback-and-accepted-work-boundary).
 
 ## Daemon discovery and lifecycle
 

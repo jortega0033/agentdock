@@ -36,6 +36,20 @@ actually demonstrated versus what follows from the design.
 - **Provider-side security issues**: anything in Anthropic's or OpenAI's own infrastructure, auth
   systems, or CLI implementations is out of this project's scope entirely.
 
+## V2 capability and workspace trust model
+
+The statements above describe the current protocol v1 application. AgentDock v1 does not assign
+workspace trust, mediate provider approvals, or attest a Claude/Codex tool sandbox. The
+`BrowserWindow` renderer sandbox described later in this file is unrelated to isolation of an
+agent's shell, filesystem, or network access.
+
+The accepted v2 design adds evidence-backed capability negotiation, default-untrusted workspaces,
+platform-specific sandbox states, approval/audit rules, credential boundaries, data retention, and
+safe transport fallback. See
+[Capability and security model for protocol v2](docs/capability-security-v2.md). Those protections
+become claims only as their dependent implementation tickets and fixtures land; they must not be
+attributed to today's CLI adapters.
+
 ## Renderer never talks to the daemon directly
 
 This is the load-bearing design decision, and it exists because of something an earlier version of
@@ -55,7 +69,7 @@ main process** (`apps/desktop/electron/main.ts`, via `@agent-dock/client`), whic
 networking stack. CORS is a browser/fetch-spec concept enforced by Chromium's renderer process,
 not by the `fetch` function itself, so main-process fetch was never subject to it. **Verified**: the
 same request that failed from a real browser tab succeeds immediately from plain Node `fetch()`
-against the same daemon. The renderer talks to main only through seven narrow, typed IPC
+against the same daemon. The renderer currently talks to main through seven narrow, typed IPC
 capabilities (`electron/preload.ts`): `getDaemonStatus()`, `onDaemonStatus()`, `listProviders()`,
 `createSession()`, `cancelSession()`, `onSessionEvent()`, `selectDirectory()`. **The daemon's
 bearer token and base URL never cross into the renderer at all** (they live only in main-process
@@ -174,6 +188,13 @@ correct for what this daemon actually needs to be reachable by.
 - Leak the token back through any API response, even an error body. **Verified** by regression
   test (`apps/daemon/test/server.test.ts`).
 
+The v2 decision preserves these credential invariants and defines which normalized history,
+approval metadata, provider extensions, and attachments may be persisted. Designated provider,
+cloud, and MCP authentication values, process environments, auth headers/tokens, and
+provider-native credential or approval payloads remain non-persistent. Prompts and selected files
+can still contain user-supplied secrets and follow the documented content-retention rules. See
+[Persistence, retention, and redaction](docs/capability-security-v2.md#persistence-retention-and-redaction).
+
 ## Request validation
 
 Every request body and path/query parameter that reaches a route handler is validated with Zod
@@ -213,6 +234,11 @@ this project into a context where the daemon's own process might carry secrets u
 providers (e.g. it's started from a shell profile that also exports cloud credentials), that's a
 reason to start the daemon from a more minimal environment yourself, not something this codebase
 currently does for you.
+
+Protocol v2 narrows this default: adapters pass a documented provider-specific environment and
+report only a non-secret auth-source label. The exact credential and OAuth boundary is fixed in
+[Credentials and OAuth](docs/capability-security-v2.md#credentials-and-oauth). The current full
+environment inheritance remains documented here because v1 still behaves this way.
 
 ## Single daemon instance
 
@@ -262,7 +288,7 @@ asks for any of them. None of this is load-bearing for the *current* UI (it rend
 content or links, and requests no permissions), but it's cheap defense in depth for forks of this
 boilerplate that later add either.
 
-The preload script (`electron/preload.ts`) exposes exactly seven narrow, single-purpose, typed
+The preload script (`electron/preload.ts`) currently exposes exactly seven narrow, single-purpose, typed
 operations via `contextBridge`: daemon status (queried once, and pushed on change), list
 providers, create a session, cancel a session, subscribe to session events, open a native directory
 picker, never a generic "invoke this IPC channel with this payload" tunnel, and never the

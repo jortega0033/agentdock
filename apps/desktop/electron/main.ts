@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createSessionRequestSchema, sessionIdParamSchema } from '@agent-dock/shared';
 import { AgentDockClient } from '@agent-dock/client';
 import { resolveDaemonEntry } from './resolve-daemon-entry.js';
+import { resolveWindowIcon } from './resolve-window-icon.js';
 import { sendToRenderer } from './send-to-renderer.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -178,6 +179,11 @@ function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1000,
     height: 720,
+    icon: resolveWindowIcon({
+      appPath: app.getAppPath(),
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+    }),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,

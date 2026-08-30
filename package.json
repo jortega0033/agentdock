@@ -15,6 +15,8 @@
     "daemon": "pnpm --filter @agent-dock/daemon run start",
     "package": "pnpm build && pnpm --filter @agent-dock/desktop run package",
     "package:win": "pnpm build && pnpm --filter @agent-dock/desktop run package:win",
+    "assets:generate": "python scripts/assets/generate_assets.py && python scripts/assets/generate_public_assets.py",
+    "assets:validate": "python scripts/assets/validate_assets.py",
     "test": "pnpm -r --filter=./packages/* --filter=./apps/* run test",
     "typecheck": "pnpm -r run typecheck",
     "lint": "eslint .",

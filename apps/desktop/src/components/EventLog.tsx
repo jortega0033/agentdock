@@ -1,15 +1,16 @@
 import type { AgentEvent } from '@agent-dock/shared';
+import emptyEventsIllustration from '../../assets/illustrations/empty-events.svg';
 
 /**
  * Renders the normalized AgentEvent stream. Every branch here is keyed on `event.type`, never
- * on which provider produced it — that's the whole point of the normalized protocol.
+ * on which provider produced it: that's the whole point of the normalized protocol.
  */
 function formatEvent(event: AgentEvent): string {
   switch (event.type) {
     case 'session.started':
       return `session started (${event.provider})`;
     case 'status':
-      return `status: ${event.status}${event.detail ? ` — ${event.detail}` : ''}`;
+      return `status: ${event.status}${event.detail ? ` (${event.detail})` : ''}`;
     case 'assistant.message':
       return event.text;
     case 'thinking.delta':
@@ -19,9 +20,9 @@ function formatEvent(event: AgentEvent): string {
     case 'tool.completed':
       return `tool ${event.isError ? 'failed' : 'completed'}: ${event.toolName ?? 'unknown'}`;
     case 'usage':
-      return `usage — in: ${event.inputTokens ?? '?'} out: ${event.outputTokens ?? '?'}${
+      return `usage (in: ${event.inputTokens ?? '?'} out: ${event.outputTokens ?? '?'}${
         event.cost !== undefined ? ` cost: $${event.cost.toFixed(4)}` : ''
-      }`;
+      })`;
     case 'error':
       return `error: ${event.message}`;
     case 'session.completed':
@@ -44,7 +45,13 @@ function cssClassFor(event: AgentEvent): string {
 
 export function EventLog({ events }: { events: AgentEvent[] }) {
   if (events.length === 0) {
-    return <div className="event-log event-log--empty">No events yet.</div>;
+    return (
+      <div className="event-log event-log--empty">
+        <img className="event-log__empty-illustration" src={emptyEventsIllustration} alt="" />
+        <strong>No events yet.</strong>
+        <span>Start a session to stream provider-neutral events here.</span>
+      </div>
+    );
   }
   return (
     <div className="event-log" role="log" aria-label="session events">

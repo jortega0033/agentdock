@@ -1,0 +1,6 @@
+# Default review owner for this public repository.
+* @jortega0033
+
+# Changes to repository policy, automation, and security need explicit maintainer visibility.
+/.github/ @jortega0033
+/SECURITY.md @jortega0033

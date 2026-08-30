@@ -278,10 +278,8 @@ of its own.
 
 ## Reporting a vulnerability
 
-This repository does not (yet) have a dedicated security contact address. Once it's public on
-GitHub, please report a security issue through
-[GitHub's private security advisory feature](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing/privately-reporting-a-security-vulnerability)
-on this repository ("Security" tab → "Report a vulnerability") rather than filing a public issue or
-exploit writeup. If that feature isn't available yet (e.g. the repo is still private), reach the
-maintainers through whatever private channel they've made available and avoid disclosing details
-publicly until a fix is out.
+This repository does not have a dedicated security contact address. Report vulnerabilities through
+[this repository's private security advisory form](https://github.com/jortega0033/agentdock/security/advisories/new)
+rather than filing a public issue, pull request, or exploit writeup. Include reproduction steps,
+affected versions, impact, and any suggested mitigation. Avoid disclosing details publicly until a
+fix or coordinated disclosure is ready.

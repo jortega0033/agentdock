@@ -1,7 +1,7 @@
 # Daemon
 
 `apps/daemon` is a standalone Fastify HTTP+SSE server. It has no Electron dependency and no
-required parent process — `pnpm daemon` runs and can be `curl`'d directly, with no display server
+required parent process: `pnpm daemon` runs and can be `curl`'d directly, with no display server
 or GUI test harness required.
 
 ## Running it standalone
@@ -23,22 +23,22 @@ source changes.
 
 ## Binding and port
 
-The daemon binds `127.0.0.1` only — never `0.0.0.0`, and never the IPv6 loopback (`::1`) either; it
+The daemon binds `127.0.0.1` only, never `0.0.0.0`, and never the IPv6 loopback (`::1`) either; it
 answers on IPv4 only (`apps/daemon/src/index.ts`). By default it asks the OS for an ephemeral port
 (`AGENT_DOCK_PORT` unset or `0`); set `AGENT_DOCK_PORT=<port>` to request a fixed one. Whichever
-port it ends up on is written to the discovery file and printed to stdout — there's no way to know
+port it ends up on is written to the discovery file and printed to stdout: there's no way to know
 it in advance otherwise.
 
 ## Discovery file
 
 The daemon writes `{ port, token, pid, startedAt }` to `os.tmpdir()/agent-dock/<app-id>.json` once
-it's listening — the file mode `0600`, and the containing directory created/verified mode `0700`
+it's listening (the file mode `0600`, and the containing directory created/verified mode `0700`
 on POSIX (see [SECURITY.md](../SECURITY.md#local-auth-token) for why, including the Windows
-caveat). This is a **filesystem handoff, not a network one** — a client reads the file directly
+caveat)). This is a **filesystem handoff, not a network one**: a client reads the file directly
 (it has to be running as the same OS user), rather than the daemon ever broadcasting the token
 over the network.
 
-`<app-id>` defaults to `agent-dock` and is set via `AGENT_DOCK_APP_ID` — see
+`<app-id>` defaults to `agent-dock` and is set via `AGENT_DOCK_APP_ID`; see
 [Single-instance behavior](#single-instance-behavior) below for why it exists and how it's
 validated.
 
@@ -46,7 +46,7 @@ validated.
 
 Every route except `GET /health` requires `Authorization: Bearer <token>`, checked with a
 timing-safe comparison. The full threat model and reasoning live in
-[SECURITY.md](../SECURITY.md) — this file only covers operational behavior, not why it's safe.
+[SECURITY.md](../SECURITY.md); this file only covers operational behavior, not why it's safe.
 
 ## Single-instance behavior
 
@@ -55,21 +55,21 @@ The daemon refuses to start if its app id's discovery file's recorded pid is sti
 
 ```
 Error: another agent-dock daemon (app id "agent-dock") is already running (pid <pid>,
-discovery file <path>). Only one daemon per app id is supported at a time — stop it first.
+discovery file <path>). Only one daemon per app id is supported at a time, stop it first.
 ```
 
 This is a **per app id** guarantee, not a machine-global one. `AGENT_DOCK_APP_ID` (default
 `agent-dock`) namespaces the discovery filename, so two different products built on this
-boilerplate — each launched with its own app id — run their own daemons side by side without
+boilerplate, each launched with its own app id, run their own daemons side by side without
 colliding; two daemons started with the *same* app id still race for the same file and the second
 one refuses to start, which is the actual invariant this exists to guarantee. The app id is
 validated before it's used to build a path: 1–64 characters, letters/digits/`-`/`_` only, must
-start with a letter or digit — rejected outright (the daemon fails to start with a clear error)
+start with a letter or digit: rejected outright (the daemon fails to start with a clear error)
 rather than sanitized, so it can't be used for path traversal or to point outside the discovery
 directory entirely.
 
 A discovery file whose recorded pid is no longer running (a stale file left by a crash or
-force-kill) is treated as safe to overwrite — nothing is listening at that pid anymore, and a
+force-kill) is treated as safe to overwrite: nothing is listening at that pid anymore, and a
 corrupt/partially-written file is treated the same way. A stale file for one app id never affects
 another app id's daemon, since they're different files. See
 [troubleshooting.md](troubleshooting.md#daemon-fails-to-start) if you hit this unexpectedly.
@@ -79,13 +79,13 @@ another app id's daemon, since they're different files. See
 | Route | Auth | Behavior |
 |---|---|---|
 | `GET /health` | none | `{ status: 'ok', uptimeSeconds, protocolVersion }` |
-| `GET /providers` | required | `{ providers: ProviderStatus[] }` — runs each adapter's `detect()` |
+| `GET /providers` | required | `{ providers: ProviderStatus[] }`, runs each adapter's `detect()` |
 | `GET /providers/:providerId` | required | One `ProviderStatus`, or `404` for an unregistered id |
 | `POST /sessions` | required | Body validated against `createSessionRequestSchema`. `400` for an unknown provider, a `resumeProviderSessionId` on a provider whose `capabilities.resume` is `false`, or a `cwd` that doesn't exist. `201` + `AgentSession` on success |
 | `GET /sessions/:sessionId` | required | Current `AgentSession` record, or `404` |
-| `GET /sessions/:sessionId/events` | required | SSE stream — see [Event history and replay](#event-history-and-replay) below |
-| `POST /sessions/:sessionId/cancel` | required | `202` + `{ status: 'cancelling' }`. `404` for an unknown id **or** a session that's already terminal — cancelling a finished session is never reported as a success |
-| `POST /sessions/cancel-all` | required | Cancels every in-flight session. Narrow and single-purpose (not a generic process-control endpoint) — exists specifically for Electron's shutdown path, see [Shutdown](#shutdown) below. `202` + `{ status: 'cancelling' }` |
+| `GET /sessions/:sessionId/events` | required | SSE stream, see [Event history and replay](#event-history-and-replay) below |
+| `POST /sessions/:sessionId/cancel` | required | `202` + `{ status: 'cancelling' }`. `404` for an unknown id **or** a session that's already terminal: cancelling a finished session is never reported as a success |
+| `POST /sessions/cancel-all` | required | Cancels every in-flight session. Narrow and single-purpose (not a generic process-control endpoint): exists specifically for Electron's shutdown path, see [Shutdown](#shutdown) below. `202` + `{ status: 'cancelling' }` |
 | `DELETE /sessions/:sessionId` | required | Cancels if still running, then removes the record. `204`, or `404` |
 
 Every request body/param is Zod-validated before touching any handler logic
@@ -116,15 +116,15 @@ interface SessionStore {
 }
 ```
 
-`MemorySessionStore` is the only implementation and the daemon's default — fully synchronous (so is
+`MemorySessionStore` is the only implementation and the daemon's default: fully synchronous (so is
 the interface), and **sessions do not survive a daemon restart**. Persistence is explicitly out of
 scope for this milestone: swapping in a real store (e.g. a future `SQLiteSessionStore`) should only
-require implementing this interface, not touching `SessionManager`'s lifecycle logic — but the
+require implementing this interface, not touching `SessionManager`'s lifecycle logic, but the
 interface would likely need to become `async` at that point, a deliberately larger change left for
 when it's actually needed.
 
 The store owns only the `AgentSession` record. A session's live process handle (an
-`AsyncGenerator` plus a `cancel()` closure — not serializable at all) and its buffered event
+`AsyncGenerator` plus a `cancel()` closure, not serializable at all) and its buffered event
 history are kept as separate, non-persistable runtime state inside `SessionManager`, specifically
 so `SessionStore` never grows into an accidental event-history database with its own
 schema-design questions.
@@ -139,12 +139,12 @@ per session (`MAX_STORED_EVENTS_PER_SESSION`). `GET /sessions/:id/events`:
    sent) as `id: <sequence>\nevent: <type>\ndata: <json>\n\n` frames.
 3. Keeps the connection open and streams new events live as they arrive.
 4. Closes the response itself once a terminal event (`session.completed` / `session.failed` /
-   `session.cancelled`) is written — the client never has to guess whether more events might still
+   `session.cancelled`) is written: the client never has to guess whether more events might still
    arrive.
 
 Past 5,000 buffered events, further events are no longer available to replay to a *new*
 subscriber, but they are always still delivered live to every currently-connected subscriber,
-including the terminal event — the cap only ever bounds replay history, never live delivery.
+including the terminal event: the cap only ever bounds replay history, never live delivery.
 `sequence` is stamped from a counter independent of the history buffer's length, so it keeps
 incrementing past the cap rather than resetting or gapping. The daemon logs a warning once history
 stops growing, rather than growing memory unbounded. This is regression-tested directly in
@@ -155,23 +155,23 @@ for the full ordering contract this upholds.
 ## Session retention
 
 Once a session reaches a terminal state, its runtime state (buffered event history, listener set)
-isn't deleted immediately — a client that hasn't seen the terminal event yet still needs to
+isn't deleted immediately: a client that hasn't seen the terminal event yet still needs to
 replay/receive it. But retaining every completed session forever would grow memory without bound
 for a long-lived daemon whose client never calls `DELETE`, so `SessionManager` keeps only the most
 recently completed 50 sessions' runtime state (`MAX_RETAINED_COMPLETED_SESSIONS`), evicting the
-oldest — and its `AgentSession` record with it — once a 51st completes. This is a simple bound, not
+oldest (and its `AgentSession` record with it) once a 51st completes. This is a simple bound, not
 a cache-replacement policy: the daemon is local and single-user, and a bound that's simple to
 reason about was preferred over one that's optimal. `DELETE /sessions/:id` removes a session
 immediately regardless of this cap, and removes it from the retention tracking too.
 
-`SessionManager.cancel()` also refuses to report success for a session that's already terminal —
-see the routes table above — so a stale UI action against a long-finished session gets `404`, not
+`SessionManager.cancel()` also refuses to report success for a session that's already terminal
+(see the routes table above), so a stale UI action against a long-finished session gets `404`, not
 a misleading `202`.
 
 ## Cancellation and process-tree kill
 
 `POST /sessions/:id/cancel` calls the session's runtime handle's `cancel()`, which kills the
-provider CLI's whole process tree — not just the direct child — so a cancelled session can't leave
+provider CLI's whole process tree, not just the direct child, so a cancelled session can't leave
 a grandchild process (e.g. a shell command the CLI itself launched) orphaned:
 
 - **Windows**: `taskkill /pid <pid> /T /F`
@@ -187,25 +187,25 @@ the record, so deleting a live session doesn't orphan its process either.
 ## Shutdown
 
 On `SIGINT`/`SIGTERM`, the daemon (`apps/daemon/src/index.ts`): cancels every in-flight session and
-waits — bounded, 5 seconds by default — for their processes to actually exit
+waits (bounded, 5 seconds by default) for their processes to actually exit
 (`SessionManager.cancelAll()`), closes the Fastify server, removes the discovery file, then exits.
-This is idempotent — a second signal while shutdown is already in progress is a no-op. The bounded
+This is idempotent: a second signal while shutdown is already in progress is a no-op. The bounded
 wait means shutdown won't hang forever if a child ignores termination, but also won't return
-instantly while a child is still mid-teardown — `cancel()` on a runtime handle only *initiates*
+instantly while a child is still mid-teardown: `cancel()` on a runtime handle only *initiates*
 termination (fires a signal/`taskkill` and returns), so without the wait the daemon could exit
 while a process was still alive.
 
 **Windows limitation**: Node's `child.kill()` maps to `TerminateProcess` on Windows, which does not
-deliver a real `SIGTERM` the daemon's own shutdown handler can catch — so when Electron kills the
+deliver a real `SIGTERM` the daemon's own shutdown handler can catch, so when Electron kills the
 daemon child process directly (e.g. on app quit), the daemon's own `cancelAll()` above never runs
 at all on that platform. Electron compensates by calling `POST /sessions/cancel-all` over HTTP
-*before* killing the daemon child process — HTTP is a request Windows can deliver reliably, unlike
-a signal to the daemon's own process — so every in-flight session is confirmed cancelled before the
+*before* killing the daemon child process (HTTP is a request Windows can deliver reliably, unlike
+a signal to the daemon's own process), so every in-flight session is confirmed cancelled before the
 daemon process is force-killed, not just the one session the desktop UI happens to be tracking. See
 `killDaemon()` in `apps/desktop/electron/main.ts` and
 [architecture.md#known-limitations](architecture.md#known-limitations) for what this does and
 doesn't cover on POSIX. The daemon process itself has always been confirmed to exit alongside the
-app in testing; what can be left behind is a stale discovery file, which is harmless — see
+app in testing; what can be left behind is a stale discovery file, which is harmless, see
 [Single-instance behavior](#single-instance-behavior) above.
 
 ## Logging
@@ -213,4 +213,4 @@ app in testing; what can be left behind is a stale discovery file, which is harm
 `packages/agent-runtime/src/logger.ts`'s `createConsoleLogger` writes structured JSON lines to
 stdout/stderr. Set `AGENT_DOCK_LOG_LEVEL=debug` to see `debug`-level lines (default is `info`). Any
 log metadata key matching `/token|secret|password|authorization|api[-_]?key|credential/i` is
-redacted to `[redacted]` regardless of level — see [SECURITY.md](../SECURITY.md#what-the-daemon-will-never-do).
+redacted to `[redacted]` regardless of level, see [SECURITY.md](../SECURITY.md#what-the-daemon-will-never-do).

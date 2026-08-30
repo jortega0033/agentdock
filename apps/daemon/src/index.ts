@@ -15,7 +15,7 @@ async function main() {
   const logger = createConsoleLogger('daemon', process.env.AGENT_DOCK_LOG_LEVEL === 'debug' ? 'debug' : 'info');
   // Namespaces the discovery rendezvous per application (AD-02) so two different products built
   // on this boilerplate can each run their own daemon at once instead of colliding on one
-  // machine-global path. The reference desktop app never sets this — it only matters for a fork
+  // machine-global path. The reference desktop app never sets this: it only matters for a fork
   // that wants to coexist with another AgentDock-based app on the same machine.
   const appId = process.env.AGENT_DOCK_APP_ID?.trim() || DEFAULT_APP_ID;
   assertNoLiveDaemon(appId);

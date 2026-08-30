@@ -3,11 +3,11 @@ import { ValidationError } from './errors.js';
 
 /**
  * Incrementally parses the daemon's SSE byte stream into validated `AgentEventEnvelope` objects.
- * The internal buffer only ever holds an in-progress (not yet newline-terminated) frame — never
- * the whole stream — so a long-running session can't grow unbounded client-side memory.
+ * The internal buffer only ever holds an in-progress (not yet newline-terminated) frame, never
+ * the whole stream, so a long-running session can't grow unbounded client-side memory.
  *
  * A frame that isn't valid JSON, or is valid JSON that doesn't match the protocol v1 schema,
- * throws a `ValidationError` and ends the generator — a malformed event from the daemon is a
+ * throws a `ValidationError` and ends the generator: a malformed event from the daemon is a
  * contract violation worth surfacing loudly, not silently skipping.
  */
 export async function* parseSseStream(

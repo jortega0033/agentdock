@@ -7,7 +7,7 @@ export interface StartSessionOptions {
   prompt: string;
   /** Provider-native session/thread id to resume, if the provider supports it. */
   resumeProviderSessionId?: string;
-  /** Unset by every caller in this codebase today — the spawned process inherits the daemon's
+  /** Unset by every caller in this codebase today: the spawned process inherits the daemon's
    * full `process.env` by default, deliberately, since the CLI needs its own PATH/HOME/etc. to
    * find its config and credentials. See SECURITY.md#environment-inheritance-a-deliberate-tradeoff-not-an-oversight. */
   env?: NodeJS.ProcessEnv;

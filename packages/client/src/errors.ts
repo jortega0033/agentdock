@@ -1,7 +1,7 @@
-/** Base class for every error this client throws — `catch (e) { if (e instanceof AgentDockClientError) ... }` catches all of them. */
+/** Base class for every error this client throws: `catch (e) { if (e instanceof AgentDockClientError) ... }` catches all of them. */
 export abstract class AgentDockClientError extends Error {}
 
-/** The daemon could not be reached at all — connection refused, DNS failure, timeout, aborted. */
+/** The daemon could not be reached at all: connection refused, DNS failure, timeout, aborted. */
 export class DaemonUnavailableError extends AgentDockClientError {
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);
@@ -19,7 +19,7 @@ export class UnauthorizedError extends AgentDockClientError {
 
 /**
  * The daemon's protocol version doesn't match what this client was built against. Thrown from
- * the first call any client method makes (see client.ts's compatibility check) — never something
+ * the first call any client method makes (see client.ts's compatibility check), never something
  * you need to check for manually.
  */
 export class ProtocolMismatchError extends AgentDockClientError {
@@ -56,7 +56,7 @@ export class ProviderUnavailableError extends AgentDockClientError {
   }
 }
 
-/** Any other daemon-declared failure — preserves the daemon's own status code and message. */
+/** Any other daemon-declared failure: preserves the daemon's own status code and message. */
 export class DaemonError extends AgentDockClientError {
   constructor(
     message: string,

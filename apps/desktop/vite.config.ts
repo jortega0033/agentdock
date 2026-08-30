@@ -5,7 +5,7 @@ import electron from 'vite-plugin-electron/simple';
 // Bundles electron/main.ts and electron/preload.ts with esbuild and drives the Electron
 // process during `vite dev` (launch + reload on change); `vite build` produces the same
 // dist-electron/ output for packaging. This is the one non-boring dependency in the desktop
-// app — chosen over hand-rolled esbuild+concurrently scripting because it's small,
+// app, chosen over hand-rolled esbuild+concurrently scripting because it's small,
 // purpose-built for exactly this main/preload/renderer split, and needs no extra config.
 export default defineConfig({
   plugins: [

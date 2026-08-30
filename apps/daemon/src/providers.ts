@@ -2,7 +2,7 @@ import { ClaudeProvider, CodexProvider, ProviderRegistry, type Logger } from '@a
 
 /**
  * Wires up every supported provider. This is the one place that needs to change to add a new
- * provider to the daemon — the routes and session manager only ever talk to ProviderRegistry.
+ * provider to the daemon: the routes and session manager only ever talk to ProviderRegistry.
  */
 export function buildProviderRegistry(logger: Logger): ProviderRegistry {
   const registry = new ProviderRegistry();

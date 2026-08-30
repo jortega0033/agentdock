@@ -74,7 +74,7 @@ export function registerSessionRoutes(
 
     let ended = false;
     // Declared separately (not `const unsubscribe = subscribe(...)`) because the listener below
-    // can run *synchronously inside* this call (replaying already-stored events) — referencing
+    // can run *synchronously inside* this call (replaying already-stored events); referencing
     // `unsubscribe` from inside it before a combined declaration+assignment finished initializing
     // would throw. `let` here is deliberate, not a lint slip.
     let unsubscribe: (() => void) | undefined;
@@ -94,7 +94,7 @@ export function registerSessionRoutes(
 
     if (!unsubscribe) {
       // Lost the race against a concurrent DELETE that ran between the existence check above and
-      // subscribe() — the session's runtime state is already gone. Without this, the already-200
+      // subscribe(): the session's runtime state is already gone. Without this, the already-200
       // response would stay open forever with no data and no close (the exact race the daemon
       // audit flagged for this route).
       reply.raw.end();
@@ -102,7 +102,7 @@ export function registerSessionRoutes(
     }
 
     // If the session was already terminal, the listener above fired synchronously during
-    // subscribe() (before `unsubscribe` was assigned) — clean it up now instead.
+    // subscribe() (before `unsubscribe` was assigned); clean it up now instead.
     if (ended) unsubscribe();
     else req.raw.on('close', () => unsubscribe?.());
   });
@@ -122,7 +122,7 @@ export function registerSessionRoutes(
   });
 
   // Narrow, single-purpose route (not a generic process-control endpoint) so Electron's shutdown
-  // path can ask the daemon to cancel every in-flight session over HTTP — which Windows can
+  // path can ask the daemon to cancel every in-flight session over HTTP, which Windows can
   // deliver reliably, unlike a real SIGTERM to the daemon process itself (child.kill() maps to
   // TerminateProcess on Windows, so the daemon's own SIGTERM handler never runs there; see
   // apps/desktop/electron/main.ts#killDaemon and SECURITY.md). AD-12.

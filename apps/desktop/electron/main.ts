@@ -14,7 +14,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // Two AgentDock windows would each spawn their own daemon sidecar and race over the same
 // discovery file (the daemon's own single-instance guard, see SECURITY.md, would make the
-// second one fail to start) — rather than let that surface as a confusing "daemon unavailable"
+// second one fail to start). Rather than let that surface as a confusing "daemon unavailable"
 // error, refuse to open a second window at all and focus the existing one instead.
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
@@ -22,7 +22,7 @@ if (!gotSingleInstanceLock) {
 }
 
 /**
- * Renderer status only — never the token or base URL. The renderer talks to the daemon
+ * Renderer status only, never the token or base URL. The renderer talks to the daemon
  * exclusively through the IPC handlers below, which delegate to `@agent-dock/client`; the
  * `AgentDockClient` instance (which carries the bearer token) never crosses into the renderer
  * process. See SECURITY.md.
@@ -35,7 +35,7 @@ let mainWindow: BrowserWindow | undefined;
 let activeSessionId: string | undefined;
 let activeStreamAbort: AbortController | undefined;
 
-// Namespaces the daemon rendezvous per application (AD-02) — see apps/daemon/src/discovery-file.ts
+// Namespaces the daemon rendezvous per application (AD-02); see apps/daemon/src/discovery-file.ts
 // for the daemon side of this. A fork shipping its own product under a different name should set
 // this to its own id (env var, or hardcode a different literal here) so it doesn't collide with
 // another AgentDock-based app's daemon on the same machine; the reference app just uses the
@@ -94,7 +94,7 @@ async function waitForDaemonReady(spawnedAt: number, timeoutMs = 15_000): Promis
       try {
         const parsed = JSON.parse(readFileSync(file, 'utf8')) as { port: number; token: string };
         const candidate = new AgentDockClient({ baseUrl: `http://127.0.0.1:${parsed.port}`, token: parsed.token });
-        // health() also verifies protocol compatibility (see @agent-dock/client) — this doubles
+        // health() also verifies protocol compatibility (see @agent-dock/client); this doubles
         // as both the readiness check and the version-compatibility check in one call.
         await candidate.health();
         client = candidate;
@@ -102,7 +102,7 @@ async function waitForDaemonReady(spawnedAt: number, timeoutMs = 15_000): Promis
         return;
       } catch {
         // discovery file mid-write, daemon not reachable yet, or (in dev only, across a protocol
-        // bump) a stale daemon still shutting down — keep polling rather than fail on one miss
+        // bump) a stale daemon still shutting down: keep polling rather than fail on one miss
       }
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -139,7 +139,7 @@ async function killDaemon(): Promise<void> {
   activeStreamAbort?.abort();
   if (client) {
     try {
-      // Cancels every in-flight session over HTTP, not just `activeSessionId` — on Windows,
+      // Cancels every in-flight session over HTTP, not just `activeSessionId`. On Windows,
       // daemonChild.kill() below maps to TerminateProcess, which never gives the daemon's own
       // SIGTERM handler (and its cancelAll()) a chance to run, so this HTTP call is the only
       // reliable way to stop every session's CLI process on that platform. Tracking a single
@@ -157,7 +157,7 @@ const packagedEntryUrl = pathToFileURL(join(__dirname, '..', 'dist', 'index.html
 
 /**
  * Scopes `will-navigate` to exactly the app's own content instead of "any http(s) origin that
- * happens to start with the dev-server URL" or "any file:// path at all" — both of the previous
+ * happens to start with the dev-server URL" or "any file:// path at all". Both of the previous
  * checks were prefix-based (`url.startsWith(...)`), which a URL like
  * `http://localhost:5173.evil.example` passes against an allowed `http://localhost:5173`. Real
  * origin comparison (dev) and exact-path comparison against the one file this app ever loads
@@ -205,7 +205,7 @@ function createWindow(): void {
     void shell.openExternal(url);
   });
 
-  // Deny every permission request by default — nothing in this UI currently asks for camera,
+  // Deny every permission request by default: nothing in this UI currently asks for camera,
   // microphone, geolocation, notifications, etc, so there's no legitimate request to allow.
   // Electron's own per-permission/per-platform defaults are inconsistent; this makes the policy
   // explicit and uniform instead of relying on them.
@@ -233,7 +233,7 @@ ipcMain.handle('daemon:list-providers', async () => {
 
 ipcMain.handle('daemon:create-session', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
-  // Validated here too, at the IPC boundary from the (untrusted) renderer — @agent-dock/client
+  // Validated here too, at the IPC boundary from the (untrusted) renderer. @agent-dock/client
   // validates again before it ever builds a request, but that's a different concern (protecting
   // the client's own contract), not a substitute for validating what crossed the privileged
   // boundary from the renderer in the first place.

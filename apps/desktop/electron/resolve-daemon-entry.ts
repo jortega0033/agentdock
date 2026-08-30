@@ -29,14 +29,14 @@ export interface DaemonEntry {
 /**
  * Three distinct cases, in priority order:
  *
- * 1. **Dev server** (`vite dev` spawned us — VITE_DEV_SERVER_URL is set): always run
+ * 1. **Dev server** (`vite dev` spawned us; VITE_DEV_SERVER_URL is set): always run
  *    apps/daemon/src/index.ts live through tsx, even if a stale `dist/` build exists from an
  *    earlier `pnpm build`, so the sidecar always reflects current source.
  * 2. **Packaged app** (installed/running from an electron-builder output): the daemon's built
  *    bundle ships as an extraResource *outside* app.asar (see electron-builder.yml) at
- *    `resourcesPath/daemon/index.js` — never source, never tsx, since neither exists in a
+ *    `resourcesPath/daemon/index.js`, never source, never tsx, since neither exists in a
  *    packaged build.
- * 3. **Unpacked production build** (`pnpm build` ran but the app isn't packaged — e.g. `electron .`
+ * 3. **Unpacked production build** (`pnpm build` ran but the app isn't packaged, e.g. `electron .`
  *    against apps/desktop directly): prefer apps/daemon's own `dist/index.js` next to its source;
  *    fall back to tsx+source only if that build hasn't been run yet.
  */

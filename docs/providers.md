@@ -23,6 +23,10 @@ directly: it delegates to the shared `runProviderSession()` helper (see
 [architecture.md#process-management](architecture.md#process-management)) and supplies only
 `buildArgs()` and `parseLine()`, the two genuinely provider-specific pure functions.
 
+That paragraph describes the current protocol v1 one-shot adapters. The planned bidirectional
+provider contract and its security gates are defined in
+[Capability and security model for protocol v2](capability-security-v2.md).
+
 ## Executable discovery
 
 `findExecutable()` (`packages/agent-runtime/src/detect-executable.ts`) does not assume the CLI is
@@ -98,10 +102,10 @@ capability later doesn't break a client built against today's five-key shape. Th
 (`providerCapabilitiesSchema` in `packages/shared/src/schemas.ts`) matches: every known key is
 `.optional()`, and unknown keys pass through validation via `.catchall(z.boolean())` rather than
 being rejected or silently stripped, so a client one version behind a daemon that's grown a new
-capability still gets to see it. Don't build a richer capability-descriptor shape than this:
-plain optional booleans are the whole design; a provider-specific extension that doesn't fit a
-boolean belongs in a namespaced extension field on `ProviderStatus`, not a new top-level capability
-key.
+capability still gets to see it. For protocol v1, plain optional booleans are the complete design;
+there is no richer provider-specific extension path. Adding one would require coordinated shared
+type, schema, protocol, and client changes. Protocol v2 supplies that extension model through
+scoped support records without mutating the v1 wire shape.
 
 Both current adapters (`providers/claude/capabilities.ts`, `providers/codex/capabilities.ts`)
 declare every field `true`, and each is true for a specific, checkable reason, not because the two
@@ -124,6 +128,18 @@ Add a capability field only when it corresponds to behavior a real adapter alrea
 `modelSelection`, `fileEdits`-as-distinct-from-`tools`, and similar were considered and left out for
 v0.2: neither adapter lets a caller pick a model via the API, and file-edit/command-execution
 distinctions are already covered by the generic `tools` flag plus each tool event's own `toolName`.
+
+### Capability and security v2 design
+
+Protocol v2 keeps the rule that adapter-tested behavior is truth, but replaces the five booleans
+with canonical IDs and support records scoped to provider, transport, version, platform, model,
+auth mode, and trust state. Vendor documentation is planning evidence only. Unknown IDs round-trip
+without provider-specific branches and remain unselected by default.
+
+The complete catalog, legacy mapping, sandbox matrix, workspace trust rules, credential posture,
+retention limits, and fallback boundary live in
+[capability-security-v2.md](capability-security-v2.md). None of those records are advertised by
+the current adapters yet.
 
 ## Claude Code adapter
 
@@ -188,9 +204,9 @@ Verified manually the same way as Claude: a real, already-authenticated `codex` 
 correct response through the full daemon → adapter → SSE pipeline, including capturing Codex's own
 thread id as `providerSessionId`.
 
-### Decision: staying on `codex exec --json`, not migrating to `codex app-server` (AD-21)
+### Historical v0.2 decision: staying on `codex exec --json` (AD-21)
 
-Recorded against the CLI version verified during the post-audit hardening pass:
+This v0.2 decision was recorded against the CLI version verified during the post-audit hardening pass:
 **codex-cli 0.147.0**, which itself labels `app-server` `[experimental]` (with a further
 stable/experimental split inside `app-server` too). This is a dated decision, not a permanent one.
 Revisit it if any of these four triggers becomes true:
@@ -203,7 +219,13 @@ Revisit it if any of these four triggers becomes true:
 4. `codex exec --json` itself is deprecated, or its output schema regresses in a way this adapter
    can't absorb.
 
-None of the four is true today, and migrating now would cost real things this project depends on:
+Triggers 1 and 2 are now planned under the v2 integration epic, and OpenAI now documents
+app-server as its rich-client interface. The current adapter still stays on `codex exec --json`
+until the v2 protocol, supervisor, trust policy, and fixture gates land. The target migration is
+tracked in [issue #10](https://github.com/jortega0033/agentdock/issues/10), and its security
+constraints are fixed in [capability-security-v2.md](capability-security-v2.md).
+
+Migrating before those dependencies would cost real things this project depends on:
 per-session process isolation and the structurally-derived "exactly one terminal event, always
 last" guarantee (both fall out of `runProviderSession()` deriving the terminal event from process
 exit; an `app-server` migration would have to re-derive both at the RPC layer, for this provider
@@ -220,11 +242,14 @@ bidirectional, long-lived, and multiplexes sessions rather than one-process-per-
 migration would need new process-lifecycle plumbing in the shared runner, not just two swapped-out
 functions.
 
-`ProviderSessionHandle` and `AgentEvent` themselves would not need to change: the public
-provider-neutral abstraction survives a transport swap cleanly, which is exactly why this decision
-is safe to defer rather than urgent to make now.
+`ProviderSessionHandle` and `AgentEvent` were sufficient for the deferred v0.2 transport swap. They
+do need provider-neutral additions for v2 commands, approvals, questions, content blocks, and
+accepted-work state; those changes belong in the shared protocol/supervisor rather than a
+Codex-only branch.
 
 ## Provider contract tests
+
+This suite verifies the current protocol v1 adapter contract.
 
 `packages/agent-runtime/test/support/provider-contract.ts` exports `describeProviderContract()`,
 a reusable vitest suite asserting the guarantees *every* adapter must uphold, run against each
@@ -256,6 +281,8 @@ auth parsing also has dedicated pure-function tests independent of the contract 
 `test/claude-detect.test.ts` / `test/codex-detect.test.ts`.
 
 ## Adding a new provider
+
+This checklist targets the current protocol v1 adapter shape.
 
 Say you want to add `GeminiProvider`. You should not need to touch the daemon's routes, the client
 package, or the desktop UI at all:

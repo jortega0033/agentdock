@@ -23,7 +23,7 @@ import {
 import { parseSseStream } from './sse.js';
 
 export interface AgentDockClientOptions {
-  /** e.g. `http://127.0.0.1:54321` — no trailing slash required. */
+  /** e.g. `http://127.0.0.1:54321`, no trailing slash required. */
   baseUrl: string;
   token: string;
   /** Injectable for tests; defaults to the ambient global `fetch`. */
@@ -50,7 +50,7 @@ export interface SessionEventsOptions {
  *
  * No reconnect logic: `sessions.events()` opens exactly one stream and ends when the daemon
  * closes it (at the session's terminal event) or `signal` aborts. If the connection drops for any
- * other reason, the generator throws — call `sessions.events()` again to resume; because the
+ * other reason, the generator throws: call `sessions.events()` again to resume; because the
  * daemon replays its full stored event history to a fresh subscriber (or from `lastEventId`
  * onward), a bare retry is a complete, correct "reconnect" with no separate resume protocol needed.
  */
@@ -73,7 +73,7 @@ export class AgentDockClient {
     cancel: (id: string): Promise<void> => this.cancelSession(id),
     delete: (id: string): Promise<void> => this.deleteSession(id),
     /** Cancels every in-flight session on the daemon. Used by the desktop shutdown path so
-     * quitting the app doesn't orphan any session besides the one it happens to be tracking —
+     * quitting the app doesn't orphan any session besides the one it happens to be tracking,
      * see electron/main.ts#killDaemon. */
     cancelAll: (): Promise<void> => this.cancelAllSessions(),
   };
@@ -93,7 +93,7 @@ export class AgentDockClient {
     if (!this.compatibilityCheck) {
       this.compatibilityCheck = this.checkCompatibility().catch((err: unknown) => {
         // Don't let a transient failure (daemon still starting up, briefly unreachable) poison
-        // every future call — the next one gets a fresh check.
+        // every future call: the next one gets a fresh check.
         this.compatibilityCheck = undefined;
         throw err;
       });

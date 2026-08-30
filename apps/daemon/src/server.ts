@@ -29,13 +29,13 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
   const startedAt = Date.now();
 
   app.addHook('onRequest', async (req, reply) => {
-    // AD-04: any Origin header at all is treated as browser-authored and rejected outright — a
+    // AD-04: any Origin header at all is treated as browser-authored and rejected outright. A
     // non-browser client (curl, Electron main's own fetch, another local process) never sends
     // one. The previous version only recognized the literal `null` and `http(s)://` schemes, so a
     // `chrome-extension://` origin (or any other future scheme) fell straight through
-    // unrecognized. There is no legitimate browser-originated caller of this API today — the
-    // renderer talks to the daemon only through Electron main, never directly (see SECURITY.md)
-    // — so there's nothing to allowlist. An `AGENT_DOCK_ALLOWED_ORIGINS` escape hatch used to
+    // unrecognized. There is no legitimate browser-originated caller of this API today: the
+    // renderer talks to the daemon only through Electron main, never directly (see SECURITY.md),
+    // so there's nothing to allowlist. An `AGENT_DOCK_ALLOWED_ORIGINS` escape hatch used to
     // exist for a hypothetical dev-server case, but nothing ever paired it with a real CORS
     // response header, so an allowlisted origin still couldn't complete a request; it was dead
     // configuration and has been removed rather than fixed, since nothing currently needs it.
@@ -61,7 +61,7 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
 
   app.setErrorHandler((err: FastifyError, req, reply) => {
     // Fastify's own body-parsing errors (malformed JSON, payload-too-large, ...) carry a real
-    // 4xx statusCode already — preserving it (rather than flattening everything to 500) keeps
+    // 4xx statusCode already. Preserving it (rather than flattening everything to 500) keeps
     // client-error semantics correct without risking leaking anything: these messages describe
     // the malformed request, never internal state. Anything without a 4xx statusCode is treated
     // as unexpected and sanitized to a generic 500, same as before.

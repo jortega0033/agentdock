@@ -3,7 +3,7 @@ import type { AgentEvent, AgentSession, ProviderId, ProviderStatus } from '@agen
 
 /**
  * The only surface the renderer has onto Node/Electron. Every function here is a narrow,
- * single-purpose capability — never a generic "invoke this IPC channel with this payload" tunnel
+ * single-purpose capability, never a generic "invoke this IPC channel with this payload" tunnel
  * and never the daemon's connection info (base URL + bearer token stay in the main process; see
  * electron/main.ts and SECURITY.md). The renderer cannot run a shell command, read/write an
  * arbitrary file, or reach any daemon route this bridge doesn't explicitly expose.
@@ -30,7 +30,7 @@ export interface AgentDockBridge {
  * Reconstructs a clean `DaemonStatus` from whatever main sent, rather than validating its shape
  * and then passing the original object through unchanged (AD-07). The difference matters: the
  * previous `isDaemonStatus` type guard only checked that `state` was one of the three known
- * values and then returned the raw object as-is — so an extra field on that object (a token, a
+ * values and then returned the raw object as-is, so an extra field on that object (a token, a
  * base URL, anything) would have crossed into the renderer completely untouched. Building a fresh
  * object with only the fields each variant is actually supposed to carry means an accidental
  * extra property on the main-process side can never reach here, structurally, regardless of what

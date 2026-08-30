@@ -4,7 +4,7 @@ import { PROVIDER_IDS } from './provider.js';
 export const providerIdSchema = z.enum(PROVIDER_IDS);
 
 // AD-15: every key is optional and unknown keys pass through rather than being rejected or
-// silently stripped — "absent means unsupported" is a documented, valid state (see
+// silently stripped: "absent means unsupported" is a documented, valid state (see
 // ProviderCapabilities), not a validation failure. This is what makes adding a 6th capability
 // additive: a client built against a newer @agent-dock/shared can validate an older daemon's
 // response (missing the new key) without error, and an older client validating a newer daemon's
@@ -65,7 +65,7 @@ const agentEventBaseSchema = z.object({
 });
 
 /**
- * Runtime validation for the wire shape of `AgentEventEnvelope` (protocol v1) — used by
+ * Runtime validation for the wire shape of `AgentEventEnvelope` (protocol v1), used by
  * @agent-dock/client to reject a malformed SSE frame with a typed error instead of handing the
  * caller garbage. Mirrors the `AgentEvent` union in events.ts field-for-field; if you add a
  * variant there, add it here too.

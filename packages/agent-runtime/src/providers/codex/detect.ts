@@ -7,7 +7,7 @@ import { CODEX_CAPABILITIES } from './capabilities.js';
 const EXECUTABLE_NAMES = ['codex'];
 
 /**
- * Pure parsing of `codex login status`'s combined stdout+stderr (AD-16) — split out from
+ * Pure parsing of `codex login status`'s combined stdout+stderr (AD-16), split out from
  * `detectCodex` so it's testable with captured output strings, no CLI or account needed. `codex
  * login status` has no `--json` flag, so this is a conservative regex match against short
  * human-readable lines rather than guessing: falls back to `'unknown'` for anything that doesn't

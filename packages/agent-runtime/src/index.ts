@@ -1,5 +1,5 @@
 // AD-09: this used to also re-export process/* internals, both providers' build-args, and both
-// real providers' capabilities objects — none of which any consumer outside this package (or its
+// real providers' capabilities objects, none of which any consumer outside this package (or its
 // own tests, which import them by relative path) actually used, and docs/protocol-v1.md already
 // (incorrectly) claimed build-args was unexported. Trimmed to what apps/daemon genuinely needs,
 // so the documented "internal" surface is actually internal rather than merely undocumented.

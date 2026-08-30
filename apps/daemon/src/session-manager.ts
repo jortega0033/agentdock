@@ -5,9 +5,9 @@ import { MemorySessionStore, type SessionStore } from './session-store.js';
 
 /**
  * Live, non-persistable state for one session: its process handle and buffered event history.
- * Deliberately kept out of SessionStore — see session-store.ts for why. Events are stored as the
+ * Deliberately kept out of SessionStore; see session-store.ts for why. Events are stored as the
  * protocol's public `AgentEventEnvelope` (event + sequence + timestamp), stamped once here so
- * every subscriber — live or replayed — sees the same sequence/timestamp for the same event.
+ * every subscriber, live or replayed, sees the same sequence/timestamp for the same event.
  */
 interface RuntimeState {
   handle: ProviderSessionHandle;
@@ -17,11 +17,11 @@ interface RuntimeState {
    * Per-session monotonic counter for `AgentEventEnvelope.sequence`. Deliberately independent of
    * `events.length`: once the history cap is reached, `events` stops growing but this keeps
    * incrementing, so sequence numbers stay monotonic and live delivery never depends on how much
-   * of the buffer is retained (AD-01 — see the cap-guard note in `consume()` below).
+   * of the buffer is retained (AD-01; see the cap-guard note in `consume()` below).
    */
   nextSequence: number;
   /**
-   * Resolves once `consume()` has drained this session's terminal event — i.e. the underlying
+   * Resolves once `consume()` has drained this session's terminal event: the underlying
    * provider process has actually exited, not merely been asked to. `cancelAll()` awaits these
    * (with a bound) so daemon shutdown doesn't return before child processes are confirmed gone
    * (AD-12).
@@ -32,22 +32,22 @@ interface RuntimeState {
 const MAX_STORED_EVENTS_PER_SESSION = 5_000;
 
 /**
- * Bounds how many terminal (completed/failed/cancelled) sessions' runtime state — event history
- * and listener set — stays retained for late-subscriber replay. Without this, a long-lived
+ * Bounds how many terminal (completed/failed/cancelled) sessions' runtime state (event history
+ * and listener set) stays retained for late-subscriber replay. Without this, a long-lived
  * daemon whose client never calls DELETE accumulates one RuntimeState per session for its entire
  * lifetime, unbounded (AD-11). Eviction is FIFO by completion order: the daemon is single-user
- * and local, so a simple bound is enough — this is not trying to be a cache-replacement policy.
+ * and local, so a simple bound is enough. This is not trying to be a cache-replacement policy.
  */
 const MAX_RETAINED_COMPLETED_SESSIONS = 50;
 
 /**
  * Orchestrates session lifecycle: creates sessions via the provider registry, consumes their
  * normalized event stream, and keeps `AgentSession` records up to date in a `SessionStore` (see
- * session-store.ts — `MemorySessionStore` by default, and the only implementation for now).
+ * session-store.ts; `MemorySessionStore` by default, and the only implementation for now).
  */
 export class SessionManager {
   private readonly runtime = new Map<string, RuntimeState>();
-  /** FIFO of session ids in the order they reached a terminal state — see `MAX_RETAINED_COMPLETED_SESSIONS`. */
+  /** FIFO of session ids in the order they reached a terminal state; see `MAX_RETAINED_COMPLETED_SESSIONS`. */
   private readonly completedOrder: string[] = [];
 
   constructor(
@@ -93,11 +93,11 @@ export class SessionManager {
     for await (const event of handle.events) {
       this.mutateSession(id, (session) => this.applyStatusTransition(session, event));
 
-      // AD-01 fix: listeners are notified unconditionally, every time — the cap below only
+      // AD-01 fix: listeners are notified unconditionally, every time. The cap below only
       // controls how much history is *retained for replay*. Before this fix, listener
       // notification lived inside the same `if` as the buffer push, so once history filled up,
       // live subscribers silently stopped receiving anything at all, including the terminal
-      // event — every SSE stream past that point hung forever. `sequence` comes from a counter
+      // event: every SSE stream past that point hung forever. `sequence` comes from a counter
       // that keeps incrementing past the cap, never from `events.length`, so it stays monotonic
       // and consistent between what a live subscriber sees and what a replay subscriber sees for
       // the events that are still buffered.
@@ -112,7 +112,7 @@ export class SessionManager {
     }
 
     // The loop only exits after the provider's terminal event closed its channel (exactly one,
-    // always last — see run-session.ts), so reaching here means the session is now terminal.
+    // always last; see run-session.ts), so reaching here means the session is now terminal.
     // Track it for bounded retention (AD-11) rather than keeping every RuntimeState forever.
     this.completedOrder.push(id);
     this.evictOldestCompletedIfOverCap();
@@ -122,14 +122,14 @@ export class SessionManager {
     while (this.completedOrder.length > MAX_RETAINED_COMPLETED_SESSIONS) {
       const staleId = this.completedOrder.shift();
       if (staleId === undefined) break;
-      // Already removed via remove()/DELETE — nothing left to evict, just drop the stale FIFO entry.
+      // Already removed via remove()/DELETE; nothing left to evict, just drop the stale FIFO entry.
       if (!this.runtime.has(staleId)) continue;
       this.runtime.delete(staleId);
       this.store.delete(staleId);
     }
   }
 
-  /** Reads the current record from the store, applies `fn`, writes it back — the store is the source of truth, never a mutated-in-place reference held elsewhere. */
+  /** Reads the current record from the store, applies `fn`, writes it back. The store is the source of truth, never a mutated-in-place reference held elsewhere. */
   private mutateSession(id: string, fn: (session: AgentSession) => void): void {
     const session = this.store.get(id);
     if (!session) return;
@@ -183,7 +183,7 @@ export class SessionManager {
     return () => runtime.listeners.delete(listener);
   }
 
-  /** `false` for an unknown session AND for one that's already terminal (AD-11) — cancelling a
+  /** `false` for an unknown session AND for one that's already terminal (AD-11): cancelling a
    * finished session is not a success, even though the previous version reported it as one. */
   async cancel(id: string): Promise<boolean> {
     const session = this.store.get(id);
@@ -209,12 +209,12 @@ export class SessionManager {
   }
 
   /**
-   * Cancels every in-flight session and waits (bounded) for their processes to actually exit —
-   * called on daemon shutdown to avoid orphaned CLI processes. `handle.cancel()` only *initiates*
+   * Cancels every in-flight session and waits (bounded) for their processes to actually exit.
+   * Called on daemon shutdown to avoid orphaned CLI processes. `handle.cancel()` only *initiates*
    * termination (fires SIGTERM / taskkill and returns); without the bounded wait here, the daemon
    * could call `process.exit(0)` while a child is still mid-teardown (AD-12). If a child ignores
    * termination entirely, this still returns after `timeoutMs` rather than hanging shutdown
-   * forever — the process-level SIGKILL escalation in spawnProcess is what ultimately reaps it.
+   * forever; the process-level SIGKILL escalation in spawnProcess is what ultimately reaps it.
    */
   async cancelAll(timeoutMs = 5_000): Promise<void> {
     const activeRuntimes = this.store

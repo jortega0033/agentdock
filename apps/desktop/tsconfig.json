@@ -9,5 +9,5 @@
     "noEmit": true,
     "types": ["vite/client"]
   },
-  "include": ["src", "electron", "test", "vite.config.ts"]
+  "include": ["src", "electron", "test", "vite.config.ts", "vite.capture.config.ts"]
 }

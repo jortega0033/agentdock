@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-label="Local runtime unavailable" color="currentColor">
+  <g fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M28 45h27v12H43v46h12v12H28V45Zm104 0h-27v12h12v46h-12v12h27V45Z"/>
+    <path d="m80 50 20 12v24L80 98 60 86V62l20-12Z"/>
+    <path d="M36 128 124 32"/>
+  </g>
+  <rect x="75" y="111" width="10" height="8" rx="2" fill="currentColor"/>
+</svg>

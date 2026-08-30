@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-label="No active session" color="currentColor">
+  <g fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M31 47h25v12H44v42h12v12H31V47Zm98 0h-25v12h12v42h-12v12h25V47Z"/>
+    <path d="m80 53 17 10v20L80 93 63 83V63l17-10Z"/>
+    <path d="M80 102v17" stroke-dasharray="3 7"/>
+  </g>
+  <rect x="75" y="122" width="10" height="8" rx="2" fill="currentColor"/>
+</svg>

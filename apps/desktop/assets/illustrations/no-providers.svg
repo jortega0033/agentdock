@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" role="img" aria-label="No providers found" color="currentColor">
+  <g fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="27" y="39" width="42" height="65" rx="8"/>
+    <rect x="91" y="56" width="42" height="65" rx="8"/>
+    <path d="M39 57h18M103 74h18M35 129 126 32"/>
+  </g>
+  <rect x="54" y="90" width="9" height="9" rx="2" fill="currentColor"/>
+</svg>

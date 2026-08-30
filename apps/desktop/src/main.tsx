@@ -3,8 +3,19 @@ import { createRoot } from 'react-dom/client';
 import { App } from './App.js';
 import './styles.css';
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);
+async function renderApp(): Promise<void> {
+  const captureMode =
+    import.meta.env.DEV && new URLSearchParams(window.location.search).has('asset-capture');
+  if (captureMode) {
+    const { installAssetCaptureBridge } = await import('./asset-capture-bridge.js');
+    installAssetCaptureBridge();
+  }
+
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
+}
+
+void renderApp();

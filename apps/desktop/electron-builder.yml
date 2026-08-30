@@ -10,6 +10,7 @@ directories:
   # Keep installer/unpacked-app output out of Vite's dist/ and esbuild's dist-electron/, and out
   # of the repo root's own node_modules — a dedicated top-level folder is unambiguous either way.
   output: ../../dist-packages
+  buildResources: assets/app-icons
 
 # main.js and preload.js are already self-contained bundles (vite-plugin-electron/esbuild inline
 # every dependency, including the workspace @agent-dock/shared and @agent-dock/client packages, at
@@ -36,6 +37,8 @@ files:
 extraResources:
   - from: ../daemon/dist
     to: daemon
+  - from: assets/app-icons/png/icon-256.png
+    to: assets/app-icons/png/icon-256.png
 
 asar: true
 
@@ -45,17 +48,20 @@ asar: true
 publish: null
 
 win:
+  executableName: AgentDock
+  icon: agent-dock.ico
   target:
     - target: nsis
       arch: [x64]
-  # No custom icon asset exists in this repository — electron-builder falls back to its own
-  # default Electron icon. Add an `icon:` path here once a real one exists.
 
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: false
   createStartMenuShortcut: true
+  shortcutName: AgentDock
+  installerIcon: agent-dock.ico
+  uninstallerIcon: agent-dock.ico
   artifactName: "${productName}-Setup-${version}.${ext}"
   # A .blockmap is only useful for differential auto-update downloads, which this project doesn't
   # have — skip generating one rather than ship a file with no purpose.

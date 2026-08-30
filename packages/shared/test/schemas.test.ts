@@ -22,12 +22,20 @@ describe('providerIdSchema', () => {
 
 describe('createSessionRequestSchema', () => {
   it('accepts a valid request', () => {
-    const result = createSessionRequestSchema.safeParse({ provider: 'claude', cwd: '/tmp', prompt: 'hi' });
+    const result = createSessionRequestSchema.safeParse({
+      provider: 'claude',
+      cwd: '/tmp',
+      prompt: 'hi',
+    });
     expect(result.success).toBe(true);
   });
 
   it('rejects a missing prompt', () => {
-    const result = createSessionRequestSchema.safeParse({ provider: 'claude', cwd: '/tmp', prompt: '' });
+    const result = createSessionRequestSchema.safeParse({
+      provider: 'claude',
+      cwd: '/tmp',
+      prompt: '',
+    });
     expect(result.success).toBe(false);
   });
 
@@ -37,7 +45,11 @@ describe('createSessionRequestSchema', () => {
   });
 
   it('rejects an unknown provider', () => {
-    const result = createSessionRequestSchema.safeParse({ provider: 'gpt', cwd: '/tmp', prompt: 'hi' });
+    const result = createSessionRequestSchema.safeParse({
+      provider: 'gpt',
+      cwd: '/tmp',
+      prompt: 'hi',
+    });
     expect(result.success).toBe(false);
   });
 
@@ -69,7 +81,13 @@ describe('providerCapabilitiesSchema', () => {
   });
 
   it('rejects a non-boolean value for a known capability', () => {
-    const invalid = { resume: 'yes', cancellation: true, tools: false, usage: true, thinking: false };
+    const invalid = {
+      resume: 'yes',
+      cancellation: true,
+      tools: false,
+      usage: true,
+      thinking: false,
+    };
     expect(providerCapabilitiesSchema.safeParse(invalid).success).toBe(false);
   });
 
@@ -139,14 +157,25 @@ describe('providerStatusSchema', () => {
   });
 
   it('rejects a status missing capabilities', () => {
-    const status = { id: 'claude', name: 'Claude Code', installed: true, authenticated: 'authenticated' };
+    const status = {
+      id: 'claude',
+      name: 'Claude Code',
+      installed: true,
+      authenticated: 'authenticated',
+    };
     expect(providerStatusSchema.safeParse(status).success).toBe(false);
   });
 });
 
 describe('agentEventEnvelopeSchema', () => {
   it('accepts a valid session.started envelope', () => {
-    const event = { type: 'session.started', sessionId: 's1', provider: 'claude', sequence: 0, timestamp: '2026-01-01T00:00:00.000Z' };
+    const event = {
+      type: 'session.started',
+      sessionId: 's1',
+      provider: 'claude',
+      sequence: 0,
+      timestamp: '2026-01-01T00:00:00.000Z',
+    };
     expect(agentEventEnvelopeSchema.safeParse(event).success).toBe(true);
   });
 
@@ -172,14 +201,23 @@ describe('agentEventEnvelopeSchema', () => {
   });
 
   it('rejects an unrecognized event type', () => {
-    const event = { type: 'provider.raw_jsonl', sequence: 0, timestamp: '2026-01-01T00:00:00.000Z' };
+    const event = {
+      type: 'provider.raw_jsonl',
+      sequence: 0,
+      timestamp: '2026-01-01T00:00:00.000Z',
+    };
     expect(agentEventEnvelopeSchema.safeParse(event).success).toBe(false);
   });
 
   // AD-14: assistant.delta was removed from protocol v1 before any adapter ever emitted it — see
   // packages/shared/src/events.ts. This pins the removal so it can't silently come back.
   it('rejects assistant.delta — removed from protocol v1 (AD-14), never re-add without deliberately updating this test', () => {
-    const event = { type: 'assistant.delta', text: 'hi', sequence: 0, timestamp: '2026-01-01T00:00:00.000Z' };
+    const event = {
+      type: 'assistant.delta',
+      text: 'hi',
+      sequence: 0,
+      timestamp: '2026-01-01T00:00:00.000Z',
+    };
     expect(agentEventEnvelopeSchema.safeParse(event).success).toBe(false);
   });
 
@@ -189,24 +227,54 @@ describe('agentEventEnvelopeSchema', () => {
   });
 
   it('rejects a required field with the wrong type (message as a number)', () => {
-    const event = { type: 'error', message: 42, recoverable: true, sequence: 0, timestamp: '2026-01-01T00:00:00.000Z' };
+    const event = {
+      type: 'error',
+      message: 42,
+      recoverable: true,
+      sequence: 0,
+      timestamp: '2026-01-01T00:00:00.000Z',
+    };
     expect(agentEventEnvelopeSchema.safeParse(event).success).toBe(false);
   });
 });
 
 describe('healthResponseSchema', () => {
   it('accepts a well-formed health response', () => {
-    expect(healthResponseSchema.safeParse({ status: 'ok', uptimeSeconds: 5, protocolVersion: 1 }).success).toBe(true);
+    expect(
+      healthResponseSchema.safeParse({ status: 'ok', uptimeSeconds: 5, protocolVersion: 1 })
+        .success,
+    ).toBe(true);
   });
 
   it('rejects a response without protocolVersion', () => {
     expect(healthResponseSchema.safeParse({ status: 'ok', uptimeSeconds: 5 }).success).toBe(false);
   });
+
+  it('accepts unordered future discovery versions while rejecting duplicates', () => {
+    expect(
+      healthResponseSchema.safeParse({
+        status: 'ok',
+        uptimeSeconds: 5,
+        protocolVersion: 1,
+        supportedProtocolVersions: [2, 1, 99],
+      }).success,
+    ).toBe(true);
+    expect(
+      healthResponseSchema.safeParse({
+        status: 'ok',
+        uptimeSeconds: 5,
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 1],
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe('sessionIdParamSchema', () => {
   it('accepts a valid uuid', () => {
-    expect(sessionIdParamSchema.safeParse({ sessionId: '123e4567-e89b-12d3-a456-426614174000' }).success).toBe(true);
+    expect(
+      sessionIdParamSchema.safeParse({ sessionId: '123e4567-e89b-12d3-a456-426614174000' }).success,
+    ).toBe(true);
   });
 
   it('rejects a non-uuid string', () => {

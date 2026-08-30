@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AGENT_DOCK_PROTOCOL_VERSION, type AgentEventEnvelope } from '@agent-dock/shared';
+import {
+  AGENT_DOCK_PROTOCOL_VERSION,
+  AGENT_DOCK_SUPPORTED_PROTOCOL_VERSIONS,
+  type AgentEventEnvelope,
+} from '@agent-dock/shared';
 import { AgentDockClient } from '../src/client.js';
 import {
   DaemonError,
@@ -46,25 +50,36 @@ function sseResponse(frames: string[], status = 200) {
       },
     }),
   } as unknown as ReadableStream<Uint8Array>;
-  return { ok: status >= 200 && status < 300, status, headers: new Headers(), body, json: async () => ({}) } as Response;
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: new Headers(),
+    body,
+    json: async () => ({}),
+  } as Response;
 }
 
 describe('AgentDockClient — health / protocol compatibility', () => {
   it('resolves health() when the daemon reports a matching protocol version', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(healthOk());
     const client = makeClient(fetchImpl);
-    await expect(client.health()).resolves.toMatchObject({ status: 'ok', protocolVersion: AGENT_DOCK_PROTOCOL_VERSION });
+    await expect(client.health()).resolves.toMatchObject({
+      status: 'ok',
+      protocolVersion: AGENT_DOCK_PROTOCOL_VERSION,
+    });
   });
 
   it('throws ProtocolMismatchError when the daemon reports a different protocol version', async () => {
-    const fetchImpl = vi.fn().mockResolvedValue(healthOk(AGENT_DOCK_PROTOCOL_VERSION + 1));
+    const unsupportedVersion = Math.max(...AGENT_DOCK_SUPPORTED_PROTOCOL_VERSIONS) + 1;
+    const fetchImpl = vi.fn().mockResolvedValue(healthOk(unsupportedVersion));
     const client = makeClient(fetchImpl);
     await expect(client.health()).rejects.toBeInstanceOf(ProtocolMismatchError);
   });
 
   it('runs the compatibility check automatically before any other method, not just health()', async () => {
+    const unsupportedVersion = Math.max(...AGENT_DOCK_SUPPORTED_PROTOCOL_VERSIONS) + 1;
     const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
-      if (url.endsWith('/health')) return healthOk(AGENT_DOCK_PROTOCOL_VERSION + 1);
+      if (url.endsWith('/health')) return healthOk(unsupportedVersion);
       return jsonResponse(200, { providers: [] });
     });
     const client = makeClient(fetchImpl);
@@ -141,7 +156,13 @@ describe('AgentDockClient — transport and auth errors', () => {
 
 describe('AgentDockClient — providers', () => {
   it('lists providers', async () => {
-    const provider = { id: 'claude', name: 'Claude Code', installed: true, authenticated: 'authenticated', capabilities: CAPS };
+    const provider = {
+      id: 'claude',
+      name: 'Claude Code',
+      installed: true,
+      authenticated: 'authenticated',
+      capabilities: CAPS,
+    };
     const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
       if (url.endsWith('/health')) return healthOk();
       if (url.endsWith('/providers')) return jsonResponse(200, { providers: [provider] });
@@ -187,13 +208,17 @@ describe('AgentDockClient — sessions', () => {
       throw new Error(`unexpected url: ${url}`);
     });
     const client = makeClient(fetchImpl);
-    await expect(client.sessions.create({ provider: 'claude', cwd: '/tmp', prompt: 'hi' })).resolves.toEqual(session);
+    await expect(
+      client.sessions.create({ provider: 'claude', cwd: '/tmp', prompt: 'hi' }),
+    ).resolves.toEqual(session);
   });
 
   it('rejects client-side before making a request when the input is invalid', async () => {
     const fetchImpl = vi.fn().mockResolvedValue(healthOk());
     const client = makeClient(fetchImpl);
-    await expect(client.sessions.create({ provider: 'claude', cwd: '', prompt: 'hi' } as never)).rejects.toThrow();
+    await expect(
+      client.sessions.create({ provider: 'claude', cwd: '', prompt: 'hi' } as never),
+    ).rejects.toThrow();
     expect(fetchImpl.mock.calls.some(([url]) => String(url).endsWith('/sessions'))).toBe(false);
   });
 
@@ -222,9 +247,9 @@ describe('AgentDockClient — sessions', () => {
       return jsonResponse(400, { error: 'working directory does not exist' });
     });
     const client = makeClient(fetchImpl);
-    await expect(client.sessions.create({ provider: 'claude', cwd: '/nope', prompt: 'hi' })).rejects.toBeInstanceOf(
-      ValidationError,
-    );
+    await expect(
+      client.sessions.create({ provider: 'claude', cwd: '/nope', prompt: 'hi' }),
+    ).rejects.toBeInstanceOf(ValidationError);
   });
 
   it('throws DaemonError for an unexpected 5xx', async () => {
@@ -270,7 +295,9 @@ describe('AgentDockClient — SSE event streaming', () => {
 
     const collected = [];
     for await (const event of client.sessions.events('s1')) collected.push(event);
-    expect(collected).toEqual([{ type: 'session.cancelled', sequence: 0, timestamp: '2026-01-01T00:00:00.000Z' }]);
+    expect(collected).toEqual([
+      { type: 'session.cancelled', sequence: 0, timestamp: '2026-01-01T00:00:00.000Z' },
+    ]);
   });
 
   it('throws ValidationError on a malformed event and stops iterating', async () => {
@@ -322,7 +349,8 @@ describe('AgentDockClient — SSE event streaming', () => {
 
     controller.abort();
     const collected = [];
-    for await (const event of client.sessions.events('s1', { signal: controller.signal })) collected.push(event);
+    for await (const event of client.sessions.events('s1', { signal: controller.signal }))
+      collected.push(event);
     expect(collected).toEqual([]);
   });
 });

@@ -155,7 +155,8 @@ for await (const event of client.sessions.events(session.id)) {
 Failures are typed (`DaemonUnavailableError`, `UnauthorizedError`,
 `ProtocolMismatchError`, `ProviderUnavailableError`, and others), so consumers can branch without
 parsing error strings. See [the client guide](docs/client-sdk.md) and
-[protocol v1](docs/protocol-v1.md).
+[protocol v1](docs/protocol-v1.md). The additive capability-negotiated contract is documented in
+[protocol v2](docs/protocol-v2.md).
 
 ## Adding a provider
 
@@ -181,6 +182,7 @@ Follow [the provider guide](docs/providers.md#adding-a-new-provider) for the com
 - [Architecture](docs/architecture.md): runtime flow, responsibilities, and trust boundaries
 - [Security](SECURITY.md): threat model, loopback auth, and process hygiene
 - [Protocol v1](docs/protocol-v1.md): normalized events and wire guarantees
+- [Protocol v2](docs/protocol-v2.md): capability negotiation, correlated content, and versioned routes
 - [Client SDK](docs/client-sdk.md): full client API and errors
 - [Providers](docs/providers.md): adapters, detection, parsers, and contract tests
 - [Daemon](docs/daemon.md): standalone operation, routes, and lifecycle

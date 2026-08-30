@@ -11,6 +11,8 @@ import { MemorySessionStore, type SessionStore } from './session-store.js';
  */
 interface RuntimeState {
   handle: ProviderSessionHandle;
+  /** Wire contract that owns this session. Prevents v1 routes from bypassing v2 policy/redaction. */
+  protocolVersion: 1 | 2;
   events: AgentEventEnvelope[];
   listeners: Set<(index: number, event: AgentEventEnvelope) => void>;
   /**
@@ -56,7 +58,13 @@ export class SessionManager {
     private readonly store: SessionStore = new MemorySessionStore(),
   ) {}
 
-  create(provider: ProviderId, cwd: string, prompt: string, resumeProviderSessionId?: string): AgentSession {
+  create(
+    provider: ProviderId,
+    cwd: string,
+    prompt: string,
+    resumeProviderSessionId?: string,
+    protocolVersion: 1 | 2 = 1,
+  ): AgentSession {
     const providerImpl = this.registry.get(provider);
     if (!providerImpl) {
       throw new Error(`no provider registered for id: ${provider}`);
@@ -73,12 +81,28 @@ export class SessionManager {
     };
     this.store.create(session);
 
-    const handle = providerImpl.startSession({ sessionId: id, cwd, prompt, resumeProviderSessionId });
-    const runtimeEntry: RuntimeState = { handle, events: [], listeners: new Set(), nextSequence: 0, done: Promise.resolve() };
+    const handle = providerImpl.startSession({
+      sessionId: id,
+      cwd,
+      prompt,
+      resumeProviderSessionId,
+    });
+    const runtimeEntry: RuntimeState = {
+      handle,
+      protocolVersion,
+      events: [],
+      listeners: new Set(),
+      nextSequence: 0,
+      done: Promise.resolve(),
+    };
     this.runtime.set(id, runtimeEntry);
     runtimeEntry.done = this.consume(id, handle);
 
-    this.logger.info('session created', { sessionId: id, provider, resumed: !!resumeProviderSessionId });
+    this.logger.info('session created', {
+      sessionId: id,
+      provider,
+      resumed: !!resumeProviderSessionId,
+    });
     return session;
   }
 
@@ -102,11 +126,17 @@ export class SessionManager {
       // and consistent between what a live subscriber sees and what a replay subscriber sees for
       // the events that are still buffered.
       const sequence = runtime.nextSequence++;
-      const envelope: AgentEventEnvelope = { ...event, sequence, timestamp: new Date().toISOString() };
+      const envelope: AgentEventEnvelope = {
+        ...event,
+        sequence,
+        timestamp: new Date().toISOString(),
+      };
       if (runtime.events.length < MAX_STORED_EVENTS_PER_SESSION) {
         runtime.events.push(envelope);
       } else {
-        this.logger.warn('session event history full; further events will not be replayable', { sessionId: id });
+        this.logger.warn('session event history full; further events will not be replayable', {
+          sessionId: id,
+        });
       }
       for (const listener of runtime.listeners) listener(sequence, envelope);
     }
@@ -158,12 +188,13 @@ export class SessionManager {
     }
   }
 
-  get(id: string): AgentSession | undefined {
+  get(id: string, protocolVersion?: 1 | 2): AgentSession | undefined {
+    if (!this.ownedBy(id, protocolVersion)) return undefined;
     return this.store.get(id);
   }
 
-  list(): AgentSession[] {
-    return this.store.list();
+  list(protocolVersion?: 1 | 2): AgentSession[] {
+    return this.store.list().filter((session) => this.ownedBy(session.id, protocolVersion));
   }
 
   /** Replays stored events from `sinceIndex` onward, then delivers live events as they arrive. */
@@ -171,7 +202,9 @@ export class SessionManager {
     id: string,
     sinceIndex: number,
     listener: (index: number, event: AgentEventEnvelope) => void,
+    protocolVersion?: 1 | 2,
   ): (() => void) | undefined {
+    if (!this.ownedBy(id, protocolVersion)) return undefined;
     const runtime = this.runtime.get(id);
     if (!runtime) return undefined;
 
@@ -185,7 +218,8 @@ export class SessionManager {
 
   /** `false` for an unknown session AND for one that's already terminal (AD-11): cancelling a
    * finished session is not a success, even though the previous version reported it as one. */
-  async cancel(id: string): Promise<boolean> {
+  async cancel(id: string, protocolVersion?: 1 | 2): Promise<boolean> {
+    if (!this.ownedBy(id, protocolVersion)) return false;
     const session = this.store.get(id);
     if (!session || (session.status !== 'starting' && session.status !== 'running')) return false;
     const runtime = this.runtime.get(id);
@@ -194,7 +228,8 @@ export class SessionManager {
     return true;
   }
 
-  async remove(id: string): Promise<boolean> {
+  async remove(id: string, protocolVersion?: 1 | 2): Promise<boolean> {
+    if (!this.ownedBy(id, protocolVersion)) return false;
     const session = this.store.get(id);
     if (!session) return false;
     const runtime = this.runtime.get(id);
@@ -208,6 +243,12 @@ export class SessionManager {
     return true;
   }
 
+  private ownedBy(id: string, protocolVersion: 1 | 2 | undefined): boolean {
+    return (
+      protocolVersion === undefined || this.runtime.get(id)?.protocolVersion === protocolVersion
+    );
+  }
+
   /**
    * Cancels every in-flight session and waits (bounded) for their processes to actually exit.
    * Called on daemon shutdown to avoid orphaned CLI processes. `handle.cancel()` only *initiates*
@@ -216,10 +257,14 @@ export class SessionManager {
    * termination entirely, this still returns after `timeoutMs` rather than hanging shutdown
    * forever; the process-level SIGKILL escalation in spawnProcess is what ultimately reaps it.
    */
-  async cancelAll(timeoutMs = 5_000): Promise<void> {
+  async cancelAll(timeoutMs = 5_000, protocolVersion?: 1 | 2): Promise<void> {
     const activeRuntimes = this.store
       .list()
-      .filter((session) => session.status === 'starting' || session.status === 'running')
+      .filter(
+        (session) =>
+          (session.status === 'starting' || session.status === 'running') &&
+          this.ownedBy(session.id, protocolVersion),
+      )
       .map((session) => this.runtime.get(session.id))
       .filter((runtime): runtime is RuntimeState => !!runtime);
 

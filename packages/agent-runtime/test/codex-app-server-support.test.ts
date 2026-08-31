@@ -100,6 +100,19 @@ describe('Codex app-server compatibility selection', () => {
     expect(approvals?.possibleEffects).toContain('network');
   });
 
+  it('does not advertise native continuation for API-key authentication', () => {
+    const support = resolveCodexV2Support(
+      { ...status('0.147.0'), authSource: 'api_key' },
+      'app-server',
+    );
+    expect(support?.capabilities.find(({ id }) => id === 'session.resume')).toMatchObject({
+      support: 'unsupported',
+    });
+    expect(support?.capabilities.find(({ id }) => id === 'session.fork')).toMatchObject({
+      support: 'unsupported',
+    });
+  });
+
   it('uses explicit stable method allowlists and rejects unsafe methods', () => {
     for (const method of [
       ...CODEX_APP_SERVER_OUTGOING_REQUEST_METHODS,

@@ -345,7 +345,7 @@ describe('ManagedAppServerProcess lifecycle failures', () => {
         await processHandle.ready;
         await waitUntil(async () => {
           try {
-            return (await readFile(invocationLog, 'utf8')).includes('"app-server" "--stdio"');
+            return (await readFile(invocationLog, 'utf8')).includes('app-server --stdio');
           } catch {
             return false;
           }
@@ -361,17 +361,49 @@ describe('ManagedAppServerProcess lifecycle failures', () => {
   );
 
   it.skipIf(process.platform !== 'win32')(
-    'rejects unsafe cmd.exe expansion values before the provider script starts',
+    'preserves percent-bearing cmd arguments without environment expansion',
     async () => {
       const temp = await mkdtemp(join(tmpdir(), 'agent dock unsafe cmd '));
       const shimDirectory = join(temp, 'npm bin');
       const shim = join(shimDirectory, 'codex.cmd');
-      const invocationMarker = join(temp, 'cmd provider started.txt');
       await mkdir(shimDirectory, { recursive: true });
-      await writeFile(shim, `@echo off\r\ntype nul > "${invocationMarker}"\r\n`);
+      await writeFile(shim, '@echo off\r\necho %1\r\nmore >nul\r\n');
+      let stdout = '';
       const processHandle = new ManagedAppServerProcess({
         executable: shim,
         executableArgs: ['%PATH%'],
+        windowsJobHostPath: JOB_HOST,
+        cwd: temp,
+        onStdout: (chunk) => {
+          stdout += chunk.toString('utf8');
+        },
+        onStdoutEnd: () => undefined,
+        onFailure: () => undefined,
+      });
+
+      try {
+        await processHandle.ready;
+        await waitUntil(() => stdout.includes('%PATH%'));
+        expect(stdout).not.toContain(process.env.PATH ?? 'unmatchable-path-value');
+        await processHandle.close();
+        expect(processHandle.reaped).toBe(true);
+      } finally {
+        await processHandle.forceClose().catch(() => undefined);
+        await rm(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== 'win32')(
+    'rejects cmd command separators before the provider script starts',
+    async () => {
+      const temp = await mkdtemp(join(tmpdir(), 'agent dock cmd separator '));
+      const shim = join(temp, 'codex.cmd');
+      const invocationMarker = join(temp, 'cmd provider started.txt');
+      await writeFile(shim, `@echo off\r\ntype nul > "${invocationMarker}"\r\n`);
+      const processHandle = new ManagedAppServerProcess({
+        executable: shim,
+        executableArgs: ['first line\r\nsecond line'],
         windowsJobHostPath: JOB_HOST,
         cwd: temp,
         onStdout: () => undefined,

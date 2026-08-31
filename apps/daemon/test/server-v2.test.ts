@@ -493,7 +493,8 @@ describe('POST /v2/sessions capability negotiation', () => {
       payload,
     });
     expect(fresh.statusCode, fresh.body).toBe(201);
-    expect(agentSessionV2Schema.parse(fresh.json()).providerSessionId).toBe('native-thread-1');
+    const freshSession = agentSessionV2Schema.parse(fresh.json());
+    expect(freshSession.providerSessionId).toBe('native-thread-1');
     expect(provider.interactiveStartedOptions[0]?.continuation).toBeUndefined();
 
     const sessionCountBeforeFreshCollision = sessionManager.list(2).length;
@@ -511,6 +512,38 @@ describe('POST /v2/sessions capability negotiation', () => {
     });
     expect(sessionManager.list(2)).toHaveLength(sessionCountBeforeFreshCollision);
     expect(provider.interactiveCloses).toBe(closesBeforeFreshCollision + 1);
+
+    const liveFreshResume = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: {
+        ...payload,
+        prompt: 'resume fresh thread while its session is live',
+        continuation: { kind: 'resume', providerSessionId: 'native-thread-1' },
+      },
+    });
+    expect(liveFreshResume.statusCode).toBe(502);
+    expect(liveFreshResume.json()).toMatchObject({
+      code: 'provider_transport_startup_failed',
+      details: { reason: 'continuation_in_use' },
+    });
+    expect(provider.interactiveStartedOptions).toHaveLength(2);
+
+    const cancelledFresh = await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${freshSession.id}/cancel`,
+      headers: auth(),
+    });
+    expect(cancelledFresh.statusCode, cancelledFresh.body).toBe(202);
+    await vi.waitFor(async () => {
+      const snapshot = await app.inject({
+        method: 'GET',
+        url: `/v2/sessions/${freshSession.id}`,
+        headers: auth(),
+      });
+      expect(agentSessionV2Schema.parse(snapshot.json()).status).toBe('cancelled');
+    });
 
     startInteractive.mockRejectedValueOnce(
       new ProviderTransportStartupError(

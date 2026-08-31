@@ -249,11 +249,13 @@ function supportRecord<I extends SupportedCapabilityId>(
   if (!allStable)
     throw new Error(`Codex app-server capability ${id} references a non-allowlisted method`);
 
+  const continuationUnavailable =
+    status.authSource === 'api_key' && (id === 'session.resume' || id === 'session.fork');
   return {
     id,
     kind: CAPABILITY_CATALOG[id].kind,
     owner: CAPABILITY_CATALOG[id].owner,
-    support: 'supported',
+    support: continuationUnavailable ? 'unsupported' : 'supported',
     stability: 'stable',
     evidence: [
       {
@@ -289,6 +291,9 @@ function supportRecord<I extends SupportedCapabilityId>(
         : [],
     effectsComplete: id !== 'content.tools' && id !== 'interaction.approval',
     constraints: constraintsFor(id),
+    ...(continuationUnavailable
+      ? { reason: 'API-key authentication does not provide bindable continuation identity' }
+      : {}),
   } as CapabilitySupportRecord;
 }
 

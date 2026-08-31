@@ -847,6 +847,16 @@ export class CodexAppServerTransport implements InteractiveProviderTransport {
         );
       }
     }
+    const selectedContinuation = this.options.selection.enabled.some(
+      ({ id }) => id === 'session.resume' || id === 'session.fork',
+    );
+    if (selectedContinuation && !this.continuationEvidenceValue) {
+      throw new ProviderTransportStartupError(
+        'codex_continuation_scope_unverified',
+        'not_delivered',
+        'Codex continuation identity could not be verified',
+      );
+    }
     this.modelProviderCapabilitiesValue = this.parseModelProviderCapabilities(
       await this.rpc.request('modelProvider/capabilities/read', {}),
     );

@@ -77,6 +77,7 @@ function transport(
   beforeProviderThreadStart?: (
     evidence: Readonly<ProviderContinuationEvidence> | undefined,
   ) => Promise<void>,
+  selection: CapabilitySelection = SELECTION,
 ): CodexAppServerTransport {
   const instance = new CodexAppServerTransport({
     executable: process.execPath,
@@ -88,7 +89,7 @@ function transport(
     cwd: process.cwd(),
     prompt: 'hello fixture',
     transport: CODEX_APP_SERVER_TRANSPORT,
-    selection: SELECTION,
+    selection,
     continuation,
     expectedContinuationEvidence,
     env: {
@@ -712,6 +713,34 @@ describe('Codex app-server transport', () => {
     expect(instance.providerSessionId).toBe('native-thread-1');
     expect(instance.continuationEvidence).toBeUndefined();
     expect(beforeProviderThreadStart).toHaveBeenCalledWith(undefined);
+  });
+
+  it('fails before thread creation when selected continuation has no bindable identity', async () => {
+    const selection: CapabilitySelection = {
+      ...SELECTION,
+      enabled: [
+        {
+          id: 'session.resume',
+          constraints: { kind: 'continuation', native: true },
+        },
+      ],
+    };
+    const instance = transport(
+      'account-api-key',
+      undefined,
+      {},
+      undefined,
+      { authSource: 'api_key' },
+      undefined,
+      undefined,
+      selection,
+    );
+    await expect(instance.started).rejects.toMatchObject({
+      reasonCode: 'codex_continuation_scope_unverified',
+      deliveryState: 'not_delivered',
+    });
+    expect(instance.providerSessionId).toBeUndefined();
+    expect(instance.reaped).toBe(true);
   });
 
   it('rejects a detected-account fingerprint change before any thread request', async () => {

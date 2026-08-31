@@ -34,8 +34,6 @@ internal static class Program
     private const int MaximumArguments = 256;
     private const int MaximumFieldBytes = 64 * 1024;
     private const int CleanupTimeoutMilliseconds = 5000;
-    private const string CmdExecutableVariable = "ADJH_V1_PROVIDER";
-    private const string CmdArgumentVariablePrefix = "ADJH_V1_ARG_";
 
     public static int Main(string[] encodedArguments)
     {
@@ -334,33 +332,61 @@ internal static class Program
         string executable,
         string[] arguments)
     {
-        Environment.SetEnvironmentVariable(CmdExecutableVariable, executable);
         var commandLine = new StringBuilder(QuoteArgument(commandInterpreter));
-        commandLine.Append(" /d /s /c \"\"%");
-        commandLine.Append(CmdExecutableVariable);
-        commandLine.Append("%\"");
-        for (int index = 0; index < arguments.Length; index++)
+        commandLine.Append(" /d /v:off /s /c \"");
+        commandLine.Append(EscapeCmdCommand(executable));
+        foreach (string argument in arguments)
         {
-            string variable = CmdArgumentVariablePrefix + index.ToString("D3", CultureInfo.InvariantCulture);
-            Environment.SetEnvironmentVariable(variable, arguments[index]);
-            commandLine.Append(" \"%");
-            commandLine.Append(variable);
-            commandLine.Append("%\"");
+            commandLine.Append(' ');
+            commandLine.Append(EscapeCmdArgument(argument));
         }
         commandLine.Append('"');
         return commandLine.ToString();
     }
 
-    // Values are expanded only inside quotes in a fixed cmd.exe command. Reject every character
-    // that can terminate quoting, trigger another expansion pass, or introduce a command line.
+    // cmd.exe treats CR/LF as command separators even inside quotes. Every other non-NUL value is
+    // escaped below; reject only the two characters that cannot be transported without ambiguity.
     private static bool SafeCmdValue(string value)
     {
         foreach (char character in value)
         {
-            if (character == '"' || character == '%' || character == '!' || Char.IsControl(character))
+            if (character == '\r' || character == '\n')
                 return false;
         }
         return true;
+    }
+
+    private static string EscapeCmdCommand(string value)
+    {
+        return EscapeCmdMetacharacters(value);
+    }
+
+    // Port of the battle-tested cross-spawn/qntm cmd.exe quoting algorithm. A .cmd file commonly
+    // expands %* through a second parsing pass, so metacharacters are escaped twice.
+    private static string EscapeCmdArgument(string value)
+    {
+        return EscapeCmdMetacharacters(EscapeCmdMetacharacters(QuoteArgument(value)));
+    }
+
+    private static string EscapeCmdMetacharacters(string value)
+    {
+        var escaped = new StringBuilder();
+        foreach (char character in value)
+        {
+            if (IsCmdMetacharacter(character))
+                escaped.Append('^');
+            escaped.Append(character);
+        }
+        return escaped.ToString();
+    }
+
+    private static bool IsCmdMetacharacter(char character)
+    {
+        return character == '(' || character == ')' || character == '[' || character == ']' ||
+            character == '%' || character == '!' || character == '^' || character == '"' ||
+            character == '`' || character == '<' || character == '>' || character == '&' ||
+            character == '|' || character == ';' || character == ',' || character == ' ' ||
+            character == '*' || character == '?';
     }
 
     // Inverse of the CommandLineToArgvW quoting rules used by native Windows executables.

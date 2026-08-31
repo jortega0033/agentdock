@@ -597,7 +597,6 @@ export class V2SessionFacade {
         ...(continuationLease ? { continuationLease } : {}),
       };
       if (metadata.providerSessionId && continuationScope) {
-        const leaseForkTarget = input.continuation?.kind === 'fork';
         const reuseResumedSource =
           input.continuation?.kind === 'resume' &&
           metadata.providerSessionId === input.continuation.providerSessionId;
@@ -605,7 +604,7 @@ export class V2SessionFacade {
           metadata.providerSessionId,
           session.id,
           continuationScope,
-          leaseForkTarget ? executionId : undefined,
+          executionId,
           reuseResumedSource,
         );
         if (!bound) {
@@ -616,10 +615,7 @@ export class V2SessionFacade {
             'continuation_binding_collision',
           );
         }
-        if (
-          leaseForkTarget &&
-          metadata.providerSessionId !== continuationLease?.providerSessionId
-        ) {
+        if (metadata.providerSessionId !== continuationLease?.providerSessionId) {
           continuationTargetLease = {
             providerSessionId: metadata.providerSessionId,
             leaseId: executionId,

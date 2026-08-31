@@ -169,17 +169,34 @@ describe('spawnProcess process-tree lifecycle', () => {
   );
 
   it.skipIf(process.platform !== 'win32')(
-    'launches a cmd shim through the Job Host without exposing its handshake',
+    'preserves cmd shim argv without shell injection or expansion',
     async () => {
       const temp = await mkdtemp(join(tmpdir(), 'agent dock generic cmd '));
       const shimDirectory = join(temp, 'npm bin with spaces');
       const shim = join(shimDirectory, 'codex.cmd');
+      const recorder = join(temp, 'record-argv.mjs');
+      const invocationLog = join(temp, 'argv.json');
       const injectionMarker = join(temp, 'shell injection marker.txt');
-      const literalArgument = `literal&echo injected>${injectionMarker}`;
+      const literalArguments = [
+        'quote"value',
+        '50%!',
+        `literal&echo injected>${injectionMarker}`,
+        'pipe|read<input>output^caret',
+        'tab\tvalue',
+        'slash\\"quote',
+        'trailing\\',
+        'control\u0001value',
+        '',
+      ];
       await mkdir(shimDirectory, { recursive: true });
-      await writeFile(shim, '@echo off\r\necho %*\r\n');
-      const processTree = spawnProcess(shim, [literalArgument], {
+      await writeFile(
+        recorder,
+        "import { writeFileSync } from 'node:fs'; writeFileSync(process.env.AGENT_DOCK_ARGV_LOG, JSON.stringify(process.argv.slice(2)));",
+      );
+      await writeFile(shim, `@echo off\r\n"${process.execPath}" "${recorder}" %*\r\n`);
+      const processTree = spawnProcess(shim, literalArguments, {
         cwd: temp,
+        env: { ...process.env, AGENT_DOCK_ARGV_LOG: invocationLog },
         windowsJobHostPath: JOB_HOST,
       });
       const stdout = collect(processTree.child.stdout);
@@ -188,7 +205,8 @@ describe('spawnProcess process-tree lifecycle', () => {
 
       try {
         expect((await processTree.exit).code).toBe(0);
-        expect(await stdout).toContain(literalArgument);
+        expect(JSON.parse(await readFile(invocationLog, 'utf8'))).toEqual(literalArguments);
+        expect(await stdout).toBe('');
         expect(await stderr).toBe('');
         await expect(stat(injectionMarker)).rejects.toMatchObject({ code: 'ENOENT' });
       } finally {

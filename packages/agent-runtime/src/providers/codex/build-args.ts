@@ -6,8 +6,22 @@ import type { StartSessionOptions } from '../../types.js';
  * branching, see the provider contract suite's "resume" section).
  */
 export function buildCodexArgs(opts: StartSessionOptions): string[] {
+  const sandboxArgs = opts.sandbox ? ['--sandbox', opts.sandbox] : [];
+  const modelArgs = opts.model ? ['--model', opts.model] : [];
   if (opts.resumeProviderSessionId) {
-    return ['exec', 'resume', opts.resumeProviderSessionId, opts.prompt, '--json', '--skip-git-repo-check'];
+    if (opts.sandbox) {
+      throw new Error('Codex exec resume cannot preserve an explicit sandbox scope');
+    }
+    return [
+      'exec',
+      'resume',
+      opts.resumeProviderSessionId,
+      opts.prompt,
+      '--json',
+      '--skip-git-repo-check',
+      ...sandboxArgs,
+      ...modelArgs,
+    ];
   }
-  return ['exec', opts.prompt, '--json', '--skip-git-repo-check'];
+  return ['exec', opts.prompt, '--json', '--skip-git-repo-check', ...sandboxArgs, ...modelArgs];
 }

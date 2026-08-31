@@ -5,7 +5,9 @@
   "type": "module",
   "main": "./src/index.ts",
   "scripts": {
+    "predev": "node scripts/build-windows-job-host.mjs",
     "dev": "tsx watch src/index.ts",
+    "prestart": "node scripts/build-windows-job-host.mjs",
     "start": "tsx src/index.ts",
     "build": "tsc -p tsconfig.build.json --noEmit && node scripts/build.mjs",
     "typecheck": "tsc --noEmit",

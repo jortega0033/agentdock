@@ -1,16 +1,20 @@
 import { mkdtempSync, rmSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import {
   FAKE_PROVIDER_CAPABILITIES,
+  FAKE_INTERACTIVE_COMPATIBILITY,
   CLAUDE_LEGACY_COMPATIBILITY,
   FakeProvider,
+  ProviderTransportStartupError,
   ProviderRegistry,
   noopLogger,
   type AgentProvider,
+  type Logger,
+  type ProviderDetectionOptions,
   type ProviderSessionHandle,
   type StartSessionOptions,
 } from '@agent-dock/agent-runtime';
@@ -22,10 +26,13 @@ import {
   providerStatusV2Schema,
   providersV2ResponseSchema,
   type AgentEvent,
+  type CapabilitySupportRecord,
   type ProviderStatus,
 } from '@agent-dock/shared';
 import { buildServer } from '../src/server.js';
 import { SessionManager } from '../src/session-manager.js';
+import { resolveWorkspaceIdentity } from '../src/workspace-identity.js';
+import { WorkspaceTrustStore } from '../src/workspace-trust-store.js';
 
 const TOKEN = 'test-token-v2';
 
@@ -86,6 +93,51 @@ class ReplayOverflowProvider implements AgentProvider {
   }
 }
 
+class UnknownCodexProvider implements AgentProvider {
+  readonly id = 'codex' as const;
+  readonly name = 'Unknown-version Codex fixture';
+  readonly startedOptions: StartSessionOptions[] = [];
+  detectCalls = 0;
+  readonly detectionOptions: Array<ProviderDetectionOptions | undefined> = [];
+  redetectedStatus?: ProviderStatus;
+
+  constructor(
+    readonly status: ProviderStatus,
+    private readonly trustedScopeEvidence?: Pick<
+      ProviderStatus,
+      'accountFingerprint' | 'selectedModel'
+    >,
+  ) {}
+
+  async detect(options?: ProviderDetectionOptions): Promise<ProviderStatus> {
+    this.detectCalls += 1;
+    this.detectionOptions.push(options);
+    const status =
+      options?.includeLaunchScopeEvidence === true && this.redetectedStatus
+        ? this.redetectedStatus
+        : this.status;
+    const { accountFingerprint, selectedModel, ...baseStatus } = status;
+    const evidence = this.trustedScopeEvidence ?? { accountFingerprint, selectedModel };
+    return options?.workspaceTrust?.state === 'trusted' &&
+      options.includeLaunchScopeEvidence === true
+      ? { ...baseStatus, ...evidence }
+      : baseStatus;
+  }
+
+  startSession(options: StartSessionOptions): ProviderSessionHandle {
+    this.startedOptions.push(options);
+    async function* events(): AsyncGenerator<AgentEvent, void, void> {
+      yield { type: 'session.started', sessionId: options.sessionId, provider: 'codex' };
+      yield { type: 'session.completed', providerSessionId: 'unknown-version-thread' };
+    }
+    return { events: events(), cancel: async () => undefined };
+  }
+
+  async startInteractiveSession(): Promise<never> {
+    throw new Error('unknown-version fixture must not use app-server');
+  }
+}
+
 function setup(scenario: 'success' | 'failure' | 'hang-until-cancelled' = 'success') {
   const registry = new ProviderRegistry();
   const provider = new FakeProvider(
@@ -116,12 +168,13 @@ function setupInteractive(
     | 'malformed-frame'
     | 'oversized-frame'
     | 'crash' = 'multi-input',
+  logger: Logger = noopLogger,
 ) {
   const registry = new ProviderRegistry();
   const provider = new FakeProvider('claude', undefined, 'success', scenario);
   registry.register(provider);
-  const sessionManager = new SessionManager(registry, noopLogger);
-  const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+  const sessionManager = new SessionManager(registry, logger);
+  const app = buildServer({ registry, sessionManager, token: TOKEN, logger });
   return { app, provider, sessionManager };
 }
 
@@ -189,6 +242,37 @@ afterEach(() => {
 });
 
 describe('v2 discovery and authorization', () => {
+  it('never serializes internal account/model launch evidence on provider routes', async () => {
+    const registry = new ProviderRegistry();
+    registry.register(
+      new FakeProvider('claude', {
+        id: 'claude',
+        name: 'Private evidence fixture',
+        installed: true,
+        authenticated: 'authenticated',
+        authSource: 'chatgpt',
+        accountFingerprint: 'f'.repeat(64),
+        selectedModel: 'private-model-evidence',
+        capabilities: FAKE_PROVIDER_CAPABILITIES,
+      }),
+    );
+    const sessionManager = new SessionManager(registry, noopLogger);
+    const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+
+    for (const url of [
+      '/providers',
+      '/providers/claude',
+      '/v2/providers',
+      '/v2/providers/claude',
+    ]) {
+      const response = await app.inject({ method: 'GET', url, headers: auth() });
+      expect(response.statusCode, response.body).toBe(200);
+      expect(response.body).not.toContain('accountFingerprint');
+      expect(response.body).not.toContain('selectedModel');
+      expect(response.body).not.toContain('private-model-evidence');
+    }
+  });
+
   it('keeps the v1 scalar and advertises every supported protocol version', async () => {
     const { app } = setup();
     const response = await app.inject({ method: 'GET', url: '/health' });
@@ -258,6 +342,40 @@ describe('v2 discovery and authorization', () => {
     expect(parsed.providers[0]?.capabilities.map((record) => record.id)).toContain(
       'session.input.follow_up',
     );
+    expect(parsed.providers[0]?.sandbox.agentDock.state).toBe('not_requested');
+  });
+
+  it('returns a bounded schema-valid provider status when v2 support resolution is unavailable', async () => {
+    const registry = new ProviderRegistry();
+    const provider = new FakeProvider(
+      'codex',
+      {
+        id: 'codex',
+        name: 'Codex',
+        installed: true,
+        authenticated: 'authenticated',
+        capabilities: FAKE_PROVIDER_CAPABILITIES,
+        version: '0.148.0',
+      },
+      'success',
+      'multi-input',
+    );
+    vi.spyOn(provider, 'getV2Support').mockImplementation(() => {
+      throw new Error('unsupported app-server version');
+    });
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger);
+    const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+
+    const response = await app.inject({ method: 'GET', url: '/v2/providers', headers: auth() });
+
+    expect(response.statusCode).toBe(200);
+    const parsed = providersV2ResponseSchema.parse(response.json());
+    expect(parsed.providers[0]).toMatchObject({
+      id: 'codex',
+      error:
+        'Codex app-server transport is unavailable for the detected CLI version or transport mode',
+    });
   });
 
   it('gets one provider and preserves invalid/unregistered status behavior under /v2', async () => {
@@ -277,6 +395,684 @@ describe('v2 discovery and authorization', () => {
 });
 
 describe('POST /v2/sessions capability negotiation', () => {
+  it('plumbs fresh, resume, and fork only for daemon-issued same-scope continuation ids', async () => {
+    const status: ProviderStatus = {
+      id: 'claude',
+      name: 'Continuation fixture',
+      installed: true,
+      authenticated: 'authenticated',
+      authSource: 'chatgpt',
+      accountFingerprint: 'a'.repeat(64),
+      selectedModel: 'fixture-model',
+      executablePath: 'C:\\fixtures\\claude.exe',
+      version: FAKE_INTERACTIVE_COMPATIBILITY.providerVersion,
+      capabilities: { ...FAKE_PROVIDER_CAPABILITIES, resume: true },
+    };
+    const registry = new ProviderRegistry();
+    const provider = new FakeProvider('claude', status, 'success', 'multi-input');
+    const baseSupport = provider.getV2Support(status)!;
+    const scope = baseSupport.capabilities[0]!.scope;
+    const continuationRecord = (id: 'session.resume' | 'session.fork'): CapabilitySupportRecord =>
+      ({
+        id,
+        kind: 'operation',
+        owner: 'provider',
+        support: 'supported',
+        stability: 'stable',
+        evidence: [{ kind: 'fixture', reference: FAKE_INTERACTIVE_COMPATIBILITY.fixtureSet }],
+        scope,
+        prerequisites: {
+          capabilities: [],
+          trustStates: ['untrusted'],
+          sessionStates: ['starting'],
+          services: [],
+        },
+        possibleEffects: [],
+        effectsComplete: true,
+        constraints: { kind: 'continuation', native: true },
+      }) as CapabilitySupportRecord;
+    vi.spyOn(provider, 'getV2Support').mockReturnValue({
+      ...baseSupport,
+      capabilities: [
+        ...baseSupport.capabilities,
+        continuationRecord('session.resume'),
+        continuationRecord('session.fork'),
+      ],
+    });
+    const originalStart = provider.startInteractiveSession.bind(provider);
+    let forkTargetSequence = 0;
+    const forkTargetOverride: { value?: string } = {};
+    const startInteractive = vi
+      .spyOn(provider, 'startInteractiveSession')
+      .mockImplementation(async (options) => {
+        const handle = await originalStart(options);
+        return {
+          events: handle.events,
+          accepted: handle.accepted,
+          send: (command) => handle.send(command),
+          resolveInteraction: (requestId, reason) => handle.resolveInteraction(requestId, reason),
+          interrupt: () => handle.interrupt(),
+          close: () => handle.close(),
+          providerSessionId:
+            options.continuation?.kind === 'fork'
+              ? (forkTargetOverride.value ?? `native-fork-${++forkTargetSequence}`)
+              : (options.continuation?.providerSessionId ?? 'native-thread-1'),
+          continuationEvidence: {
+            accountFingerprint: createHash('sha256').update('fixture@example.test').digest('hex'),
+            selectedModel: 'fixture-model',
+          },
+        };
+      });
+    registry.register(provider);
+    const identity = await resolveWorkspaceIdentity(cwd);
+    const trustStore = new WorkspaceTrustStore(join(cwd, 'trust.json'));
+    await trustStore.setTrusted(identity);
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, { trustStore });
+    const app = buildServer({
+      registry,
+      sessionManager,
+      trustStore,
+      token: TOKEN,
+      logger: noopLogger,
+    });
+    const payload = {
+      provider: 'claude',
+      cwd,
+      prompt: 'continue safely',
+      capabilities: {
+        required: [{ id: 'session.cancel' }],
+        optional: [],
+        allowExperimental: false,
+      },
+    };
+
+    const fresh = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload,
+    });
+    expect(fresh.statusCode, fresh.body).toBe(201);
+    const freshSession = agentSessionV2Schema.parse(fresh.json());
+    expect(freshSession.providerSessionId).toBe('native-thread-1');
+    expect(provider.interactiveStartedOptions[0]?.continuation).toBeUndefined();
+
+    const sessionCountBeforeFreshCollision = sessionManager.list(2).length;
+    const closesBeforeFreshCollision = provider.interactiveCloses;
+    const freshCollision = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: { ...payload, prompt: 'fresh collision' },
+    });
+    expect(freshCollision.statusCode).toBe(502);
+    expect(freshCollision.json()).toMatchObject({
+      code: 'provider_transport_startup_failed',
+      details: { reason: 'continuation_binding_collision' },
+    });
+    expect(sessionManager.list(2)).toHaveLength(sessionCountBeforeFreshCollision);
+    expect(provider.interactiveCloses).toBe(closesBeforeFreshCollision + 1);
+
+    const liveFreshResume = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: {
+        ...payload,
+        prompt: 'resume fresh thread while its session is live',
+        continuation: { kind: 'resume', providerSessionId: 'native-thread-1' },
+      },
+    });
+    expect(liveFreshResume.statusCode).toBe(502);
+    expect(liveFreshResume.json()).toMatchObject({
+      code: 'provider_transport_startup_failed',
+      details: { reason: 'continuation_in_use' },
+    });
+    expect(provider.interactiveStartedOptions).toHaveLength(2);
+
+    const cancelledFresh = await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${freshSession.id}/cancel`,
+      headers: auth(),
+    });
+    expect(cancelledFresh.statusCode, cancelledFresh.body).toBe(202);
+    await vi.waitFor(async () => {
+      const snapshot = await app.inject({
+        method: 'GET',
+        url: `/v2/sessions/${freshSession.id}`,
+        headers: auth(),
+      });
+      expect(agentSessionV2Schema.parse(snapshot.json()).status).toBe('cancelled');
+    });
+
+    startInteractive.mockRejectedValueOnce(
+      new ProviderTransportStartupError(
+        'fixture_start_failed',
+        'not_delivered',
+        'fixture startup failure',
+      ),
+    );
+    const failedStart = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: {
+        ...payload,
+        continuation: { kind: 'resume', providerSessionId: 'native-thread-1' },
+      },
+    });
+    expect(failedStart.statusCode).toBe(502);
+    expect(failedStart.json()).toMatchObject({
+      code: 'provider_transport_startup_failed',
+      details: { reason: 'fixture_start_failed' },
+    });
+
+    for (const kind of ['resume', 'fork'] as const) {
+      const attempts = await Promise.all(
+        ['first', 'concurrent'].map((label) =>
+          app.inject({
+            method: 'POST',
+            url: '/v2/sessions',
+            headers: auth(),
+            payload: {
+              ...payload,
+              prompt: `${label} ${kind}`,
+              continuation: { kind, providerSessionId: 'native-thread-1' },
+            },
+          }),
+        ),
+      );
+      const continued = attempts.find((attempt) => attempt.statusCode === 201)!;
+      const conflict = attempts.find((attempt) => attempt.statusCode === 502)!;
+      expect(continued.statusCode, continued.body).toBe(201);
+      expect(conflict?.json()).toMatchObject({
+        code: 'provider_transport_startup_failed',
+        details: { reason: 'continuation_in_use' },
+      });
+      expect(provider.interactiveStartedOptions.at(-1)?.continuation).toEqual({
+        kind,
+        providerSessionId: 'native-thread-1',
+      });
+      expect(provider.interactiveStartedOptions.at(-1)?.expectedContinuationEvidence).toEqual({
+        accountFingerprint: createHash('sha256').update('fixture@example.test').digest('hex'),
+        selectedModel: 'fixture-model',
+      });
+      expect(continued.body).not.toContain('accountFingerprint');
+      const continuedSession = agentSessionV2Schema.parse(continued.json());
+      if (kind === 'fork') {
+        expect(continuedSession.providerSessionId).toBe('native-fork-1');
+        const concurrentTargetResume = await app.inject({
+          method: 'POST',
+          url: '/v2/sessions',
+          headers: auth(),
+          payload: {
+            ...payload,
+            prompt: 'resume fork target while fork session is live',
+            continuation: {
+              kind: 'resume',
+              providerSessionId: continuedSession.providerSessionId,
+            },
+          },
+        });
+        expect(concurrentTargetResume.statusCode).toBe(502);
+        expect(concurrentTargetResume.json()).toMatchObject({
+          code: 'provider_transport_startup_failed',
+          details: { reason: 'continuation_in_use' },
+        });
+      }
+      const cancelled = await app.inject({
+        method: 'POST',
+        url: `/v2/sessions/${continuedSession.id}/cancel`,
+        headers: auth(),
+      });
+      expect(cancelled.statusCode, cancelled.body).toBe(202);
+      await vi.waitFor(async () => {
+        const snapshot = await app.inject({
+          method: 'GET',
+          url: `/v2/sessions/${continuedSession.id}`,
+          headers: auth(),
+        });
+        expect(agentSessionV2Schema.parse(snapshot.json()).status).toBe('cancelled');
+      });
+      if (kind === 'fork') {
+        const resumedTarget = await app.inject({
+          method: 'POST',
+          url: '/v2/sessions',
+          headers: auth(),
+          payload: {
+            ...payload,
+            prompt: 'resume fork target after fork session terminal',
+            continuation: {
+              kind: 'resume',
+              providerSessionId: continuedSession.providerSessionId,
+            },
+          },
+        });
+        expect(resumedTarget.statusCode, resumedTarget.body).toBe(201);
+        const resumedTargetSession = agentSessionV2Schema.parse(resumedTarget.json());
+        const targetCancelled = await app.inject({
+          method: 'POST',
+          url: `/v2/sessions/${resumedTargetSession.id}/cancel`,
+          headers: auth(),
+        });
+        expect(targetCancelled.statusCode, targetCancelled.body).toBe(202);
+      }
+    }
+
+    forkTargetOverride.value = 'native-fork-1';
+    const sessionCountBeforeForkCollision = sessionManager.list(2).length;
+    const closesBeforeForkCollision = provider.interactiveCloses;
+    const forkCollision = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: {
+        ...payload,
+        prompt: 'fork into an existing target',
+        continuation: { kind: 'fork', providerSessionId: 'native-thread-1' },
+      },
+    });
+    expect(forkCollision.statusCode).toBe(502);
+    expect(forkCollision.json()).toMatchObject({
+      code: 'provider_transport_startup_failed',
+      details: { reason: 'continuation_binding_collision' },
+    });
+    expect(sessionManager.list(2)).toHaveLength(sessionCountBeforeForkCollision);
+    expect(provider.interactiveCloses).toBe(closesBeforeForkCollision + 1);
+
+    const unknown = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: {
+        ...payload,
+        continuation: { kind: 'resume', providerSessionId: 'unknown-thread' },
+      },
+    });
+    expect(unknown.statusCode).toBe(502);
+    expect(unknown.json()).toMatchObject({
+      code: 'provider_transport_startup_failed',
+      details: { reason: 'continuation_binding_not_found' },
+    });
+    expect(provider.interactiveStartedOptions).toHaveLength(6);
+
+    const otherCwd = mkdtempSync(join(tmpdir(), 'agent-dock-daemon-v2-other-'));
+    try {
+      const otherIdentity = await resolveWorkspaceIdentity(otherCwd);
+      await trustStore.setTrusted(otherIdentity);
+      const crossWorkspace = await app.inject({
+        method: 'POST',
+        url: '/v2/sessions',
+        headers: auth(),
+        payload: {
+          ...payload,
+          cwd: otherCwd,
+          continuation: { kind: 'fork', providerSessionId: 'native-thread-1' },
+        },
+      });
+      expect(crossWorkspace.statusCode).toBe(502);
+      expect(crossWorkspace.json()).toMatchObject({
+        code: 'provider_transport_startup_failed',
+        details: { reason: 'continuation_scope_mismatch' },
+      });
+      expect(provider.interactiveStartedOptions).toHaveLength(6);
+    } finally {
+      rmSync(otherCwd, { recursive: true, force: true });
+    }
+  });
+
+  it('passes a bound resume id to legacy exec and rejects legacy fork before dispatch', async () => {
+    const status: ProviderStatus = {
+      id: 'claude',
+      name: 'Legacy continuation fixture',
+      installed: true,
+      authenticated: 'authenticated',
+      authSource: 'chatgpt',
+      accountFingerprint: 'b'.repeat(64),
+      selectedModel: 'fixture-model',
+      executablePath: 'C:\\fixtures\\claude.exe',
+      version: CLAUDE_LEGACY_COMPATIBILITY.providerVersion,
+      capabilities: { ...FAKE_PROVIDER_CAPABILITIES, resume: true },
+    };
+    const registry = new ProviderRegistry();
+    const provider = new FakeProvider('claude', status);
+    registry.register(provider);
+    const identity = await resolveWorkspaceIdentity(cwd);
+    const trustStore = new WorkspaceTrustStore(join(cwd, 'trust.json'));
+    await trustStore.setTrusted(identity);
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, { trustStore });
+    const app = buildServer({
+      registry,
+      sessionManager,
+      trustStore,
+      token: TOKEN,
+      logger: noopLogger,
+    });
+    const payload = { provider: 'claude', cwd, prompt: 'legacy fresh' };
+    const fresh = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload,
+    });
+    expect(fresh.statusCode, fresh.body).toBe(201);
+    const freshSession = agentSessionV2Schema.parse(fresh.json());
+    let issuedId: string | undefined;
+    await vi.waitFor(async () => {
+      const snapshot = await app.inject({
+        method: 'GET',
+        url: `/v2/sessions/${freshSession.id}`,
+        headers: auth(),
+      });
+      issuedId = agentSessionV2Schema.parse(snapshot.json()).providerSessionId;
+      expect(issuedId).toBe(`fake-${freshSession.id}`);
+    });
+
+    const resumed = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: {
+        ...payload,
+        prompt: 'legacy resume',
+        continuation: { kind: 'resume', providerSessionId: issuedId },
+      },
+    });
+    expect(resumed.statusCode, resumed.body).toBe(201);
+    expect(provider.startedOptions[1]?.resumeProviderSessionId).toBe(issuedId);
+
+    const forked = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: {
+        ...payload,
+        prompt: 'legacy fork',
+        continuation: { kind: 'fork', providerSessionId: issuedId },
+      },
+    });
+    expect(forked.statusCode).toBe(422);
+    expect(forked.json()).toMatchObject({ code: 'required_capability_unavailable' });
+    expect(provider.startedOptions).toHaveLength(2);
+  });
+
+  it('dispatches unknown-version auto exec only through a trusted, pinned, authenticated scope', async () => {
+    const previousMode = process.env.AGENT_DOCK_CODEX_TRANSPORT;
+    process.env.AGENT_DOCK_CODEX_TRANSPORT = 'auto';
+    try {
+      const status: ProviderStatus = {
+        id: 'codex',
+        name: 'Unknown Codex',
+        installed: true,
+        authenticated: 'authenticated',
+        authSource: 'chatgpt',
+        executablePath: 'C:\\pinned\\codex.exe',
+        version: '0.999.0',
+        capabilities: { cancellation: true, resume: true },
+      };
+      const registry = new ProviderRegistry();
+      const provider = new UnknownCodexProvider(status, {
+        accountFingerprint: 'c'.repeat(64),
+        selectedModel: 'gpt-5.4',
+      });
+      registry.register(provider);
+      const identity = await resolveWorkspaceIdentity(cwd);
+      const trustStore = new WorkspaceTrustStore(join(cwd, 'unknown-auto-trust.json'));
+      await trustStore.setTrusted(identity);
+      const sessionManager = new SessionManager(registry, noopLogger, undefined, { trustStore });
+      const app = buildServer({
+        registry,
+        sessionManager,
+        trustStore,
+        token: TOKEN,
+        logger: noopLogger,
+      });
+
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/sessions',
+        headers: auth(),
+        payload: {
+          provider: 'codex',
+          cwd,
+          prompt: 'pinned unknown auto',
+          capabilities: { required: [], optional: [], allowExperimental: false },
+        },
+      });
+
+      expect(response.statusCode, response.body).toBe(201);
+      expect(provider.detectCalls).toBe(2);
+      expect(provider.detectionOptions).toHaveLength(2);
+      expect(provider.detectionOptions).toEqual([
+        expect.objectContaining({
+          cwd: identity.canonicalPath,
+          workspaceTrust: expect.objectContaining({ state: 'trusted' }),
+          includeLaunchScopeEvidence: false,
+        }),
+        expect.objectContaining({
+          cwd: identity.canonicalPath,
+          workspaceTrust: expect.objectContaining({ state: 'trusted' }),
+          includeLaunchScopeEvidence: true,
+        }),
+      ]);
+      expect(provider.startedOptions).toHaveLength(1);
+      expect(provider.startedOptions[0]).toMatchObject({
+        cwd: identity.canonicalPath,
+        providerStatus: {
+          ...status,
+          accountFingerprint: 'c'.repeat(64),
+          selectedModel: 'gpt-5.4',
+        },
+        sandbox: 'workspace-write',
+        model: 'gpt-5.4',
+      });
+    } finally {
+      if (previousMode === undefined) delete process.env.AGENT_DOCK_CODEX_TRANSPORT;
+      else process.env.AGENT_DOCK_CODEX_TRANSPORT = previousMode;
+    }
+  });
+
+  it.each([
+    ['unauthenticated', { authenticated: 'unauthenticated' as const }],
+    ['unknown auth source', { authSource: 'unknown' as const }],
+    ['missing account evidence', { accountFingerprint: undefined }],
+    ['missing model evidence', { selectedModel: undefined }],
+  ])('rejects unknown-version auto exec before dispatch for %s', async (_label, change) => {
+    const previousMode = process.env.AGENT_DOCK_CODEX_TRANSPORT;
+    process.env.AGENT_DOCK_CODEX_TRANSPORT = 'auto';
+    try {
+      const status: ProviderStatus = {
+        id: 'codex',
+        name: 'Unknown Codex',
+        installed: true,
+        authenticated: 'authenticated',
+        authSource: 'chatgpt',
+        accountFingerprint: 'd'.repeat(64),
+        selectedModel: 'gpt-5.4',
+        executablePath: 'C:\\pinned\\codex.exe',
+        version: '0.999.0',
+        capabilities: { cancellation: true },
+        ...change,
+      };
+      const registry = new ProviderRegistry();
+      const provider = new UnknownCodexProvider(status);
+      registry.register(provider);
+      const identity = await resolveWorkspaceIdentity(cwd);
+      const trustStore = new WorkspaceTrustStore(join(cwd, `unknown-auto-${_label}.json`));
+      await trustStore.setTrusted(identity);
+      const sessionManager = new SessionManager(registry, noopLogger, undefined, { trustStore });
+      const app = buildServer({
+        registry,
+        sessionManager,
+        trustStore,
+        token: TOKEN,
+        logger: noopLogger,
+      });
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/sessions',
+        headers: auth(),
+        payload: {
+          provider: 'codex',
+          cwd,
+          prompt: 'must not start',
+          capabilities: { required: [], optional: [], allowExperimental: false },
+        },
+      });
+      expect(response.statusCode).toBe(422);
+      expect(response.json()).toMatchObject({ code: 'provider_scope_unverified' });
+      expect(provider.startedOptions).toHaveLength(0);
+    } finally {
+      if (previousMode === undefined) delete process.env.AGENT_DOCK_CODEX_TRANSPORT;
+      else process.env.AGENT_DOCK_CODEX_TRANSPORT = previousMode;
+    }
+  });
+
+  it('rejects unknown-version auto exec if bounded re-detection changes executable or auth scope', async () => {
+    const previousMode = process.env.AGENT_DOCK_CODEX_TRANSPORT;
+    process.env.AGENT_DOCK_CODEX_TRANSPORT = 'auto';
+    try {
+      const status: ProviderStatus = {
+        id: 'codex',
+        name: 'Unknown Codex',
+        installed: true,
+        authenticated: 'authenticated',
+        authSource: 'chatgpt',
+        accountFingerprint: 'e'.repeat(64),
+        selectedModel: 'gpt-5.4',
+        executablePath: 'C:\\pinned\\codex.exe',
+        version: '0.999.0',
+        capabilities: { cancellation: true },
+      };
+      const registry = new ProviderRegistry();
+      const provider = new UnknownCodexProvider(status);
+      provider.redetectedStatus = { ...status, executablePath: 'C:\\switched\\codex.exe' };
+      registry.register(provider);
+      const identity = await resolveWorkspaceIdentity(cwd);
+      const trustStore = new WorkspaceTrustStore(join(cwd, 'unknown-switch-trust.json'));
+      await trustStore.setTrusted(identity);
+      const sessionManager = new SessionManager(registry, noopLogger, undefined, { trustStore });
+      const app = buildServer({
+        registry,
+        sessionManager,
+        trustStore,
+        token: TOKEN,
+        logger: noopLogger,
+      });
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/sessions',
+        headers: auth(),
+        payload: {
+          provider: 'codex',
+          cwd,
+          prompt: 'must not start',
+          capabilities: { required: [], optional: [], allowExperimental: false },
+        },
+      });
+      expect(response.statusCode).toBe(502);
+      expect(response.json()).toMatchObject({
+        code: 'provider_transport_startup_failed',
+        details: { reason: 'provider_scope_revalidation_failed' },
+      });
+      expect(provider.startedOptions).toHaveLength(0);
+    } finally {
+      if (previousMode === undefined) delete process.env.AGENT_DOCK_CODEX_TRANSPORT;
+      else process.env.AGENT_DOCK_CODEX_TRANSPORT = previousMode;
+    }
+  });
+
+  it.each(['app-server', 'invalid-mode'])(
+    'returns bounded 422 for unsupported forced mode %s',
+    async (mode) => {
+      const previousMode = process.env.AGENT_DOCK_CODEX_TRANSPORT;
+      process.env.AGENT_DOCK_CODEX_TRANSPORT = mode;
+      try {
+        const registry = new ProviderRegistry();
+        const provider = new UnknownCodexProvider({
+          id: 'codex',
+          name: 'Unknown Codex',
+          installed: true,
+          authenticated: 'authenticated',
+          capabilities: { cancellation: true },
+          version: '0.999.0',
+        });
+        registry.register(provider);
+        const sessionManager = new SessionManager(registry, noopLogger);
+        const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+        const response = await app.inject({
+          method: 'POST',
+          url: '/v2/sessions',
+          headers: auth(),
+          payload: { provider: 'codex', cwd, prompt: 'must not start' },
+        });
+        expect(response.statusCode).toBe(422);
+        expect(response.json()).toMatchObject({ code: 'provider_transport_unavailable' });
+        expect(provider.startedOptions).toHaveLength(0);
+      } finally {
+        if (previousMode === undefined) delete process.env.AGENT_DOCK_CODEX_TRANSPORT;
+        else process.env.AGENT_DOCK_CODEX_TRANSPORT = previousMode;
+      }
+    },
+  );
+
+  it('returns a bounded visible reason when startup cannot safely fall back', async () => {
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    } satisfies Logger;
+    const { app, provider } = setupInteractive('multi-input', logger);
+    const promptCanary = 'PROMPT_CANARY_do_not_log';
+    const credentialCanary = 'sk-proj-CREDENTIAL_CANARY_do_not_log';
+    const approvalCanary = 'RAW_APPROVAL_CANARY_do_not_log';
+    vi.spyOn(provider, 'startInteractiveSession').mockRejectedValueOnce(
+      new ProviderTransportStartupError(
+        'app_server_handshake_failed',
+        'not_delivered',
+        `${credentialCanary} ${approvalCanary} native payload must not be returned`,
+      ),
+    );
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: {
+        provider: 'claude',
+        cwd,
+        prompt: promptCanary,
+        capabilities: {
+          required: [{ id: 'session.cancel' }],
+          optional: [],
+          allowExperimental: false,
+        },
+      },
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json()).toMatchObject({
+      code: 'provider_transport_startup_failed',
+      details: {
+        reason: 'app_server_handshake_failed',
+        deliveryState: 'not_delivered',
+        fallback: 'fallback_scope_mismatch',
+      },
+    });
+    expect(response.body).not.toContain(promptCanary);
+    expect(response.body).not.toContain(credentialCanary);
+    expect(response.body).not.toContain(approvalCanary);
+    expect(response.body).not.toContain('native payload');
+    const serializedLogs = JSON.stringify(
+      Object.values(logger).flatMap((method) => method.mock.calls),
+    );
+    expect(serializedLogs).not.toContain(promptCanary);
+    expect(serializedLogs).not.toContain(credentialCanary);
+    expect(serializedLogs).not.toContain(approvalCanary);
+    expect(provider.startedOptions).toHaveLength(0);
+  });
+
   it('does not start a provider when the client disconnects during detection', async () => {
     const { app, provider } = setupInteractive();
     const status = await provider.detect();
@@ -330,6 +1126,11 @@ describe('POST /v2/sessions capability negotiation', () => {
     expect(snapshot.acceptedWork).toBe('unknown');
     expect(snapshot.earliestSequence).toBe(0);
     expect(provider.startedOptions).toHaveLength(1);
+    expect(provider.startedOptions[0]?.providerStatus).toMatchObject({
+      id: 'claude',
+      installed: true,
+      authenticated: 'authenticated',
+    });
 
     await new Promise((resolve) => setTimeout(resolve, 30));
     const fetched = await app.inject({

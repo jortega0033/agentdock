@@ -14,15 +14,22 @@ import {
   type ApprovalDecisionV2,
   type PermissionActionV2,
   type ProviderId,
+  type ProviderStatus,
   type ProviderTransportV2,
+  type SessionContinuationV2,
 } from '@agent-dock/shared';
 import {
   InteractiveSessionError,
   type AcceptedWorkState,
   type InteractiveProviderSessionHandle,
   type Logger,
+  type ProviderRuntimeMetadata,
+  type ProviderContinuationEvidence,
+  type ProviderDetectionOptions,
   type ProviderRegistry,
   type ProviderSessionHandle,
+  type StartSessionOptions,
+  type WorkspaceTrustEvidence,
 } from '@agent-dock/agent-runtime';
 import { MemorySessionStore, type SessionStore } from './session-store.js';
 import type { AuditStore } from './audit-store.js';
@@ -78,6 +85,9 @@ interface InteractiveRuntimeState extends RuntimeStateBase {
   approvalActions: Map<string, PermissionActionV2>;
   sessionGrants: Set<string>;
   transport: string;
+  providerSessionId?: string;
+  runtimeMetadata?: Readonly<ProviderRuntimeMetadata>;
+  continuationEvidence?: Readonly<ProviderContinuationEvidence>;
 }
 
 interface PendingInteractiveStart {
@@ -128,6 +138,7 @@ const MAX_PENDING_COMMANDS = 64;
 const MAX_PENDING_COMMAND_BYTES = 1024 * 1024;
 const MAX_COMMAND_LEDGER_ENTRIES = 1_024;
 const INTERACTIVE_CLOSE_TIMEOUT_MS = 5_000;
+const PROVIDER_REDETECT_TIMEOUT_MS = 5_000;
 // Interactive shutdown can spend one close interval resolving outstanding interactions, one on
 // graceful transport close, and one on the mandatory force-close/reap fallback. Keep the daemon's
 // outer bound above all three so it never exits while a conforming supervisor is still reaping.
@@ -176,6 +187,9 @@ export class SessionManager {
     resumeProviderSessionId?: string,
     protocolVersion: 1 | 2 = 1,
     workspace?: WorkspaceIdentity,
+    providerStatus?: ProviderStatus,
+    sandbox?: StartSessionOptions['sandbox'],
+    model?: string,
   ): AgentSession {
     if (this.shuttingDown) throw new Error('session manager is shutting down');
     if (workspace && this.blockedWorkspaces.has(workspace.workspaceId)) {
@@ -192,6 +206,9 @@ export class SessionManager {
       cwd,
       prompt,
       resumeProviderSessionId,
+      ...(providerStatus ? { providerStatus } : {}),
+      ...(sandbox ? { sandbox } : {}),
+      ...(model ? { model } : {}),
     });
     const runtime: LegacyRuntimeState = {
       kind: 'legacy',
@@ -220,6 +237,12 @@ export class SessionManager {
     turnId: string,
     signal?: AbortSignal,
     workspace?: WorkspaceIdentity,
+    providerStatus?: ProviderStatus,
+    continuation?: SessionContinuationV2,
+    expectedContinuationEvidence?: Readonly<ProviderContinuationEvidence>,
+    beforeProviderThreadStart?: (
+      evidence: Readonly<ProviderContinuationEvidence> | undefined,
+    ) => Promise<void>,
   ): Promise<AgentSession> {
     if (this.shuttingDown) {
       throw new InteractiveSessionError('session_terminal', 'session manager is shutting down');
@@ -232,6 +255,18 @@ export class SessionManager {
     if (!providerImpl?.startInteractiveSession) {
       throw new Error(`provider has no interactive transport: ${provider}`);
     }
+    const detectedProviderStatus = providerStatus ?? (await providerImpl.detect());
+    if (detectedProviderStatus.id !== provider) {
+      throw new Error(`detected provider status does not match requested provider: ${provider}`);
+    }
+    const workspaceTrust: WorkspaceTrustEvidence = workspace
+      ? {
+          state: 'trusted',
+          workspaceId: workspace.workspaceId,
+          incarnation: workspace.incarnation,
+          trustEpoch: workspaceEpoch as number,
+        }
+      : { state: 'untrusted' };
     const id = randomUUID();
     const session = this.newSession(id, provider, cwd, prompt);
     this.store.create(session);
@@ -263,6 +298,23 @@ export class SessionManager {
         turnId,
         interactionOwner: 'daemon',
         signal: controller.signal,
+        providerStatus: detectedProviderStatus,
+        workspaceTrust,
+        beforeWorkDelivery: async () => {
+          if (controller.signal.aborted || this.shuttingDown) {
+            throw new InteractiveSessionError('session_aborted', 'session start was cancelled');
+          }
+          if (workspace) await this.assertWorkspaceTrusted(workspace, workspaceEpoch);
+          if (controller.signal.aborted || this.shuttingDown) {
+            throw new InteractiveSessionError('session_aborted', 'session start was cancelled');
+          }
+        },
+        ...(beforeProviderThreadStart ? { beforeProviderThreadStart } : {}),
+        ...(detectedProviderStatus.selectedModel
+          ? { model: detectedProviderStatus.selectedModel }
+          : {}),
+        ...(continuation ? { continuation } : {}),
+        ...(expectedContinuationEvidence ? { expectedContinuationEvidence } : {}),
       });
       const workspaceStillTrusted = workspace
         ? await this.workspaceIsTrusted(workspace, workspaceEpoch)
@@ -296,6 +348,11 @@ export class SessionManager {
         approvalActions: new Map(),
         sessionGrants: new Set(),
         transport: transport.id,
+        ...(handle.providerSessionId ? { providerSessionId: handle.providerSessionId } : {}),
+        ...(handle.runtimeMetadata ? { runtimeMetadata: { ...handle.runtimeMetadata } } : {}),
+        ...(handle.continuationEvidence
+          ? { continuationEvidence: { ...handle.continuationEvidence } }
+          : {}),
         ...(workspace ? { workspace } : {}),
         done: Promise.resolve(),
       };
@@ -383,10 +440,9 @@ export class SessionManager {
       for (const listener of [...runtime.listeners]) {
         try {
           listener(index, event);
-        } catch (error) {
+        } catch {
           this.logger.warn('interactive session listener failed', {
             sessionId: id,
-            message: error instanceof Error ? error.message : String(error),
           });
         }
       }
@@ -657,10 +713,9 @@ export class SessionManager {
     for (const listener of [...runtime.listeners]) {
       try {
         listener(sequence, event);
-      } catch (error) {
+      } catch {
         this.logger.warn('session listener failed', {
           sessionId: id,
-          message: error instanceof Error ? error.message : String(error),
         });
       }
     }
@@ -780,6 +835,71 @@ export class SessionManager {
   acceptedWork(id: string): AcceptedWorkState {
     const runtime = this.runtime.get(id);
     return runtime?.kind === 'interactive' ? runtime.acceptedWork : 'unknown';
+  }
+
+  interactiveProviderMetadata(id: string):
+    | {
+        providerSessionId?: string;
+        runtimeMetadata?: Readonly<ProviderRuntimeMetadata>;
+        continuationEvidence?: Readonly<ProviderContinuationEvidence>;
+      }
+    | undefined {
+    const runtime = this.runtime.get(id);
+    if (!runtime || runtime.kind !== 'interactive') return undefined;
+    return {
+      ...(runtime.providerSessionId ? { providerSessionId: runtime.providerSessionId } : {}),
+      ...(runtime.runtimeMetadata ? { runtimeMetadata: { ...runtime.runtimeMetadata } } : {}),
+      ...(runtime.continuationEvidence
+        ? { continuationEvidence: { ...runtime.continuationEvidence } }
+        : {}),
+    };
+  }
+
+  async verifiedWorkspaceTrust(workspace?: WorkspaceIdentity): Promise<WorkspaceTrustEvidence> {
+    if (!workspace) return { state: 'untrusted' };
+    const trustEpoch = this.currentWorkspaceEpoch(workspace.workspaceId);
+    if (!(await this.workspaceIsTrusted(workspace, trustEpoch))) return { state: 'untrusted' };
+    return {
+      state: 'trusted',
+      workspaceId: workspace.workspaceId,
+      incarnation: workspace.incarnation,
+      trustEpoch,
+    };
+  }
+
+  /** Re-detects a provider behind a bounded, abort-aware daemon gate. */
+  async redetectProvider(
+    provider: ProviderId,
+    signal?: AbortSignal,
+    options?: Omit<ProviderDetectionOptions, 'signal'>,
+  ): Promise<ProviderStatus | undefined> {
+    const providerImpl = this.registry.get(provider);
+    if (!providerImpl || signal?.aborted) return undefined;
+    return new Promise((resolve) => {
+      let settled = false;
+      const controller = new AbortController();
+      const finish = (status: ProviderStatus | undefined): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        signal?.removeEventListener('abort', aborted);
+        resolve(status);
+      };
+      const aborted = (): void => {
+        controller.abort(signal?.reason);
+        finish(undefined);
+      };
+      const timeout = setTimeout(() => {
+        controller.abort(new Error('provider re-detection timed out'));
+        finish(undefined);
+      }, PROVIDER_REDETECT_TIMEOUT_MS);
+      timeout.unref?.();
+      signal?.addEventListener('abort', aborted, { once: true });
+      providerImpl.detect({ ...options, signal: controller.signal }).then(
+        (status) => finish(status),
+        () => finish(undefined),
+      );
+    });
   }
 
   markInteractionPublished(id: string, requestId: string): boolean {
@@ -963,8 +1083,14 @@ export class SessionManager {
         if (!interaction) return this.dispatchFailure('stale_interaction');
         try {
           await runtime.handle.send(command);
-        } finally {
           runtime.interactions.settle(command.requestId);
+        } catch (error) {
+          if (error instanceof InteractiveSessionError && error.code === 'command_rejected') {
+            runtime.interactions.release(command.requestId);
+          } else {
+            runtime.interactions.settle(command.requestId);
+          }
+          throw error;
         }
       } else if (command.type === 'session.interrupt') {
         const pending = runtime.interactions.claimAll();

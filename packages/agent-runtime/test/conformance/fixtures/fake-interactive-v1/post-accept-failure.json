@@ -44,10 +44,10 @@
     {
       "type": "error",
       "code": "provider_crash",
-      "message": "fixture provider crash",
+      "message": "provider session crashed",
       "recoverable": false
     },
-    { "type": "session.failed", "code": "provider_crash", "message": "fixture provider crash" }
+    { "type": "session.failed", "code": "provider_crash", "message": "provider session crashed" }
   ],
   "terminalState": {
     "type": "session.failed",

@@ -370,6 +370,7 @@ export interface ProviderStatusV2 {
   name: string;
   installed: boolean;
   authenticated: AuthStatus;
+  authSource?: 'chatgpt' | 'api_key' | 'unknown';
   transports: ProviderTransportV2[];
   capabilities: CapabilitySupportRecord[];
   /** Truthful, layered status; policy restrictions never imply OS isolation. */
@@ -987,6 +988,7 @@ export const providerStatusV2Schema = z
     name: z.string(),
     installed: z.boolean(),
     authenticated: z.enum(['authenticated', 'unauthenticated', 'unknown']),
+    authSource: z.enum(['chatgpt', 'api_key', 'unknown']).optional(),
     transports: z.array(providerTransportV2Schema),
     capabilities: z.array(capabilitySupportRecordSchema),
     sandbox: sandboxStatusV2Schema,

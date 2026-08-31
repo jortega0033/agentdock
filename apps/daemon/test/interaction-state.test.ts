@@ -146,6 +146,24 @@ describe('InteractionState', () => {
     expect(state.settle('request-1')).toBe(true);
   });
 
+  it('releases a rejected claim with only the original monotonic deadline remaining', () => {
+    const scheduler = new FakeScheduler();
+    const expired = vi.fn();
+    const state = new InteractionState(expired, scheduler, 1_000);
+    state.register(approval());
+    state.markPublished('request-1');
+    scheduler.advance(600);
+
+    expect(state.claim('request-1')?.state).toBe('resolving');
+    expect(state.release('request-1')).toBe(true);
+    expect(state.get('request-1')?.state).toBe('pending');
+    scheduler.advance(399);
+    expect(expired).not.toHaveBeenCalled();
+    scheduler.advance(1);
+    expect(expired).toHaveBeenCalledOnce();
+    expect(state.claim('request-1')).toBeUndefined();
+  });
+
   it('rejects duplicate IDs and claims each pending request once during shutdown', () => {
     const state = new InteractionState(vi.fn(), new FakeScheduler());
     expect(state.register(approval('one'))).toBe(true);

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -12,18 +12,27 @@ import type {
   ProviderStatus,
   ProviderTransportV2,
 } from '@agent-dock/shared';
-import { ProviderRegistry, noopLogger } from '@agent-dock/agent-runtime';
+import {
+  InteractiveSessionError,
+  ProviderRegistry,
+  ProviderTransportStartupError,
+  noopLogger,
+} from '@agent-dock/agent-runtime';
 import type {
   AcceptedWorkState,
   AgentProvider,
   InteractiveProviderSessionHandle,
+  ProviderDetectionOptions,
+  ProviderRuntimeMetadata,
   ProviderSessionHandle,
   StartInteractiveSessionOptions,
   StartSessionOptions,
 } from '@agent-dock/agent-runtime';
 import { SessionManager, type SessionManagerSecurityOptions } from '../src/session-manager.js';
 import { AuditStore } from '../src/audit-store.js';
-import { V2SessionFacade } from '../src/v2-session-facade.js';
+import { V2ProviderStartupError, V2SessionFacade } from '../src/v2-session-facade.js';
+import { planLegacyProviderFallback, type ProviderV2Manifest } from '../src/provider-v2.js';
+import { legacyRuntimeScope } from '../src/v2-legacy-provider.js';
 import { resolveWorkspaceIdentity, type WorkspaceIdentity } from '../src/workspace-identity.js';
 import { WorkspaceTrustStore } from '../src/workspace-trust-store.js';
 
@@ -163,6 +172,33 @@ describe('SessionManager — normal lifecycle', () => {
     expect(received).toEqual([
       { type: 'assistant.message', text: 'hello', sequence: 0, timestamp: received[0]?.timestamp },
     ]);
+  });
+
+  it('does not log payloads thrown by a session listener', async () => {
+    const logger = {
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
+    const provider = new TestProvider();
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, logger);
+    const session = sessionManager.create('claude', '/tmp', 'PROMPT_CANARY_listener');
+    const testSession = provider.sessions.get(session.id)!;
+    sessionManager.subscribe(session.id, 0, () => {
+      throw new Error('sk-proj-CREDENTIAL_CANARY RAW_APPROVAL_CANARY');
+    });
+
+    testSession.push({ type: 'assistant.message', text: 'safe event' });
+    await tick();
+
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('CREDENTIAL_CANARY');
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('RAW_APPROVAL_CANARY');
+    expect(logger.warn).toHaveBeenCalledWith('session listener failed', {
+      sessionId: session.id,
+    });
   });
 
   it('transitions to "completed" on session.completed', async () => {
@@ -521,6 +557,8 @@ interface InteractiveSessionOptions {
   resolveInteraction?: (requestId: string, reason: string) => Promise<void>;
   interrupt?: () => Promise<void>;
   close?: () => Promise<void>;
+  providerSessionId?: string;
+  runtimeMetadata?: ProviderRuntimeMetadata;
 }
 
 function makeControllableInteractiveSession(options: InteractiveSessionOptions = {}) {
@@ -562,6 +600,8 @@ function makeControllableInteractiveSession(options: InteractiveSessionOptions =
   const handle: InteractiveProviderSessionHandle = {
     events: events(),
     accepted: options.accepted ?? Promise.resolve('accepted'),
+    ...(options.providerSessionId ? { providerSessionId: options.providerSessionId } : {}),
+    ...(options.runtimeMetadata ? { runtimeMetadata: options.runtimeMetadata } : {}),
     send: async (command) => {
       const index = sent.length;
       sent.push(command);
@@ -601,6 +641,7 @@ class InteractiveTestProvider implements AgentProvider {
   readonly id: ProviderId;
   readonly name = 'Interactive Test Provider';
   readonly interactiveOptions: StartInteractiveSessionOptions[] = [];
+  startupHook?: (options: StartInteractiveSessionOptions) => Promise<void>;
 
   constructor(
     private readonly interactive: ControllableInteractiveSession,
@@ -633,6 +674,7 @@ class InteractiveTestProvider implements AgentProvider {
     options: StartInteractiveSessionOptions,
   ): Promise<InteractiveProviderSessionHandle> {
     this.interactiveOptions.push(options);
+    await this.startupHook?.(options);
     return this.interactive.handle;
   }
 }
@@ -829,6 +871,112 @@ function questionRequest(requestId: string): Extract<AgentEventV2, { type: 'ques
     deadlineAt: new Date(Date.now() + 60_000).toISOString(),
   };
 }
+
+describe('SessionManager — provider startup evidence', () => {
+  it('always passes a provider snapshot and explicit untrusted evidence without a verified workspace', async () => {
+    const { interactive, provider } = await setupInteractive();
+
+    expect(provider.interactiveOptions).toHaveLength(1);
+    expect(provider.interactiveOptions[0]?.providerStatus).toMatchObject({
+      id: provider.id,
+      installed: true,
+      authenticated: 'authenticated',
+    });
+    expect(provider.interactiveOptions[0]?.workspaceTrust).toEqual({ state: 'untrusted' });
+    await finishInteractive(interactive);
+  });
+
+  it('passes the exact detected snapshot and verified workspace incarnation with its trust epoch', async () => {
+    const fixture = await trustedWorkspaceFixture();
+    const interactive = makeControllableInteractiveSession();
+    const provider = new InteractiveTestProvider(interactive);
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, {
+      auditStore: fixture.auditStore,
+      trustStore: fixture.trustStore,
+    });
+    const providerStatus: ProviderStatus = {
+      id: provider.id,
+      name: provider.name,
+      installed: true,
+      authenticated: 'authenticated',
+      authSource: 'chatgpt',
+      accountFingerprint: 'a'.repeat(64),
+      selectedModel: 'gpt-5.4',
+      executablePath: '/verified/provider',
+      version: '1.2.3',
+      capabilities: { cancellation: true },
+    };
+    try {
+      await sessionManager.createInteractive(
+        provider.id,
+        fixture.identity.canonicalPath,
+        'hello',
+        INTERACTIVE_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+        undefined,
+        fixture.identity,
+        providerStatus,
+      );
+
+      expect(provider.interactiveOptions[0]?.providerStatus).toBe(providerStatus);
+      expect(provider.interactiveOptions[0]?.workspaceTrust).toEqual({
+        state: 'trusted',
+        workspaceId: fixture.identity.workspaceId,
+        incarnation: fixture.identity.incarnation,
+        trustEpoch: 0,
+      });
+      await finishInteractive(interactive);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it('rejects workspace replacement during startup at the final work-delivery gate', async () => {
+    const fixture = await trustedWorkspaceFixture();
+    const releaseStartup = deferred<void>();
+    const startupReached = deferred<void>();
+    const interactive = makeControllableInteractiveSession();
+    const provider = new InteractiveTestProvider(interactive);
+    provider.startupHook = async (options) => {
+      startupReached.resolve();
+      await releaseStartup.promise;
+      await options.beforeWorkDelivery?.();
+    };
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, {
+      trustStore: fixture.trustStore,
+    });
+    try {
+      const start = sessionManager.createInteractive(
+        provider.id,
+        fixture.identity.canonicalPath,
+        'hello',
+        INTERACTIVE_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+        undefined,
+        fixture.identity,
+      );
+      await startupReached.promise;
+      await rename(fixture.identity.canonicalPath, `${fixture.identity.canonicalPath}-original`);
+      await mkdir(fixture.identity.canonicalPath);
+      releaseStartup.resolve();
+
+      await expect(start).rejects.toMatchObject({ code: 'workspace_untrusted' });
+      expect(provider.interactiveOptions[0]?.beforeWorkDelivery).toBeTypeOf('function');
+      expect(sessionManager.list(2)).toEqual([]);
+    } finally {
+      releaseStartup.resolve();
+      await fixture.cleanup();
+    }
+  });
+});
 
 describe('SessionManager — pending interactive startup', () => {
   function setupPending() {
@@ -1115,6 +1263,54 @@ describe('SessionManager — interactive command dispatch', () => {
         },
       })),
     );
+    await finishInteractive(interactive);
+  });
+
+  it('allows a valid question retry after a recoverable opaque-answer rejection', async () => {
+    let attempts = 0;
+    const { interactive, sessionManager, session } = await setupInteractive({
+      send: async (command) => {
+        if (command.type !== 'question.respond') return;
+        attempts += 1;
+        if (attempts === 1) {
+          throw new InteractiveSessionError(
+            'command_rejected',
+            'Question response did not match the native request',
+          );
+        }
+      },
+    });
+    const published = deferred<void>();
+    sessionManager.subscribeInteractive(session.id, 0, (_index, event) => {
+      if (event.type === 'question.requested') published.resolve();
+    });
+    const request = questionRequest(uuid(74_000));
+    interactive.push(request);
+    await published.promise;
+    expect(sessionManager.markInteractionPublished(session.id, request.requestId)).toBe(true);
+    const questionId = request.questions[0]!.id;
+
+    await expect(
+      sessionManager.dispatch(session.id, {
+        type: 'question.respond',
+        commandId: uuid(74_001),
+        sessionId: session.id,
+        turnId: request.turnId,
+        requestId: request.requestId,
+        answers: [{ questionId, value: 'invalid opaque value' }],
+      }),
+    ).resolves.toMatchObject({ ok: false, code: 'command_rejected' });
+    await expect(
+      sessionManager.dispatch(session.id, {
+        type: 'question.respond',
+        commandId: uuid(74_002),
+        sessionId: session.id,
+        turnId: request.turnId,
+        requestId: request.requestId,
+        answers: [{ questionId, value: 'valid value' }],
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(interactive.sent).toHaveLength(2);
     await finishInteractive(interactive);
   });
 
@@ -1706,6 +1902,38 @@ describe('SessionManager — interactive replay bounds', () => {
 });
 
 describe('V2SessionFacade — interactive turn state', () => {
+  it('projects bounded provider session and runtime metadata from a successful transport', async () => {
+    const interactive = makeControllableInteractiveSession({
+      providerSessionId: 'thread_123',
+      runtimeMetadata: {
+        cliVersion: '0.147.0',
+        schemaVersion: 'schema-0.147.0',
+        fixtureSet: 'codex-app-server-0.147.0-v1',
+        requestedTransportMode: 'auto',
+      },
+    });
+    const provider = new InteractiveTestProvider(interactive);
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessions = new V2SessionFacade(new SessionManager(registry, noopLogger));
+
+    const session = await sessions.create(
+      { provider: provider.id, cwd: '/tmp', prompt: 'hello' },
+      INTERACTIVE_SELECTION,
+      INTERACTIVE_TRANSPORT,
+      true,
+    );
+
+    expect(session.providerSessionId).toBe('thread_123');
+    expect(session.runtimeMetadata).toEqual({
+      cliVersion: '0.147.0',
+      schemaVersion: 'schema-0.147.0',
+      fixtureSet: 'codex-app-server-0.147.0-v1',
+      requestedTransportMode: 'auto',
+    });
+    await finishInteractive(interactive);
+  });
+
   it('returns a failed turn to idle so a follow-up can be dispatched', async () => {
     const interactive = makeControllableInteractiveSession();
     const provider = new InteractiveTestProvider(interactive);
@@ -1741,6 +1969,594 @@ describe('V2SessionFacade — interactive turn state', () => {
     await expect(sessions.dispatch(command)).resolves.toMatchObject({ ok: true });
     expect(interactive.sent).toEqual([command]);
     await finishInteractive(interactive);
+  });
+});
+
+describe('V2SessionFacade — bounded startup fallback', () => {
+  const fallbackEffects = [
+    'read',
+    'filesystem_write',
+    'command',
+    'network',
+    'external_side_effect',
+    'destructive',
+  ] as const;
+  const appServerTransport: ProviderTransportV2 = {
+    id: 'codex-app-server',
+    priority: 1,
+    stability: 'stable',
+    possibleEffects: [...fallbackEffects],
+    effectsComplete: false,
+  };
+  const appServerSelection: CapabilitySelection = {
+    transport: appServerTransport.id,
+    enabled: [
+      {
+        id: 'session.cancel',
+        constraints: { kind: 'acknowledgement', timeoutMs: 30_000 },
+      },
+    ],
+    unavailableOptional: [],
+    possibleEffects: [...fallbackEffects],
+    effectsComplete: false,
+  };
+
+  class StartupFallbackProvider implements AgentProvider {
+    readonly id = 'codex' as const;
+    readonly name = 'Codex fallback test provider';
+    readonly legacyOptions: StartSessionOptions[] = [];
+    readonly interactiveOptions: StartInteractiveSessionOptions[] = [];
+    readonly detectionOptions: Array<ProviderDetectionOptions | undefined> = [];
+    interactiveStarts = 0;
+    redetectedStatus?: ProviderStatus;
+    detectHook?: () => Promise<void>;
+    publishScopeEvidence = true;
+    succeedInteractive = false;
+    readonly status: ProviderStatus = {
+      id: this.id,
+      name: this.name,
+      installed: true,
+      authenticated: 'authenticated',
+      authSource: 'chatgpt',
+      accountFingerprint: 'a'.repeat(64),
+      selectedModel: 'gpt-5.4',
+      executablePath: 'C:\\Program Files\\OpenAI\\Codex\\codex.exe',
+      version: '0.147.0',
+      capabilities: { cancellation: true },
+    };
+
+    constructor(private readonly deliveryState: 'not_delivered' | 'ambiguous' | 'delivered') {}
+
+    async detect(options?: ProviderDetectionOptions): Promise<ProviderStatus> {
+      this.detectionOptions.push(options);
+      await this.detectHook?.();
+      return this.redetectedStatus ?? this.status;
+    }
+
+    startSession(options: StartSessionOptions): ProviderSessionHandle {
+      this.legacyOptions.push(options);
+      async function* events(): AsyncGenerator<AgentEvent, void, void> {
+        yield { type: 'session.started', sessionId: options.sessionId, provider: 'codex' };
+        yield { type: 'session.completed', providerSessionId: 'legacy-thread' };
+      }
+      return { events: events(), cancel: async () => undefined };
+    }
+
+    async startInteractiveSession(
+      options: StartInteractiveSessionOptions,
+    ): Promise<InteractiveProviderSessionHandle> {
+      this.interactiveStarts += 1;
+      this.interactiveOptions.push(options);
+      if (this.publishScopeEvidence) {
+        await options.beforeProviderThreadStart?.({
+          accountFingerprint: this.status.accountFingerprint!,
+          selectedModel: this.status.selectedModel!,
+        });
+      }
+      if (this.succeedInteractive) return makeControllableInteractiveSession().handle;
+      throw new ProviderTransportStartupError(
+        'app_server_handshake_failed',
+        this.deliveryState,
+        'safe test failure',
+      );
+    }
+  }
+
+  async function fallbackSetup(
+    deliveryState: 'not_delivered' | 'ambiguous' | 'delivered',
+    requestedTransportMode: 'auto' | 'app-server' = 'auto',
+    request = {
+      required: [{ id: 'session.cancel' }],
+      optional: [] as Array<{ id: string }>,
+      allowExperimental: false,
+    },
+    primarySelection: CapabilitySelection = appServerSelection,
+  ) {
+    const fixture = await trustedWorkspaceFixture();
+    const provider = new StartupFallbackProvider(deliveryState);
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, {
+      trustStore: fixture.trustStore,
+    });
+    const sessions = new V2SessionFacade(sessionManager);
+    const primaryManifest: ProviderV2Manifest = {
+      interactive: true,
+      runtimeScope: {
+        ...legacyRuntimeScope(provider.status),
+        trustState: 'trusted',
+        versions: {
+          adapterContract: '2',
+          transport: provider.status.version!,
+          runtime: process.version,
+          schema: 'schema-0.147.0',
+          fixtureSet: 'codex-app-server-0.147.0-v1',
+        },
+      },
+      supportRecords: [],
+      transports: [appServerTransport],
+    };
+    const planning = planLegacyProviderFallback({
+      status: provider.status,
+      request,
+      cwd: fixture.identity.canonicalPath,
+      workspaceTrust: await sessionManager.verifiedWorkspaceTrust(fixture.identity),
+      requestedTransportMode,
+      primaryManifest,
+      primarySelection,
+    });
+    return { provider, sessions, sessionManager, planning, fixture, primaryManifest, request };
+  }
+
+  it('plans fallback from same-process evidence before the provider thread starts', async () => {
+    const { provider, sessions, sessionManager, fixture, primaryManifest, request } =
+      await fallbackSetup('not_delivered');
+    const baseStatus: ProviderStatus = {
+      ...provider.status,
+      accountFingerprint: undefined,
+      selectedModel: undefined,
+    };
+    try {
+      const workspaceTrust = await sessionManager.verifiedWorkspaceTrust(fixture.identity);
+      const session = await sessions.create(
+        {
+          provider: provider.id,
+          cwd: fixture.identity.canonicalPath,
+          prompt: 'same process fallback planning',
+        },
+        appServerSelection,
+        appServerTransport,
+        true,
+        undefined,
+        fixture.identity,
+        {
+          providerStatus: baseStatus,
+          fallbackIntent: {
+            request,
+            cwd: fixture.identity.canonicalPath,
+            workspaceTrust,
+            requestedTransportMode: 'auto',
+            primaryManifest,
+            primarySelection: appServerSelection,
+          },
+        },
+      );
+
+      expect(session.transport).toBe('legacy-one-shot');
+      expect(provider.interactiveOptions[0]?.beforeProviderThreadStart).toBeTypeOf('function');
+      expect(provider.detectionOptions).toEqual([
+        expect.objectContaining({ includeLaunchScopeEvidence: true }),
+      ]);
+      expect(provider.legacyOptions).toHaveLength(1);
+      expect(provider.legacyOptions[0]?.model).toBe('gpt-5.4');
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it('does not scope-probe when the supported app-server startup succeeds', async () => {
+    const { provider, sessions, sessionManager, fixture, primaryManifest, request } =
+      await fallbackSetup('not_delivered');
+    provider.succeedInteractive = true;
+    const baseStatus: ProviderStatus = {
+      ...provider.status,
+      accountFingerprint: undefined,
+      selectedModel: undefined,
+    };
+    try {
+      const workspaceTrust = await sessionManager.verifiedWorkspaceTrust(fixture.identity);
+      const session = await sessions.create(
+        {
+          provider: provider.id,
+          cwd: fixture.identity.canonicalPath,
+          prompt: 'same process succeeds',
+        },
+        appServerSelection,
+        appServerTransport,
+        true,
+        undefined,
+        fixture.identity,
+        {
+          providerStatus: baseStatus,
+          fallbackIntent: {
+            request,
+            cwd: fixture.identity.canonicalPath,
+            workspaceTrust,
+            requestedTransportMode: 'auto',
+            primaryManifest,
+            primarySelection: appServerSelection,
+          },
+        },
+      );
+
+      expect(provider.detectionOptions).toHaveLength(0);
+      expect(provider.legacyOptions).toHaveLength(0);
+      await sessions.cancel(session.id);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it('does not scope-probe when app-server fails before publishing scope evidence', async () => {
+    const { provider, sessions, sessionManager, fixture, primaryManifest, request } =
+      await fallbackSetup('not_delivered');
+    provider.publishScopeEvidence = false;
+    const baseStatus: ProviderStatus = {
+      ...provider.status,
+      accountFingerprint: undefined,
+      selectedModel: undefined,
+    };
+    try {
+      const workspaceTrust = await sessionManager.verifiedWorkspaceTrust(fixture.identity);
+      await expect(
+        sessions.create(
+          {
+            provider: provider.id,
+            cwd: fixture.identity.canonicalPath,
+            prompt: 'fails before evidence',
+          },
+          appServerSelection,
+          appServerTransport,
+          true,
+          undefined,
+          fixture.identity,
+          {
+            providerStatus: baseStatus,
+            fallbackIntent: {
+              request,
+              cwd: fixture.identity.canonicalPath,
+              workspaceTrust,
+              requestedTransportMode: 'auto',
+              primaryManifest,
+              primarySelection: appServerSelection,
+            },
+          },
+        ),
+      ).rejects.toMatchObject({ fallbackReason: 'fallback_scope_mismatch' });
+      expect(provider.detectionOptions).toHaveLength(0);
+      expect(provider.legacyOptions).toHaveLength(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it('falls back once before delivery and pins the exact detected provider snapshot', async () => {
+    const { provider, sessions, planning, fixture } = await fallbackSetup('not_delivered');
+    try {
+      expect(planning.fallback).toBeDefined();
+      expect(planning.primaryScope).toBeDefined();
+      const session = await sessions.create(
+        {
+          provider: provider.id,
+          cwd: fixture.identity.canonicalPath,
+          prompt: 'do not expose this prompt',
+        },
+        appServerSelection,
+        appServerTransport,
+        true,
+        undefined,
+        fixture.identity,
+        {
+          providerStatus: provider.status,
+          primaryScope: planning.primaryScope,
+          fallback: planning.fallback,
+        },
+      );
+
+      expect(provider.interactiveStarts).toBe(1);
+      expect(provider.interactiveOptions[0]?.expectedContinuationEvidence).toEqual({
+        accountFingerprint: 'a'.repeat(64),
+        selectedModel: 'gpt-5.4',
+      });
+      expect(provider.legacyOptions).toHaveLength(1);
+      expect(provider.legacyOptions[0]?.providerStatus).toBe(provider.status);
+      expect(provider.legacyOptions[0]?.sandbox).toBe('workspace-write');
+      expect(provider.legacyOptions[0]?.model).toBe('gpt-5.4');
+      expect(session.transport).toBe('legacy-one-shot');
+      expect(session.runtimeMetadata).toMatchObject({
+        cliVersion: '0.147.0',
+        requestedTransportMode: 'auto',
+        fallbackReason: 'app_server_handshake_failed',
+      });
+      await vi.waitFor(() =>
+        expect(sessions.get(session.id)?.providerSessionId).toBe('legacy-thread'),
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it('denies fallback when workspace trust is revoked during the scope probe', async () => {
+    const { provider, sessions, planning, fixture } = await fallbackSetup('not_delivered');
+    const probeStarted = deferred<void>();
+    const releaseProbe = deferred<void>();
+    provider.detectHook = async () => {
+      probeStarted.resolve();
+      await releaseProbe.promise;
+    };
+    try {
+      const start = sessions.create(
+        {
+          provider: provider.id,
+          cwd: fixture.identity.canonicalPath,
+          prompt: 'do not launch fallback',
+        },
+        appServerSelection,
+        appServerTransport,
+        true,
+        undefined,
+        fixture.identity,
+        {
+          providerStatus: provider.status,
+          primaryScope: planning.primaryScope,
+          fallback: planning.fallback,
+        },
+      );
+      await probeStarted.promise;
+      await fixture.trustStore.beginRevocation(fixture.identity);
+      releaseProbe.resolve();
+
+      await expect(start).rejects.toBeInstanceOf(V2ProviderStartupError);
+      expect(provider.legacyOptions).toHaveLength(0);
+    } finally {
+      releaseProbe.resolve();
+      await fixture.cleanup();
+    }
+  });
+
+  it('denies an initial legacy launch when workspace trust is revoked during re-detection', async () => {
+    const { provider, sessions, planning, fixture } = await fallbackSetup('not_delivered');
+    const probeStarted = deferred<void>();
+    const releaseProbe = deferred<void>();
+    provider.detectHook = async () => {
+      probeStarted.resolve();
+      await releaseProbe.promise;
+    };
+    try {
+      const start = sessions.create(
+        {
+          provider: provider.id,
+          cwd: fixture.identity.canonicalPath,
+          prompt: 'do not launch legacy transport',
+        },
+        appServerSelection,
+        appServerTransport,
+        false,
+        undefined,
+        fixture.identity,
+        {
+          providerStatus: provider.status,
+          legacyDispatch: {
+            frozenScope: planning.primaryScope!,
+            sandbox: 'workspace-write',
+          },
+        },
+      );
+      await probeStarted.promise;
+      await fixture.trustStore.beginRevocation(fixture.identity);
+      releaseProbe.resolve();
+
+      await expect(start).rejects.toMatchObject({
+        reasonCode: 'provider_scope_revalidation_failed',
+        deliveryState: 'not_delivered',
+      });
+      expect(provider.interactiveStarts).toBe(0);
+      expect(provider.legacyOptions).toHaveLength(0);
+    } finally {
+      releaseProbe.resolve();
+      await fixture.cleanup();
+    }
+  });
+
+  it('falls back with the desktop request while truthfully dropping unavailable rich optionals', async () => {
+    const optional = [
+      'interaction.approval',
+      'interaction.question',
+      'content.streaming',
+      'content.tools',
+      'content.plans',
+      'content.usage.tokens',
+      'content.usage.cost',
+      'content.thinking',
+    ].map((id) => ({ id }));
+    const richSelection: CapabilitySelection = {
+      ...appServerSelection,
+      enabled: [
+        ...appServerSelection.enabled,
+        {
+          id: 'interaction.approval',
+          constraints: { kind: 'interaction', timeoutMs: 300_000, maxPayloadBytes: 32_768 },
+        },
+        {
+          id: 'interaction.question',
+          constraints: { kind: 'interaction', timeoutMs: 300_000, maxPayloadBytes: 32_768 },
+        },
+        {
+          id: 'content.streaming',
+          constraints: { kind: 'content', maxBlockBytes: 262_144, persistence: 'live_only' },
+        },
+        {
+          id: 'content.tools',
+          constraints: { kind: 'effects', allowedEffects: [...fallbackEffects] },
+        },
+        {
+          id: 'content.plans',
+          constraints: { kind: 'content', maxBlockBytes: 262_144, persistence: 'live_only' },
+        },
+        { id: 'content.usage.tokens', constraints: { kind: 'usage', scopes: ['turn'] } },
+      ],
+      unavailableOptional: [
+        { id: 'content.usage.cost', reason: 'unsupported' },
+        { id: 'content.thinking', reason: 'unsupported' },
+      ],
+    };
+    const request = {
+      required: [{ id: 'session.cancel' }],
+      optional,
+      allowExperimental: false,
+    };
+    const { provider, sessions, planning, fixture } = await fallbackSetup(
+      'not_delivered',
+      'auto',
+      request,
+      richSelection,
+    );
+    try {
+      expect(planning.fallback).toBeDefined();
+      const result = await sessions.create(
+        {
+          provider: provider.id,
+          cwd: fixture.identity.canonicalPath,
+          prompt: 'desktop request',
+          capabilities: request,
+        },
+        richSelection,
+        appServerTransport,
+        true,
+        undefined,
+        fixture.identity,
+        {
+          providerStatus: provider.status,
+          primaryScope: planning.primaryScope,
+          fallback: planning.fallback,
+        },
+      );
+      expect(result.selection.enabled.map(({ id }) => id)).toEqual(['session.cancel']);
+      expect(result.selection.unavailableOptional.map(({ id }) => id).sort()).toEqual(
+        optional.map(({ id }) => id).sort(),
+      );
+      expect(provider.legacyOptions).toHaveLength(1);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it.each(['ambiguous', 'delivered'] as const)(
+    'never falls back after %s delivery state',
+    async (deliveryState) => {
+      const { provider, sessions, planning, fixture } = await fallbackSetup(deliveryState);
+      try {
+        expect(planning.fallback).toBeDefined();
+        expect(planning.primaryScope).toBeDefined();
+        await expect(
+          sessions.create(
+            { provider: provider.id, cwd: fixture.identity.canonicalPath, prompt: 'one turn' },
+            appServerSelection,
+            appServerTransport,
+            true,
+            undefined,
+            fixture.identity,
+            {
+              providerStatus: provider.status,
+              primaryScope: planning.primaryScope,
+              fallback: planning.fallback,
+            },
+          ),
+        ).rejects.toBeInstanceOf(V2ProviderStartupError);
+        expect(provider.interactiveStarts).toBe(1);
+        expect(provider.detectionOptions).toHaveLength(0);
+        expect(provider.legacyOptions).toHaveLength(0);
+      } finally {
+        await fixture.cleanup();
+      }
+    },
+  );
+
+  it('does not retry when app-server was explicitly forced', async () => {
+    const { provider, sessions, sessionManager, planning, fixture, primaryManifest, request } =
+      await fallbackSetup('not_delivered', 'app-server');
+    expect(planning.fallback).toBeUndefined();
+    expect(planning.deniedReason).toBe('fallback_transport_mode_forced');
+    try {
+      const workspaceTrust = await sessionManager.verifiedWorkspaceTrust(fixture.identity);
+      await expect(
+        sessions.create(
+          {
+            provider: provider.id,
+            cwd: fixture.identity.canonicalPath,
+            prompt: 'one turn',
+          },
+          appServerSelection,
+          appServerTransport,
+          true,
+          undefined,
+          fixture.identity,
+          {
+            providerStatus: provider.status,
+            fallbackIntent: {
+              request,
+              cwd: fixture.identity.canonicalPath,
+              workspaceTrust,
+              requestedTransportMode: 'app-server',
+              primaryManifest,
+              primarySelection: appServerSelection,
+            },
+          },
+        ),
+      ).rejects.toMatchObject({
+        code: 'provider_transport_startup_failed',
+        fallbackReason: 'fallback_transport_mode_forced',
+      });
+      expect(provider.interactiveStarts).toBe(1);
+      expect(provider.detectionOptions).toHaveLength(0);
+      expect(provider.legacyOptions).toHaveLength(0);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it.each([
+    ['executable', { executablePath: 'C:\\switched\\codex.exe' }],
+    ['auth source', { authSource: 'api_key' as const }],
+    ['account', { accountFingerprint: 'b'.repeat(64) }],
+    ['model', { selectedModel: 'gpt-5.4-mini' }],
+  ])('denies fallback when re-detection changes the pinned %s', async (_label, change) => {
+    const { provider, sessions, planning, fixture } = await fallbackSetup('not_delivered');
+    provider.redetectedStatus = { ...provider.status, ...change };
+    try {
+      await expect(
+        sessions.create(
+          { provider: provider.id, cwd: fixture.identity.canonicalPath, prompt: 'one turn' },
+          appServerSelection,
+          appServerTransport,
+          true,
+          undefined,
+          fixture.identity,
+          {
+            providerStatus: provider.status,
+            primaryScope: planning.primaryScope,
+            fallback: planning.fallback,
+          },
+        ),
+      ).rejects.toMatchObject({
+        code: 'provider_transport_startup_failed',
+        fallbackReason: 'fallback_provider_scope_changed',
+      });
+      expect(provider.interactiveStarts).toBe(1);
+      expect(provider.legacyOptions).toHaveLength(0);
+    } finally {
+      await fixture.cleanup();
+    }
   });
 });
 

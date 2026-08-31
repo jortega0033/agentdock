@@ -14,6 +14,7 @@
     "dev:desktop": "pnpm --filter @agent-dock/desktop run dev",
     "daemon": "pnpm --filter @agent-dock/daemon run start",
     "package": "pnpm build && pnpm --filter @agent-dock/desktop run package",
+    "prepackage:win": "node apps/daemon/scripts/build-windows-job-host.mjs --assert-windows",
     "package:win": "pnpm build && pnpm --filter @agent-dock/desktop run package:win",
     "assets:generate": "python scripts/assets/generate_assets.py && python scripts/assets/generate_public_assets.py",
     "assets:validate": "python scripts/assets/validate_assets.py",

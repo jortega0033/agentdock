@@ -1,9 +1,22 @@
 import type { FastifyInstance } from 'fastify';
-import { providerIdSchema } from '@agent-dock/shared';
+import { providerIdSchema, type ProviderStatus } from '@agent-dock/shared';
 import type { ProviderRegistry } from '@agent-dock/agent-runtime';
 
+function publicProviderStatus(
+  status: ProviderStatus,
+): Omit<ProviderStatus, 'accountFingerprint' | 'selectedModel'> {
+  const {
+    accountFingerprint: _accountFingerprint,
+    selectedModel: _selectedModel,
+    ...publicStatus
+  } = status;
+  return publicStatus;
+}
+
 export function registerProviderRoutes(app: FastifyInstance, registry: ProviderRegistry): void {
-  app.get('/providers', async () => ({ providers: await registry.detectAll() }));
+  app.get('/providers', async () => ({
+    providers: (await registry.detectAll()).map(publicProviderStatus),
+  }));
 
   app.get('/providers/:providerId', async (req, reply) => {
     const parsed = providerIdSchema.safeParse((req.params as Record<string, unknown>).providerId);
@@ -16,6 +29,6 @@ export function registerProviderRoutes(app: FastifyInstance, registry: ProviderR
       reply.code(404).send({ error: 'provider not registered' });
       return;
     }
-    reply.send(await provider.detect());
+    reply.send(publicProviderStatus(await provider.detect()));
   });
 }

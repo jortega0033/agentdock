@@ -42,6 +42,14 @@ jobs:
       - name: Package (electron-builder, NSIS)
         run: pnpm package:win
 
+      - name: Verify Windows Job Object ownership and command launch
+        run: >-
+          pnpm vitest run
+          packages/agent-runtime/test/managed-process.test.ts
+          packages/agent-runtime/test/spawn-process.test.ts
+          packages/agent-runtime/test/exec-capture.test.ts
+          --testTimeout=20000
+
       # `pnpm package:win` can exit 0 without electron-builder actually having produced an
       # installer (e.g. a silently-skipped target) — fail the job explicitly rather than trust
       # the exit code alone.
@@ -61,6 +69,9 @@ jobs:
             exit 1
           }
           Write-Host "Found unpacked executable: $exePath"
+
+      - name: Verify packaged daemon launches a PATH-installed Codex CLI
+        run: pnpm --filter @agent-dock/desktop run test:packaged-daemon-win
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

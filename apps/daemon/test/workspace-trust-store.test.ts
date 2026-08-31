@@ -231,4 +231,19 @@ describe('WorkspaceTrustStore', () => {
 
     expect((await new WorkspaceTrustStore(path).inspect(identity())).state).toBe('untrusted');
   });
+
+  it('does not publish a trust update in memory when persistence fails', async () => {
+    const root = await temporaryDirectory();
+    const store = new WorkspaceTrustStore(join(root, 'workspace-trust.json'));
+    const trustedIdentity = identity();
+    await store.inspect(trustedIdentity);
+    const writable = store as unknown as { persist: () => Promise<void> };
+    writable.persist = async () => {
+      throw new Error('disk full');
+    };
+
+    await expect(store.setTrusted(trustedIdentity)).rejects.toThrow('disk full');
+
+    expect((await store.inspect(trustedIdentity)).state).toBe('untrusted');
+  });
 });

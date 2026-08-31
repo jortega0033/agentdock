@@ -109,6 +109,25 @@ describe('BoundedV2SseWriter', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('reports responder publication only when each frame is handed to the socket', () => {
+    const output = new TestOutput([false, true]);
+    const handedOff = vi.fn();
+    const writer = new BoundedV2SseWriter(output, vi.fn(), handedOff);
+    const first = contentEvent(0);
+    const queued = contentEvent(1);
+
+    writer.write(first);
+    writer.write(queued);
+
+    expect(handedOff).toHaveBeenCalledTimes(1);
+    expect(handedOff).toHaveBeenLastCalledWith(first);
+
+    output.drain();
+
+    expect(handedOff).toHaveBeenCalledTimes(2);
+    expect(handedOff).toHaveBeenLastCalledWith(queued);
+  });
+
   it('does not discard a replayed terminal frame when the terminal snapshot is already known', () => {
     const output = new TestOutput([false, true]);
     const onClose = vi.fn();

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { open, readFile, rename } from 'node:fs/promises';
+import { open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import type { WorkspaceTrustViewV2 } from '@agent-dock/shared';
 import { ensureStateDirectory } from './state-directory.js';
 import type { WorkspaceIdentity } from './workspace-identity.js';
 
@@ -18,11 +19,26 @@ interface TrustFileV1 {
   records: StoredTrustRecord[];
 }
 
-export interface WorkspaceTrustView {
-  workspaceId: string;
-  incarnation: string;
-  displayName: string;
-  state: 'trusted' | 'untrusted';
+async function syncParentDirectory(directory: string): Promise<void> {
+  try {
+    const parent = await open(directory, 'r');
+    try {
+      await parent.sync();
+    } finally {
+      await parent.close();
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // The temporary file was fsynced before rename. Node cannot open/fsync directory handles on
+    // Windows, so only the unsupported-directory errors are tolerated there; POSIX persistence
+    // failures still reject the trust update.
+    if (
+      process.platform !== 'win32' ||
+      (code !== 'EPERM' && code !== 'EACCES' && code !== 'EINVAL')
+    ) {
+      throw error;
+    }
+  }
 }
 
 function isRecord(value: unknown): value is StoredTrustRecord {
@@ -46,40 +62,56 @@ export class WorkspaceTrustStore {
 
   constructor(private readonly filePath: string) {}
 
-  async inspect(identity: WorkspaceIdentity): Promise<WorkspaceTrustView> {
+  async inspect(identity: WorkspaceIdentity): Promise<WorkspaceTrustViewV2> {
     await this.load();
     const record = this.records?.get(identity.workspaceId);
-    const trusted = record?.state === 'trusted' && record.incarnation === identity.incarnation;
+    const trusted =
+      identity.reusable &&
+      record?.state === 'trusted' &&
+      record.incarnation === identity.incarnation;
     return {
+      schemaVersion: 1,
       workspaceId: identity.workspaceId,
       incarnation: identity.incarnation,
       displayName: identity.displayName,
+      reusable: identity.reusable,
       state: trusted ? 'trusted' : 'untrusted',
     };
   }
 
   setTrusted(identity: WorkspaceIdentity): Promise<void> {
+    if (!identity.reusable) {
+      return Promise.reject(new Error('workspace identity is not reusable'));
+    }
     return this.update(identity, 'trusted');
   }
 
-  beginRevocation(identity: WorkspaceIdentity): Promise<void> {
-    return this.update(identity, 'revoking');
+  beginRevocation(identity: WorkspaceIdentity, onDurable?: () => void): Promise<void> {
+    return this.update(identity, 'revoking', onDurable);
   }
 
   finishRevocation(identity: WorkspaceIdentity): Promise<void> {
     return this.update(identity, 'untrusted');
   }
 
-  private update(identity: WorkspaceIdentity, state: StoredWorkspaceTrustState): Promise<void> {
+  private update(
+    identity: WorkspaceIdentity,
+    state: StoredWorkspaceTrustState,
+    onDurable?: () => void,
+  ): Promise<void> {
     const operation = this.writeTail.then(async () => {
       await this.load();
-      this.records?.set(identity.workspaceId, {
+      if (!this.records) throw new Error('workspace trust store was not loaded');
+      const candidate = new Map(this.records);
+      candidate.set(identity.workspaceId, {
         workspaceId: identity.workspaceId,
         incarnation: identity.incarnation,
         state,
         updatedAt: new Date().toISOString(),
       });
-      await this.persist();
+      await this.persist(candidate);
+      this.records = candidate;
+      onDurable?.();
     });
     this.writeTail = operation.catch(() => undefined);
     return operation;
@@ -105,19 +137,25 @@ export class WorkspaceTrustStore {
     this.records = new Map(parsed.records.map((record) => [record.workspaceId, record]));
   }
 
-  private async persist(): Promise<void> {
-    if (!this.records) throw new Error('workspace trust store was not loaded');
+  private async persist(records: ReadonlyMap<string, StoredTrustRecord>): Promise<void> {
     const directory = dirname(this.filePath);
     await ensureStateDirectory(directory);
     const temporaryPath = join(directory, `.workspace-trust-${randomUUID()}.tmp`);
-    const handle = await open(temporaryPath, 'wx', 0o600);
+    let renamed = false;
     try {
-      const payload: TrustFileV1 = { version: 1, records: [...this.records.values()] };
-      await handle.writeFile(`${JSON.stringify(payload)}\n`, 'utf8');
-      await handle.sync();
+      const handle = await open(temporaryPath, 'wx', 0o600);
+      try {
+        const payload: TrustFileV1 = { version: 1, records: [...records.values()] };
+        await handle.writeFile(`${JSON.stringify(payload)}\n`, 'utf8');
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await rename(temporaryPath, this.filePath);
+      renamed = true;
+      await syncParentDirectory(directory);
     } finally {
-      await handle.close();
+      if (!renamed) await unlink(temporaryPath).catch(() => undefined);
     }
-    await rename(temporaryPath, this.filePath);
   }
 }

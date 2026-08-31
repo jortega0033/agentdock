@@ -1,244 +1,359 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
-  AgentEvent,
-  AgentSession,
+  AgentEventV2Envelope,
+  AgentSessionV2,
   ProviderCapabilities,
   ProviderStatus,
+  ProviderStatusV2,
+  WorkspaceTrustViewV2,
 } from '@agent-dock/shared';
+import type { RendererInteraction } from '../electron/interaction-broker.js';
 import { App } from '../src/App.js';
 import type { AgentDockBridge, DaemonStatus } from '../src/window.js';
 
-const TEST_CAPABILITIES: ProviderCapabilities = {
+const SESSION_ID = '123e4567-e89b-42d3-a456-426614174000';
+const EXECUTION_ID = '123e4567-e89b-42d3-a456-426614174001';
+const TURN_ID = '123e4567-e89b-42d3-a456-426614174002';
+const WORKSPACE_ID = 'a'.repeat(64);
+const INCARNATION = 'b'.repeat(64);
+
+const LEGACY_CAPABILITIES: ProviderCapabilities = {
   resume: true,
   cancellation: true,
   tools: true,
   usage: true,
   thinking: true,
 };
-
-const CLAUDE_INSTALLED: ProviderStatus = {
+const LEGACY_PROVIDER: ProviderStatus = {
   id: 'claude',
   name: 'Claude Code',
   installed: true,
   authenticated: 'authenticated',
-  capabilities: TEST_CAPABILITIES,
+  capabilities: LEGACY_CAPABILITIES,
 };
-const CODEX_NOT_INSTALLED: ProviderStatus = {
-  id: 'codex',
-  name: 'Codex',
-  installed: false,
-  authenticated: 'unknown',
-  capabilities: TEST_CAPABILITIES,
+const CLAUDE_INSTALLED: ProviderStatusV2 = {
+  id: 'claude',
+  name: 'Claude Code',
+  installed: true,
+  authenticated: 'authenticated',
+  transports: [],
+  capabilities: [],
+  sandbox: {
+    providerId: 'claude',
+    platform: 'win32',
+    provider: { mechanism: 'provider_policy', state: 'unknown', evidence: [] },
+    agentDock: {
+      mechanism: 'agentdock_policy',
+      state: 'enforced',
+      evidence: [
+        {
+          kind: 'fixture',
+          reference: 'app-test',
+          verifiedAt: '2026-08-31T00:00:00.000Z',
+        },
+      ],
+    },
+    os: { mechanism: 'os_sandbox', state: 'unavailable', evidence: [] },
+    badge: 'restricted_by_policy',
+  },
+};
+const TRUSTED_WORKSPACE: WorkspaceTrustViewV2 = {
+  schemaVersion: 1,
+  workspaceId: WORKSPACE_ID,
+  incarnation: INCARNATION,
+  displayName: 'project',
+  reusable: true,
+  state: 'trusted',
+};
+const SESSION: AgentSessionV2 = {
+  id: SESSION_ID,
+  provider: 'claude',
+  transport: 'fake-interactive',
+  cwd: '/tmp/project',
+  status: 'starting',
+  selection: {
+    transport: 'fake-interactive',
+    enabled: [],
+    unavailableOptional: [],
+    possibleEffects: [],
+    effectsComplete: true,
+  },
+  executionId: EXECUTION_ID,
+  currentTurnId: TURN_ID,
+  acceptedWork: 'not_accepted',
+  startedAt: '2026-08-31T00:00:00.000Z',
+  earliestSequence: 0,
 };
 
-function installBridge(overrides: Partial<AgentDockBridge> = {}): AgentDockBridge {
+interface BridgeCallbacks {
+  event?: (sessionId: string, event: AgentEventV2Envelope) => void;
+  interaction?: (interaction: RendererInteraction) => void;
+}
+
+function installBridge(overrides: Partial<AgentDockBridge> = {}): {
+  bridge: AgentDockBridge;
+  callbacks: BridgeCallbacks;
+} {
+  const callbacks: BridgeCallbacks = {};
   const bridge: AgentDockBridge = {
     getDaemonStatus: vi.fn().mockResolvedValue({ state: 'ready' } satisfies DaemonStatus),
     onDaemonStatus: vi.fn().mockReturnValue(() => {}),
-    listProviders: vi.fn().mockResolvedValue([CLAUDE_INSTALLED]),
+    listProviders: vi.fn().mockResolvedValue([LEGACY_PROVIDER]),
+    listProvidersV2: vi.fn().mockResolvedValue([CLAUDE_INSTALLED]),
     createSession: vi.fn(),
     cancelSession: vi.fn().mockResolvedValue(undefined),
     onSessionEvent: vi.fn().mockReturnValue(() => {}),
-    createInteractiveSession: vi.fn(),
+    createInteractiveSession: vi.fn().mockResolvedValue(SESSION),
     sendSessionCommand: vi.fn(),
-    cancelInteractiveSession: vi.fn(),
-    onInteractiveSessionEvent: vi.fn().mockReturnValue(() => {}),
+    respondApproval: vi.fn().mockResolvedValue({ status: 'accepted' }),
+    answerQuestions: vi.fn().mockResolvedValue({ status: 'accepted' }),
+    cancelInteractiveSession: vi
+      .fn()
+      .mockResolvedValue({ status: 'cancelling', sessionId: SESSION_ID }),
+    onInteractiveSessionEvent: vi.fn((callback) => {
+      callbacks.event = callback;
+      return () => {
+        callbacks.event = undefined;
+      };
+    }),
     onInteractiveSessionStreamNotice: vi.fn().mockReturnValue(() => {}),
+    onInteractionRequested: vi.fn((callback) => {
+      callbacks.interaction = callback;
+      return () => {
+        callbacks.interaction = undefined;
+      };
+    }),
+    onInteractionResolved: vi.fn().mockReturnValue(() => {}),
+    inspectWorkspace: vi.fn().mockResolvedValue(TRUSTED_WORKSPACE),
+    setWorkspaceTrust: vi.fn().mockResolvedValue(TRUSTED_WORKSPACE),
+    readAudit: vi.fn().mockResolvedValue({ schemaVersion: 1, entries: [] }),
     selectDirectory: vi.fn().mockResolvedValue('/chosen/dir'),
     ...overrides,
   };
   (window as unknown as { agentDock: AgentDockBridge }).agentDock = bridge;
-  return bridge;
+  return { bridge, callbacks };
 }
 
-beforeEach(() => {
-  installBridge();
-});
+function fillSessionForm(): void {
+  fireEvent.change(screen.getByPlaceholderText('/path/to/project'), {
+    target: { value: '/tmp/project' },
+  });
+  fireEvent.change(screen.getByRole('textbox', { name: /prompt/i }), {
+    target: { value: 'do something' },
+  });
+}
 
-afterEach(() => {
-  vi.restoreAllMocks();
-});
+function event(
+  sequence: number,
+  value: { type: 'content.delta'; delta: string } | { type: 'session.completed' },
+): AgentEventV2Envelope {
+  const meta = {
+    sessionId: SESSION_ID,
+    executionId: EXECUTION_ID,
+    sequence,
+    timestamp: '2026-08-31T00:00:00.000Z',
+  };
+  return value.type === 'content.delta'
+    ? {
+        ...meta,
+        ...value,
+        turnId: TURN_ID,
+        contentBlockId: '123e4567-e89b-42d3-a456-426614174003',
+      }
+    : { ...meta, ...value };
+}
 
-describe('App', () => {
-  it('shows the daemon-unavailable banner when the daemon reports an error', async () => {
+beforeEach(() => installBridge());
+afterEach(() => vi.restoreAllMocks());
+
+describe('App security flow', () => {
+  it('shows the daemon-unavailable state when startup fails', async () => {
     let statusCallback: ((status: DaemonStatus) => void) | undefined;
     installBridge({
       getDaemonStatus: vi.fn().mockResolvedValue({ state: 'connecting' } satisfies DaemonStatus),
-      onDaemonStatus: vi.fn((cb) => {
-        statusCallback = cb;
+      onDaemonStatus: vi.fn((callback) => {
+        statusCallback = callback;
         return () => {};
       }),
     });
-
     render(<App />);
-    expect(screen.getByText(/connecting to local daemon/i)).toBeInTheDocument();
-
-    statusCallback?.({
-      state: 'unavailable',
-      error: 'daemon process exited unexpectedly (code 1, signal null)',
-    });
-
+    statusCallback?.({ state: 'unavailable', error: 'daemon exited unexpectedly' });
     await waitFor(() => expect(screen.getByText(/daemon unavailable/i)).toBeInTheDocument());
     expect(screen.getByText(/exited unexpectedly/)).toBeInTheDocument();
   });
 
-  it('lists providers and disables Run until a working directory and prompt are filled in', async () => {
-    installBridge({
-      listProviders: vi.fn().mockResolvedValue([CLAUDE_INSTALLED, CODEX_NOT_INSTALLED]),
-    });
-
+  it('shows policy restrictions separately from unavailable Windows OS isolation', async () => {
     render(<App />);
+    expect(await screen.findByText('Restricted by AgentDock policy')).toBeInTheDocument();
+    expect(screen.getByText('OS isolation: unavailable')).toBeInTheDocument();
+    expect(screen.queryByText(/bash sandboxed/i)).not.toBeInTheDocument();
+  });
 
-    await waitFor(() => expect(screen.getByText('Installed: No')).toBeInTheDocument()); // codex
-
+  it('requires explicit incarnation-bound trust before starting and supports Escape cancellation', async () => {
+    const untrusted = { ...TRUSTED_WORKSPACE, state: 'untrusted' as const };
+    const { bridge } = installBridge({
+      inspectWorkspace: vi.fn().mockResolvedValue(untrusted),
+    });
+    render(<App />);
+    await screen.findByText('Claude Code');
+    fillSessionForm();
     const runButton = screen.getByRole('button', { name: 'Run' });
-    expect(runButton).toBeDisabled();
+    await waitFor(() => expect(runButton).toBeEnabled());
+    runButton.focus();
+    fireEvent.click(runButton);
 
-    fireEvent.change(screen.getByPlaceholderText('/path/to/project'), {
-      target: { value: '/tmp/project' },
-    });
-    expect(runButton).toBeDisabled(); // prompt still empty
+    const dialog = await screen.findByRole('dialog', { name: /trust project/i });
+    const cancelTrustButton = within(dialog).getByRole('button', { name: 'Cancel' });
+    const trustButton = within(dialog).getByRole('button', { name: /trust workspace & run/i });
+    expect(cancelTrustButton).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true });
+    expect(trustButton).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: 'Tab' });
+    expect(cancelTrustButton).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(runButton).toHaveFocus();
+    expect(bridge.createInteractiveSession).not.toHaveBeenCalled();
 
-    fireEvent.change(screen.getByRole('textbox', { name: /prompt/i }), {
-      target: { value: 'do something' },
-    });
-    expect(runButton).toBeEnabled();
-  });
-
-  // The real "does the bridge leak a token" regression now lives in test/preload.test.ts (AD-07),
-  // exercising the actual electron/preload.ts module against a stubbed ipcRenderer rather than a
-  // mock this test file constructed itself — a mock built by the test can't fail for the reason
-  // its name claims, since the test controls both sides of the assertion.
-
-  it('runs a session end to end and reflects completion + streamed events', async () => {
-    let sessionEventCallback: ((sessionId: string, event: AgentEvent) => void) | undefined;
-    const session: AgentSession = {
-      id: 'sess-1',
-      provider: 'claude',
+    await waitFor(() => expect(runButton).toBeEnabled());
+    fireEvent.click(runButton);
+    await screen.findByRole('dialog', { name: /trust project/i });
+    fireEvent.click(screen.getByRole('button', { name: /trust workspace & run/i }));
+    await waitFor(() => expect(bridge.createInteractiveSession).toHaveBeenCalledOnce());
+    expect(bridge.setWorkspaceTrust).toHaveBeenCalledWith(WORKSPACE_ID, {
       cwd: '/tmp/project',
-      prompt: 'do something',
-      status: 'starting',
-      startedAt: new Date().toISOString(),
-    };
-
-    installBridge({
-      createSession: vi.fn().mockResolvedValue(session),
-      onSessionEvent: vi.fn((cb) => {
-        sessionEventCallback = cb;
-        return () => {};
-      }),
+      incarnation: INCARNATION,
+      state: 'trusted',
     });
-
-    render(<App />);
-    await waitFor(() => expect(screen.getByText('Claude Code')).toBeInTheDocument());
-
-    fireEvent.change(screen.getByPlaceholderText('/path/to/project'), {
-      target: { value: '/tmp/project' },
-    });
-    fireEvent.change(screen.getByRole('textbox', { name: /prompt/i }), {
-      target: { value: 'do something' },
-    });
-    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
-
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled());
-
-    sessionEventCallback?.('sess-1', {
-      type: 'session.started',
-      sessionId: 'sess-1',
-      provider: 'claude',
-    });
-    sessionEventCallback?.('sess-1', { type: 'assistant.message', text: 'hi from the fixture' });
-    sessionEventCallback?.('sess-1', { type: 'session.completed' });
-
-    await waitFor(() => expect(screen.getByText('hi from the fixture')).toBeInTheDocument());
-    await waitFor(() => expect(screen.getByText('completed')).toBeInTheDocument());
   });
 
-  it('ignores session events for a session id other than the one currently tracked', async () => {
-    let sessionEventCallback: ((sessionId: string, event: AgentEvent) => void) | undefined;
-    const session: AgentSession = {
-      id: 'sess-current',
-      provider: 'claude',
-      cwd: '/tmp/project',
-      prompt: 'do something',
-      status: 'starting',
-      startedAt: new Date().toISOString(),
-    };
-
-    installBridge({
-      createSession: vi.fn().mockResolvedValue(session),
-      onSessionEvent: vi.fn((cb) => {
-        sessionEventCallback = cb;
-        return () => {};
-      }),
-    });
-
+  it('runs the v2 session, streams normalized events, and cancels through the v2 API', async () => {
+    const { bridge, callbacks } = installBridge();
     render(<App />);
-    await waitFor(() => expect(screen.getByText('Claude Code')).toBeInTheDocument());
-    fireEvent.change(screen.getByPlaceholderText('/path/to/project'), {
-      target: { value: '/tmp/project' },
-    });
-    fireEvent.change(screen.getByRole('textbox', { name: /prompt/i }), {
-      target: { value: 'do something' },
-    });
+    await screen.findByText('Claude Code');
+    fillSessionForm();
     fireEvent.click(screen.getByRole('button', { name: 'Run' }));
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled());
+    await waitFor(() => expect(bridge.createInteractiveSession).toHaveBeenCalledOnce());
 
-    sessionEventCallback?.('sess-stale-from-a-previous-run', {
-      type: 'assistant.message',
-      text: 'should not appear',
-    });
-
-    await new Promise((resolve) => setTimeout(resolve, 20));
-    expect(screen.queryByText('should not appear')).not.toBeInTheDocument();
+    callbacks.event?.(SESSION_ID, event(0, { type: 'content.delta', delta: 'fixture output' }));
+    expect(await screen.findByText('fixture output')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(bridge.cancelInteractiveSession).toHaveBeenCalledWith(SESSION_ID));
+    callbacks.event?.(SESSION_ID, event(1, { type: 'session.completed' }));
+    await waitFor(() =>
+      expect(screen.getByLabelText('session events')).toHaveTextContent('session completed'),
+    );
   });
 
-  it('enables Cancel while running and calls cancelSession with the running session id', async () => {
-    const session: AgentSession = {
-      id: 'sess-2',
-      provider: 'claude',
-      cwd: '/tmp/project',
-      prompt: 'do something',
-      status: 'starting',
-      startedAt: new Date().toISOString(),
-    };
-    const bridge = installBridge({ createSession: vi.fn().mockResolvedValue(session) });
-
+  it('defaults keyboard focus to Deny and answers only with an opaque handle', async () => {
+    const { bridge, callbacks } = installBridge();
     render(<App />);
-    await waitFor(() => expect(screen.getByText('Claude Code')).toBeInTheDocument());
-
-    fireEvent.change(screen.getByPlaceholderText('/path/to/project'), {
-      target: { value: '/tmp/project' },
-    });
-    fireEvent.change(screen.getByRole('textbox', { name: /prompt/i }), {
-      target: { value: 'do something' },
-    });
+    await screen.findByText('Claude Code');
+    fillSessionForm();
     fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+    await waitFor(() => expect(bridge.createInteractiveSession).toHaveBeenCalledOnce());
 
-    const cancelButton = await screen.findByRole('button', { name: 'Cancel' });
-    await waitFor(() => expect(cancelButton).toBeEnabled());
+    const interactionHandle = 'A'.repeat(43);
+    callbacks.interaction?.({
+      kind: 'approval',
+      interactionHandle,
+      title: 'Run command',
+      action: 'execute',
+      target: 'workspace',
+      possibleEffects: ['command'],
+      effectsComplete: true,
+      allowedDecisions: ['allow_once', 'allow_session', 'deny'],
+      deadlineAt: '2026-08-31T00:05:00.000Z',
+    });
 
-    fireEvent.click(cancelButton);
-    await waitFor(() => expect(bridge.cancelSession).toHaveBeenCalledWith('sess-2'));
+    const dialog = await screen.findByRole('dialog', { name: 'Run command' });
+    const denyButton = within(dialog).getByRole('button', { name: 'Deny' });
+    const allowSessionButton = within(dialog).getByRole('button', {
+      name: 'Allow for this session',
+    });
+    expect(denyButton).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true });
+    expect(allowSessionButton).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: 'Tab' });
+    expect(denyButton).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    await waitFor(() =>
+      expect(bridge.respondApproval).toHaveBeenCalledWith(interactionHandle, 'deny'),
+    );
   });
 
-  it('surfaces a rejected createSession call as a form error instead of crashing', async () => {
-    installBridge({
-      createSession: vi.fn().mockRejectedValue(new Error('daemon is not ready yet')),
-    });
-
+  it('fails a pending question closed when Escape cancels its session', async () => {
+    const { bridge, callbacks } = installBridge();
     render(<App />);
-    await waitFor(() => expect(screen.getByText('Claude Code')).toBeInTheDocument());
-    fireEvent.change(screen.getByPlaceholderText('/path/to/project'), {
-      target: { value: '/tmp/project' },
-    });
-    fireEvent.change(screen.getByRole('textbox', { name: /prompt/i }), {
-      target: { value: 'do something' },
-    });
+    await screen.findByText('Claude Code');
+    fillSessionForm();
     fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+    await waitFor(() => expect(bridge.createInteractiveSession).toHaveBeenCalledOnce());
 
-    await waitFor(() => expect(screen.getByText('daemon is not ready yet')).toBeInTheDocument());
-    expect(screen.getByText('failed')).toBeInTheDocument();
+    callbacks.interaction?.({
+      kind: 'question',
+      interactionHandle: 'A'.repeat(43),
+      deadlineAt: '2026-08-31T00:05:00.000Z',
+      questions: [
+        {
+          questionHandle: 'B'.repeat(43),
+          title: 'Choose a mode',
+          prompt: 'Which mode should be used?',
+          allowsFreeText: false,
+          options: [{ optionHandle: 'C'.repeat(43), label: 'Safe mode' }],
+        },
+      ],
+    });
+
+    const dialog = await screen.findByRole('dialog', { name: /answer to continue/i });
+    const checkbox = within(dialog).getByRole('checkbox', { name: /safe mode/i });
+    const cancelSessionButton = within(dialog).getByRole('button', { name: 'Cancel session' });
+    expect(checkbox).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true });
+    expect(cancelSessionButton).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: 'Tab' });
+    expect(checkbox).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    await waitFor(() => expect(bridge.cancelInteractiveSession).toHaveBeenCalledWith(SESSION_ID));
+  });
+
+  it('submits bounded question answers using opaque question and option handles', async () => {
+    const { bridge, callbacks } = installBridge();
+    render(<App />);
+    await screen.findByText('Claude Code');
+    fillSessionForm();
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+    await waitFor(() => expect(bridge.createInteractiveSession).toHaveBeenCalledOnce());
+
+    const interactionHandle = 'A'.repeat(43);
+    const questionHandle = 'B'.repeat(43);
+    const optionHandle = 'C'.repeat(43);
+    callbacks.interaction?.({
+      kind: 'question',
+      interactionHandle,
+      deadlineAt: '2026-08-31T00:05:00.000Z',
+      questions: [
+        {
+          questionHandle,
+          title: 'Choose a mode',
+          prompt: 'Which mode should be used?',
+          allowsFreeText: false,
+          options: [{ optionHandle, label: 'Safe mode' }],
+        },
+      ],
+    });
+
+    await screen.findByRole('dialog', { name: /answer to continue/i });
+    fireEvent.click(screen.getByRole('checkbox', { name: /safe mode/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send answers' }));
+    await waitFor(() =>
+      expect(bridge.answerQuestions).toHaveBeenCalledWith(interactionHandle, [
+        {
+          questionHandle,
+          answer: { kind: 'options', optionHandles: [optionHandle] },
+        },
+      ]),
+    );
   });
 });

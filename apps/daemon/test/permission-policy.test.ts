@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { permissionKey, type PermissionActionV2 } from '@agent-dock/shared';
 import {
@@ -92,5 +92,129 @@ describe('permission policy', () => {
       risk: 'normal',
     });
     expect(JSON.stringify(normalized)).not.toContain('SECRET_TARGET_CANARY');
+  });
+
+  it('does not trust provider display text as audit-safe metadata', () => {
+    const normalized = normalizeApprovalAction({
+      type: 'approval.requested',
+      turnId: randomUUID(),
+      requestId: randomUUID(),
+      title: 'Run command',
+      action: 'execute',
+      target: 'ignored',
+      possibleEffects: ['command'],
+      effectsComplete: true,
+      deadlineAt: new Date().toISOString(),
+      permission: {
+        ...normalAction,
+        safeTargetSummary: 'Bearer SECRET_CANARY',
+      },
+    });
+
+    expect(normalized.safeTargetSummary).toBe('command:command.execute');
+    expect(JSON.stringify(normalized)).not.toContain('SECRET_CANARY');
+  });
+
+  it('never reuses a benign MCP grant when event facts become destructive', () => {
+    const permission: PermissionActionV2 = {
+      ...normalAction,
+      actionClass: 'mcp',
+      operation: 'mcp.read',
+    };
+    const common = {
+      type: 'approval.requested' as const,
+      turnId: randomUUID(),
+      title: 'Invoke MCP tool',
+      action: 'invoke',
+      target: 'stable-mcp-target',
+      effectsComplete: true,
+      deadlineAt: new Date().toISOString(),
+      permission,
+    };
+    const benign = normalizeApprovalAction({
+      ...common,
+      requestId: randomUUID(),
+      possibleEffects: ['network'],
+    });
+    const destructive = normalizeApprovalAction({
+      ...common,
+      requestId: randomUUID(),
+      possibleEffects: ['network', 'destructive'],
+    });
+
+    expect(benign).toMatchObject({
+      actionClass: 'mcp',
+      operation: 'mcp.invoke',
+      risk: 'normal',
+      mcpDestructive: false,
+    });
+    expect(destructive).toMatchObject({
+      actionClass: 'mcp',
+      operation: 'mcp.invoke',
+      risk: 'destructive',
+      mcpDestructive: true,
+    });
+    expect(
+      evaluatePermissionPolicy(destructive, {
+        trustState: 'trusted',
+        grants: new Set([permissionKey(benign)]),
+      }),
+    ).toMatchObject({ outcome: 'ask', reason: 'destructive_mcp' });
+  });
+
+  it('derives the target fingerprint locally and preserves incomplete event facts', () => {
+    const target = 'actual-target';
+    const normalized = normalizeApprovalAction({
+      type: 'approval.requested',
+      turnId: randomUUID(),
+      requestId: randomUUID(),
+      title: 'Run command',
+      action: 'execute',
+      target,
+      possibleEffects: ['command'],
+      effectsComplete: false,
+      deadlineAt: new Date().toISOString(),
+      permission: {
+        ...normalAction,
+        targetFingerprint: 'f'.repeat(64),
+        effectsComplete: true,
+      },
+    });
+
+    expect(normalized.targetFingerprint).toBe(
+      createHash('sha256').update(target.normalize('NFC')).digest('hex'),
+    );
+    expect(normalized.targetFingerprint).not.toBe('f'.repeat(64));
+    expect(normalized).toMatchObject({ effectsComplete: false, risk: 'unknown' });
+    expect(
+      evaluatePermissionPolicy(normalized, {
+        trustState: 'trusted',
+        grants: new Set([permissionKey({ ...normalized, effectsComplete: true, risk: 'normal' })]),
+      }),
+    ).toMatchObject({ outcome: 'ask', reason: 'incomplete_effects' });
+  });
+
+  it('replaces a secret-bearing provider operation with a closed daemon operation', () => {
+    const secret = 'secretcanary123';
+    const normalized = normalizeApprovalAction({
+      type: 'approval.requested',
+      turnId: randomUUID(),
+      requestId: randomUUID(),
+      title: 'Run command',
+      action: 'execute',
+      target: secret,
+      possibleEffects: ['command'],
+      effectsComplete: true,
+      deadlineAt: new Date().toISOString(),
+      permission: {
+        ...normalAction,
+        operation: `command.execute/${secret}`,
+        safeTargetSummary: secret,
+      },
+    });
+
+    expect(normalized.operation).toBe('command.execute');
+    expect(normalized.safeTargetSummary).toBe('command:command.execute');
+    expect(JSON.stringify(normalized)).not.toContain(secret);
   });
 });

@@ -1,13 +1,20 @@
-import type { ProviderStatus } from '@agent-dock/shared';
+import type { ProviderStatusV2 } from '@agent-dock/shared';
 import noProvidersIllustration from '../../assets/illustrations/no-providers.svg';
 
-function authLabel(status: ProviderStatus): string {
+function authLabel(status: ProviderStatusV2): string {
   if (status.authenticated === 'authenticated') return 'yes';
   if (status.authenticated === 'unauthenticated') return 'no';
   return 'unknown';
 }
 
-export function ProviderPanel({ providers }: { providers: ProviderStatus[] }) {
+function sandboxLabel(status: ProviderStatusV2): string {
+  if (status.sandbox.badge === 'restricted_by_policy') return 'Restricted by AgentDock policy';
+  if (status.sandbox.badge === 'os_sandboxed') return 'OS sandboxed';
+  if (status.sandbox.badge === 'bash_sandboxed') return 'Bash sandboxed';
+  return 'No sandbox verified';
+}
+
+export function ProviderPanel({ providers }: { providers: ProviderStatusV2[] }) {
   if (providers.length === 0) {
     return (
       <div className="provider-panel provider-panel--empty">
@@ -31,6 +38,8 @@ export function ProviderPanel({ providers }: { providers: ProviderStatus[] }) {
           </div>
           <div>Installed: {status.installed ? 'Yes' : 'No'}</div>
           <div>Authenticated: {authLabel(status)}</div>
+          <div className="provider-card__sandbox">{sandboxLabel(status)}</div>
+          <div>OS isolation: {status.sandbox.os.state.replaceAll('_', ' ')}</div>
           {status.version && <div>Version: {status.version}</div>}
           {status.error && <div className="provider-card__error">{status.error}</div>}
         </div>

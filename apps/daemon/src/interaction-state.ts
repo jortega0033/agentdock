@@ -6,11 +6,11 @@ export interface PendingInteractionInput {
   requestId: string;
   turnId: string;
   kind: PendingInteractionKind;
-  /** Remaining provider budget captured once at receipt; wall-clock changes cannot extend it. */
-  providerRemainingMs?: number;
+  /** Provider wall-clock deadline; the daemon's publication budget remains monotonic. */
+  providerDeadlineAtMs?: number;
 }
 
-export interface PendingInteraction extends PendingInteractionInput {
+export interface PendingInteraction extends Omit<PendingInteractionInput, 'providerDeadlineAtMs'> {
   state: 'unpublished' | 'pending' | 'resolving';
   publishedAtMonotonicMs?: number;
   deadlineMonotonicMs?: number;
@@ -41,7 +41,7 @@ const systemScheduler: MonotonicScheduler = {
 export class InteractionState {
   private readonly pending = new Map<
     string,
-    { interaction: PendingInteraction; timer?: unknown }
+    { interaction: PendingInteraction; providerDeadlineMonotonicMs?: number; timer?: unknown }
   >();
 
   constructor(
@@ -52,8 +52,20 @@ export class InteractionState {
 
   register(input: PendingInteractionInput): boolean {
     if (this.pending.has(input.requestId)) return false;
+    const { providerDeadlineAtMs, ...interaction } = input;
+    const boundedProviderDeadlineAtMs =
+      providerDeadlineAtMs === undefined
+        ? undefined
+        : Number.isFinite(providerDeadlineAtMs)
+          ? providerDeadlineAtMs
+          : 0;
+    const providerDeadlineMonotonicMs =
+      boundedProviderDeadlineAtMs === undefined
+        ? undefined
+        : this.scheduler.now() + Math.max(0, boundedProviderDeadlineAtMs - Date.now());
     this.pending.set(input.requestId, {
-      interaction: { ...input, state: 'unpublished' },
+      interaction: { ...interaction, state: 'unpublished' },
+      ...(providerDeadlineMonotonicMs !== undefined ? { providerDeadlineMonotonicMs } : {}),
     });
     return true;
   }
@@ -63,18 +75,18 @@ export class InteractionState {
     const record = this.pending.get(requestId);
     if (!record || record.interaction.state !== 'unpublished') return false;
     const publishedAtMonotonicMs = this.scheduler.now();
-    const providerBudget = record.interaction.providerRemainingMs;
-    const delayMs = Math.max(
-      0,
-      Math.min(this.timeoutMs, providerBudget === undefined ? this.timeoutMs : providerBudget),
-    );
+    const providerRemainingMs =
+      record.providerDeadlineMonotonicMs === undefined
+        ? this.timeoutMs
+        : Math.max(0, record.providerDeadlineMonotonicMs - publishedAtMonotonicMs);
+    const timeoutMs = Math.min(this.timeoutMs, providerRemainingMs);
     record.interaction = {
       ...record.interaction,
       state: 'pending',
       publishedAtMonotonicMs,
-      deadlineMonotonicMs: publishedAtMonotonicMs + delayMs,
+      deadlineMonotonicMs: publishedAtMonotonicMs + timeoutMs,
     };
-    record.timer = this.scheduler.set(delayMs, () => {
+    record.timer = this.scheduler.set(timeoutMs, () => {
       const claimed = this.claim(requestId);
       if (claimed) this.onTimeout(claimed);
     });

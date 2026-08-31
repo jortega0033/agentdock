@@ -1,3 +1,4 @@
+import { constants as fsConstants } from 'node:fs';
 import { open, readFile, stat } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import {
@@ -10,6 +11,77 @@ import { ensureStateDirectory } from './state-directory.js';
 
 const MAX_AUDIT_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_AUDIT_PAGE_ENTRIES = 100;
+const MAX_OPEN_RACE_RETRIES = 4;
+
+interface AuditFileHandle {
+  writeFile(data: string, encoding: 'utf8'): Promise<void>;
+  sync(): Promise<void>;
+  close(): Promise<void>;
+}
+
+type OpenFile = (
+  filePath: string,
+  flags: string | number,
+  mode?: number,
+) => Promise<AuditFileHandle>;
+
+export interface AuditStoreDependencies {
+  openFile?: OpenFile;
+  syncDirectory?: (directory: string) => Promise<void>;
+}
+
+const defaultOpenFile: OpenFile = (filePath, flags, mode) => open(filePath, flags, mode);
+
+async function openAuditFile(
+  filePath: string,
+  openFile: OpenFile,
+): Promise<{
+  handle: AuditFileHandle;
+  created: boolean;
+}> {
+  for (let attempt = 0; attempt < MAX_OPEN_RACE_RETRIES; attempt += 1) {
+    try {
+      return { handle: await openFile(filePath, 'ax', 0o600), created: true };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    try {
+      return {
+        handle: await openFile(
+          filePath,
+          fsConstants.O_WRONLY |
+            fsConstants.O_APPEND |
+            (typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0),
+        ),
+        created: false,
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  throw new Error('audit file could not be opened safely');
+}
+
+async function syncParentDirectory(directory: string): Promise<void> {
+  try {
+    const parent = await open(directory, 'r');
+    try {
+      await parent.sync();
+    } finally {
+      await parent.close();
+    }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // Node cannot open/fsync directory handles on Windows. Ignore only its documented
+    // unsupported-operation errors there; every POSIX persistence failure remains fatal.
+    if (
+      process.platform !== 'win32' ||
+      (code !== 'EPERM' && code !== 'EACCES' && code !== 'EINVAL')
+    ) {
+      throw error;
+    }
+  }
+}
 
 export type NewAuditEntryV2 = Omit<AuditEntryV2, 'sequence'>;
 
@@ -40,8 +112,16 @@ export class AuditStore {
   private initializePromise: Promise<void> | undefined;
   private writeTail: Promise<void> = Promise.resolve();
   private unhealthy = false;
+  private readonly openFile: OpenFile;
+  private readonly syncDirectory: (directory: string) => Promise<void>;
 
-  constructor(private readonly filePath: string) {}
+  constructor(
+    private readonly filePath: string,
+    dependencies: AuditStoreDependencies = {},
+  ) {
+    this.openFile = dependencies.openFile ?? defaultOpenFile;
+    this.syncDirectory = dependencies.syncDirectory ?? syncParentDirectory;
+  }
 
   append(input: NewAuditEntryV2): Promise<AuditEntryV2> {
     const operation = this.writeTail.then(async () => {
@@ -57,15 +137,34 @@ export class AuditStore {
         throw new Error('audit store size limit reached');
       }
       await ensureStateDirectory(dirname(this.filePath));
-      const handle = await open(this.filePath, 'a', 0o600);
+      const { handle, created } = await openAuditFile(this.filePath, this.openFile);
+      let operationFailed = false;
+      let operationError: unknown;
       try {
         await handle.writeFile(line, 'utf8');
         await handle.sync();
       } catch (error) {
         this.unhealthy = true;
-        throw error;
-      } finally {
+        operationFailed = true;
+        operationError = error;
+      }
+      try {
         await handle.close();
+      } catch (error) {
+        this.unhealthy = true;
+        if (!operationFailed) {
+          operationFailed = true;
+          operationError = error;
+        }
+      }
+      if (operationFailed) throw operationError;
+      if (created) {
+        try {
+          await this.syncDirectory(dirname(this.filePath));
+        } catch (error) {
+          this.unhealthy = true;
+          throw error;
+        }
       }
       this.entries?.push(entry);
       return entry;

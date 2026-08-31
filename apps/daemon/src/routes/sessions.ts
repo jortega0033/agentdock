@@ -3,11 +3,14 @@ import type { FastifyInstance } from 'fastify';
 import { createSessionRequestSchema, sessionIdParamSchema } from '@agent-dock/shared';
 import type { ProviderRegistry } from '@agent-dock/agent-runtime';
 import type { SessionManager } from '../session-manager.js';
+import type { WorkspaceTrustStore } from '../workspace-trust-store.js';
+import { resolveWorkspaceIdentity, revalidateWorkspaceIdentity } from '../workspace-identity.js';
 
 export function registerSessionRoutes(
   app: FastifyInstance,
   sessionManager: SessionManager,
   registry: ProviderRegistry,
+  trustStore?: WorkspaceTrustStore,
 ): void {
   app.post('/sessions', async (req, reply) => {
     const parsed = createSessionRequestSchema.safeParse(req.body);
@@ -22,6 +25,19 @@ export function registerSessionRoutes(
       reply.code(400).send({ error: `unsupported provider: ${provider}` });
       return;
     }
+    const workspace = trustStore
+      ? await resolveWorkspaceIdentity(cwd).catch(() => undefined)
+      : undefined;
+    if (trustStore) {
+      if (!workspace) {
+        reply.code(400).send({ error: 'workspace could not be resolved' });
+        return;
+      }
+      if ((await trustStore.inspect(workspace)).state !== 'trusted') {
+        reply.code(409).send({ error: 'workspace is not trusted', code: 'workspace_untrusted' });
+        return;
+      }
+    }
     if (resumeProviderSessionId && !(await providerImpl.detect()).capabilities.resume) {
       reply.code(400).send({ error: `provider does not support resume: ${provider}` });
       return;
@@ -31,7 +47,24 @@ export function registerSessionRoutes(
       return;
     }
 
-    const session = sessionManager.create(provider, cwd, prompt, resumeProviderSessionId);
+    if (
+      trustStore &&
+      workspace &&
+      (!(await revalidateWorkspaceIdentity(workspace)) ||
+        (await trustStore.inspect(workspace)).state !== 'trusted')
+    ) {
+      reply.code(409).send({ error: 'workspace trust changed', code: 'workspace_untrusted' });
+      return;
+    }
+
+    const session = sessionManager.create(
+      provider,
+      workspace?.canonicalPath ?? cwd,
+      prompt,
+      resumeProviderSessionId,
+      1,
+      workspace,
+    );
     reply.code(201).send(session);
   });
 

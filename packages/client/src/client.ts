@@ -16,11 +16,16 @@ import {
   providerStatusV2Schema,
   providersV2ResponseSchema,
   sessionIdParamSchema,
+  auditReadResponseV2Schema,
+  workspaceInspectRequestV2Schema,
+  workspaceTrustUpdateRequestV2Schema,
+  workspaceTrustViewV2Schema,
   type AgentEventEnvelope,
   type AgentEventV2Envelope,
   type AgentCommandV2,
   type AgentSession,
   type AgentSessionV2,
+  type AuditReadResponseV2,
   type CancelSessionV2Response,
   type CommandAcknowledgementV2,
   type CreateSessionRequest,
@@ -29,6 +34,8 @@ import {
   type ProviderStatus,
   type ProviderStatusV2,
   type ProvidersV2Response,
+  type WorkspaceTrustUpdateRequestV2,
+  type WorkspaceTrustViewV2,
 } from '@agent-dock/shared';
 import {
   DaemonError,
@@ -61,10 +68,18 @@ export interface SessionEventsOptions {
   signal?: AbortSignal;
   /** Resume from the SSE `id:` after this value, instead of a full replay from the start. */
   lastEventId?: string;
+  /** Claims the sole interaction-responder stream for this session. Observers should omit it. */
+  responder?: boolean;
 }
 
 export interface SessionRequestOptions {
   signal?: AbortSignal;
+}
+
+export interface AuditReadOptions {
+  cursor?: string;
+  limit?: number;
+  sessionId?: string;
 }
 
 interface CompatibilityResult {
@@ -75,6 +90,7 @@ interface CompatibilityResult {
 
 const PROTOCOL_V2 = 2;
 const MAX_V2_SSE_FRAME_BYTES = 1024 * 1024;
+const RESPONDER_LEASE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const CLIENT_SUPPORTED_PROTOCOL_VERSIONS: readonly number[] =
   AGENT_DOCK_SUPPORTED_PROTOCOL_VERSIONS;
 
@@ -96,6 +112,7 @@ export class AgentDockClient {
   private readonly token: string;
   private readonly fetchImpl: typeof fetch;
   private compatibilityCheck: Promise<CompatibilityResult> | undefined;
+  private readonly responderLeases = new Map<string, string>();
 
   readonly providers = {
     list: (): Promise<ProviderStatus[]> => this.listProviders(),
@@ -139,6 +156,16 @@ export class AgentDockClient {
       cancel: (id: string, options?: SessionRequestOptions): Promise<CancelSessionV2Response> =>
         this.cancelSessionV2(id, options),
       delete: (id: string): Promise<void> => this.deleteSessionV2(id),
+    },
+    workspaces: {
+      inspect: (cwd: string): Promise<WorkspaceTrustViewV2> => this.inspectWorkspaceV2(cwd),
+      setTrust: (
+        workspaceId: string,
+        input: WorkspaceTrustUpdateRequestV2,
+      ): Promise<WorkspaceTrustViewV2> => this.setWorkspaceTrustV2(workspaceId, input),
+    },
+    audit: {
+      list: (options?: AuditReadOptions): Promise<AuditReadResponseV2> => this.readAuditV2(options),
     },
   };
 
@@ -465,6 +492,7 @@ export class AgentDockClient {
 
     const headers: Record<string, string> = { Authorization: `Bearer ${this.token}` };
     if (options.lastEventId) headers['Last-Event-ID'] = options.lastEventId;
+    if (options.responder) headers['X-AgentDock-Responder'] = '1';
 
     let res: Response;
     try {
@@ -505,42 +533,57 @@ export class AgentDockClient {
       );
     }
 
-    for await (const event of parseSseStream(res.body, {
-      schema: agentEventOrStreamErrorV2Schema,
-      label: 'AgentEvent v2',
-      signal: options.signal,
-      maxFrameBytes: MAX_V2_SSE_FRAME_BYTES,
-      fatalUtf8: true,
-      rejectUnterminatedFrame: true,
-      validateEvent: (event, frame) => {
-        if (event.type === 'stream.error') return;
-        if (event.sessionId !== sessionId) {
-          throw new ValidationError(
-            `received an AgentEvent v2 for session ${event.sessionId} on the ${sessionId} stream`,
-          );
+    const responderLease = options.responder
+      ? res.headers.get('X-AgentDock-Responder-Lease')
+      : null;
+    if (options.responder && (!responderLease || !RESPONDER_LEASE_PATTERN.test(responderLease))) {
+      await res.body.cancel().catch(() => undefined);
+      throw new ValidationError('daemon returned an invalid protocol-v2 responder lease');
+    }
+    if (responderLease) this.responderLeases.set(sessionId, responderLease);
+
+    try {
+      for await (const event of parseSseStream(res.body, {
+        schema: agentEventOrStreamErrorV2Schema,
+        label: 'AgentEvent v2',
+        signal: options.signal,
+        maxFrameBytes: MAX_V2_SSE_FRAME_BYTES,
+        fatalUtf8: true,
+        rejectUnterminatedFrame: true,
+        validateEvent: (event, frame) => {
+          if (event.type === 'stream.error') return;
+          if (event.sessionId !== sessionId) {
+            throw new ValidationError(
+              `received an AgentEvent v2 for session ${event.sessionId} on the ${sessionId} stream`,
+            );
+          }
+          if (frame.id === undefined) {
+            throw new ValidationError('received an AgentEvent v2 SSE frame without an id');
+          }
+          if (frame.id !== String(event.sequence)) {
+            throw new ValidationError(
+              `received AgentEvent v2 SSE id ${frame.id} for sequence ${event.sequence}`,
+            );
+          }
+          if (previousSequence !== undefined && event.sequence <= previousSequence) {
+            throw new ValidationError(
+              `received non-monotonic AgentEvent v2 sequence ${event.sequence} after ${previousSequence}`,
+            );
+          }
+          previousSequence = event.sequence;
+        },
+      })) {
+        if (event.type === 'stream.error') {
+          const cursor =
+            event.lastSequence === undefined ? '' : ` after sequence ${event.lastSequence}`;
+          throw new DaemonError(`protocol-v2 event stream overflowed${cursor}`, 429);
         }
-        if (frame.id === undefined) {
-          throw new ValidationError('received an AgentEvent v2 SSE frame without an id');
-        }
-        if (frame.id !== String(event.sequence)) {
-          throw new ValidationError(
-            `received AgentEvent v2 SSE id ${frame.id} for sequence ${event.sequence}`,
-          );
-        }
-        if (previousSequence !== undefined && event.sequence <= previousSequence) {
-          throw new ValidationError(
-            `received non-monotonic AgentEvent v2 sequence ${event.sequence} after ${previousSequence}`,
-          );
-        }
-        previousSequence = event.sequence;
-      },
-    })) {
-      if (event.type === 'stream.error') {
-        const cursor =
-          event.lastSequence === undefined ? '' : ` after sequence ${event.lastSequence}`;
-        throw new DaemonError(`protocol-v2 event stream overflowed${cursor}`, 429);
+        yield event;
       }
-      yield event;
+    } finally {
+      if (responderLease && this.responderLeases.get(sessionId) === responderLease) {
+        this.responderLeases.delete(sessionId);
+      }
     }
   }
 
@@ -552,7 +595,16 @@ export class AgentDockClient {
       'protocol-v2 command acknowledgement',
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...((parsedCommand.type === 'approval.respond' ||
+            parsedCommand.type === 'question.respond') &&
+          this.responderLeases.has(parsedCommand.sessionId)
+            ? {
+                'X-AgentDock-Responder-Lease': this.responderLeases.get(parsedCommand.sessionId)!,
+              }
+            : {}),
+        },
         body: JSON.stringify(parsedCommand),
       },
       {
@@ -593,6 +645,75 @@ export class AgentDockClient {
       `/v2/sessions/${encodeURIComponent(sessionId)}`,
       { method: 'DELETE' },
       { notFound: () => new SessionNotFoundError(sessionId) },
+    );
+  }
+
+  private async inspectWorkspaceV2(cwd: string): Promise<WorkspaceTrustViewV2> {
+    const input = validateInput(
+      workspaceInspectRequestV2Schema,
+      { cwd },
+      'protocol-v2 workspace inspection',
+    );
+    return this.requestV2(
+      '/v2/workspaces/inspect',
+      workspaceTrustViewV2Schema,
+      'protocol-v2 workspace trust view',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      },
+      { expectedStatus: 200 },
+    );
+  }
+
+  private async setWorkspaceTrustV2(
+    workspaceId: string,
+    input: WorkspaceTrustUpdateRequestV2,
+  ): Promise<WorkspaceTrustViewV2> {
+    if (!/^[a-f0-9]{64}$/.test(workspaceId)) {
+      throw new ValidationError('invalid protocol-v2 workspace id');
+    }
+    const parsed = validateInput(
+      workspaceTrustUpdateRequestV2Schema,
+      input,
+      'protocol-v2 workspace trust update',
+    );
+    return this.requestV2(
+      `/v2/workspaces/${workspaceId}/trust`,
+      workspaceTrustViewV2Schema,
+      'protocol-v2 workspace trust view',
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsed),
+      },
+      { expectedStatus: 200 },
+    );
+  }
+
+  private async readAuditV2(options: AuditReadOptions = {}): Promise<AuditReadResponseV2> {
+    if (
+      options.limit !== undefined &&
+      (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 100)
+    ) {
+      throw new ValidationError('protocol-v2 audit limit must be between 1 and 100');
+    }
+    if (options.cursor !== undefined && !/^[A-Za-z0-9_-]{1,256}$/.test(options.cursor)) {
+      throw new ValidationError('invalid protocol-v2 audit cursor');
+    }
+    if (options.sessionId !== undefined) validateSessionIdV2(options.sessionId);
+    const query = new URLSearchParams();
+    if (options.cursor !== undefined) query.set('cursor', options.cursor);
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    if (options.sessionId !== undefined) query.set('sessionId', options.sessionId);
+    const suffix = query.size > 0 ? `?${query.toString()}` : '';
+    return this.requestV2(
+      `/v2/audit${suffix}`,
+      auditReadResponseV2Schema,
+      'protocol-v2 audit page',
+      {},
+      { expectedStatus: 200 },
     );
   }
 }

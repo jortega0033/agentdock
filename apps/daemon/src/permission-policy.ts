@@ -34,45 +34,82 @@ function fingerprint(value: string): string {
   return createHash('sha256').update(value.normalize('NFC')).digest('hex');
 }
 
+function actionClassFromEffects(effects: ReadonlySet<string>): PermissionActionV2['actionClass'] {
+  if (effects.has('external_side_effect')) return 'external_side_effect';
+  if (effects.has('network')) return 'network';
+  if (effects.has('command')) return 'command';
+  if (effects.has('filesystem_write') || effects.has('read')) return 'filesystem';
+  return 'other';
+}
+
+function conservativeActionClass(
+  effectsClass: PermissionActionV2['actionClass'],
+  providerClass: PermissionActionV2['actionClass'] | undefined,
+): PermissionActionV2['actionClass'] {
+  if (!providerClass) return effectsClass;
+  if (effectsClass === 'external_side_effect' || providerClass === 'external_side_effect') {
+    return 'external_side_effect';
+  }
+  if (providerClass === 'other') return 'other';
+  // MCP is not representable in the generic effects list, so retain that classification while
+  // deriving every key/audit string locally below.
+  if (providerClass === 'mcp') return 'mcp';
+  if (effectsClass === 'other') return providerClass;
+  // Conflicting normal classes are ambiguous and must not inherit either class's session grant.
+  return effectsClass === providerClass ? effectsClass : 'other';
+}
+
+function closedOperation(
+  actionClass: PermissionActionV2['actionClass'],
+  effects: ReadonlySet<string>,
+): string {
+  switch (actionClass) {
+    case 'filesystem':
+      return effects.has('filesystem_write')
+        ? 'filesystem.write'
+        : effects.has('read')
+          ? 'filesystem.read'
+          : 'filesystem.access';
+    case 'command':
+      return 'command.execute';
+    case 'network':
+      return 'network.access';
+    case 'mcp':
+      return 'mcp.invoke';
+    case 'external_side_effect':
+      return 'external.perform';
+    case 'other':
+      return 'other.unknown';
+  }
+}
+
 /** Builds a closed, audit-safe action when an adapter has not supplied richer normalization. */
 export function normalizeApprovalAction(event: ApprovalRequestedEvent): PermissionActionV2 {
-  if (event.permission) return permissionActionV2Schema.parse(event.permission);
   const effects = new Set(event.possibleEffects);
-  const destructive = effects.has('destructive');
-  const actionClass = effects.has('external_side_effect')
-    ? 'external_side_effect'
-    : effects.has('network')
-      ? 'network'
-      : effects.has('command')
-        ? 'command'
-        : effects.has('filesystem_write') || effects.has('read')
-          ? 'filesystem'
-          : 'other';
-  const operation =
-    actionClass === 'filesystem'
-      ? effects.has('filesystem_write')
-        ? 'filesystem.write'
-        : 'filesystem.read'
-      : actionClass === 'command'
-        ? 'command.execute'
-        : actionClass === 'network'
-          ? 'network.access'
-          : actionClass === 'external_side_effect'
-            ? 'external.perform'
-            : 'other.unknown';
+  const provider = event.permission ? permissionActionV2Schema.parse(event.permission) : undefined;
+  const actionClass = conservativeActionClass(
+    actionClassFromEffects(effects),
+    provider?.actionClass,
+  );
+  const operation = closedOperation(actionClass, effects);
+  const effectsComplete = event.effectsComplete && (provider?.effectsComplete ?? true);
+  const destructive =
+    effects.has('destructive') ||
+    provider?.risk === 'destructive' ||
+    provider?.mcpDestructive === true;
+  const risk = destructive
+    ? 'destructive'
+    : !effectsComplete || actionClass === 'other' || provider?.risk === 'unknown'
+      ? 'unknown'
+      : 'normal';
   return permissionActionV2Schema.parse({
     actionClass,
     operation,
     targetFingerprint: fingerprint(event.target),
     safeTargetSummary: `${actionClass}:${operation}`,
-    risk:
-      !event.effectsComplete || actionClass === 'other'
-        ? 'unknown'
-        : destructive
-          ? 'destructive'
-          : 'normal',
-    effectsComplete: event.effectsComplete,
-    mcpDestructive: false,
+    risk,
+    effectsComplete,
+    mcpDestructive: actionClass === 'mcp' && destructive,
   });
 }
 

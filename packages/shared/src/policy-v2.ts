@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { PROVIDER_IDS } from './provider.js';
-import { utf8ByteLength } from './capabilities-v2.js';
+
+const utf8ByteLength = (value: string): number => new TextEncoder().encode(value).byteLength;
 
 const MAX_PATH_BYTES = 32 * 1024;
 const MAX_SAFE_SUMMARY_BYTES = 512;
@@ -213,6 +214,31 @@ export const workspaceTrustRecordV2Schema = z
 export type FilesystemObjectIdentityV2 = z.infer<typeof filesystemObjectIdentityV2Schema>;
 export type WorkspaceIdentityV2 = z.infer<typeof workspaceIdentityV2Schema>;
 export type WorkspaceTrustRecordV2 = z.infer<typeof workspaceTrustRecordV2Schema>;
+
+export const workspaceInspectRequestV2Schema = z.object({ cwd: canonicalPathSchema }).strict();
+
+export const workspaceTrustViewV2Schema = z
+  .object({
+    schemaVersion: z.literal(1),
+    workspaceId: sha256Schema,
+    incarnation: sha256Schema,
+    displayName: boundedUtf8String(512, 1),
+    reusable: z.boolean(),
+    state: z.enum(['untrusted', 'trusted']),
+  })
+  .strict();
+
+export const workspaceTrustUpdateRequestV2Schema = z
+  .object({
+    cwd: canonicalPathSchema,
+    incarnation: sha256Schema,
+    state: z.enum(['untrusted', 'trusted']),
+  })
+  .strict();
+
+export type WorkspaceInspectRequestV2 = z.infer<typeof workspaceInspectRequestV2Schema>;
+export type WorkspaceTrustViewV2 = z.infer<typeof workspaceTrustViewV2Schema>;
+export type WorkspaceTrustUpdateRequestV2 = z.infer<typeof workspaceTrustUpdateRequestV2Schema>;
 
 export const sandboxStateV2Schema = z.enum([
   'enforced',

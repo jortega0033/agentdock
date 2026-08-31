@@ -1,4 +1,6 @@
 import { createConsoleLogger } from '@agent-dock/agent-runtime';
+import { join } from 'node:path';
+import { AuditStore } from './audit-store.js';
 import { generateToken } from './auth-token.js';
 import {
   DEFAULT_APP_ID,
@@ -10,6 +12,8 @@ import {
 import { buildProviderRegistry } from './providers.js';
 import { buildServer } from './server.js';
 import { SessionManager } from './session-manager.js';
+import { stateDirectory } from './state-directory.js';
+import { WorkspaceTrustStore } from './workspace-trust-store.js';
 
 async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -33,10 +37,25 @@ async function main() {
   const appId = process.env.AGENT_DOCK_APP_ID?.trim() || DEFAULT_APP_ID;
   assertNoLiveDaemon(appId);
   const registry = buildProviderRegistry(logger);
-  const sessionManager = new SessionManager(registry, logger);
+  const durableStateDirectory = stateDirectory({ appId });
+  const auditStore = new AuditStore(join(durableStateDirectory, 'audit-v1.jsonl'));
+  const trustStore = new WorkspaceTrustStore(
+    join(durableStateDirectory, 'workspace-trust-v1.json'),
+  );
+  const sessionManager = new SessionManager(registry, logger, undefined, {
+    auditStore,
+    trustStore,
+  });
   const token = generateToken();
 
-  const app = buildServer({ registry, sessionManager, token, logger });
+  const app = buildServer({
+    registry,
+    sessionManager,
+    token,
+    logger,
+    auditStore,
+    trustStore,
+  });
 
   const requestedPort = Number(process.env.AGENT_DOCK_PORT ?? '0');
   await app.listen({ port: requestedPort, host: '127.0.0.1' });

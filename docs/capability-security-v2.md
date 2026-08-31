@@ -800,6 +800,10 @@ ID with a byte-equivalent canonical payload returns the recorded acknowledgement
 again. Reusing an ID with different content returns `409 command_id_conflict`; a new response to a
 stale, cross-session, or post-terminal request returns `409 stale_interaction`.
 
+The sole responder stream receives a per-connection 256-bit lease outside the event payload. Only
+that live lease may authorize approval or question response commands; observer streams receive no
+lease, and the Electron renderer receives neither the lease nor native correlation IDs.
+
 - Approval allow/deny decisions are forwarded only after the normalized audit record is durable. A
   timeout, responder disconnect, session interrupt, cancellation, daemon shutdown, or audit-store
   failure resolves an approval to `denied`. If the audit store is unavailable, AgentDock denies

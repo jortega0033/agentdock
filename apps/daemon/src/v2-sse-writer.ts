@@ -21,6 +21,7 @@ interface QueuedFrame {
   frame: string;
   sequence: number;
   terminal: boolean;
+  event: AgentEventV2Envelope;
 }
 
 function eventFrame(event: AgentEventV2Envelope): string {
@@ -53,6 +54,7 @@ export class BoundedV2SseWriter {
   constructor(
     private readonly output: V2SseOutput,
     private readonly onClose: () => void,
+    private readonly onHandedOff?: (event: AgentEventV2Envelope) => void,
   ) {}
 
   start(): void {
@@ -77,6 +79,7 @@ export class BoundedV2SseWriter {
       frame,
       sequence: event.sequence,
       terminal,
+      event,
     };
 
     if (this.backpressured) {
@@ -109,6 +112,11 @@ export class BoundedV2SseWriter {
     try {
       ready = this.output.write(queued.frame);
       this.lastHandedOffSequence = queued.sequence;
+      try {
+        this.onHandedOff?.(queued.event);
+      } catch {
+        // Publication bookkeeping cannot break this subscriber's event stream.
+      }
     } catch {
       this.finish();
       return;

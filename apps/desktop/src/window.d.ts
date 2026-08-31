@@ -4,12 +4,22 @@ import type {
   AgentEventV2Envelope,
   AgentSession,
   AgentSessionV2,
+  ApprovalDecisionV2,
+  AuditReadResponseV2,
   CancelSessionV2Response,
   CommandAcknowledgementV2,
   CreateSessionV2Request,
   ProviderId,
   ProviderStatus,
+  ProviderStatusV2,
+  WorkspaceTrustUpdateRequestV2,
+  WorkspaceTrustViewV2,
 } from '@agent-dock/shared';
+import type {
+  RendererInteraction,
+  RendererInteractionResolution,
+  RendererQuestionResponse,
+} from '../electron/interaction-broker.js';
 
 export type DaemonStatus =
   { state: 'connecting' } | { state: 'ready' } | { state: 'unavailable'; error: string };
@@ -24,15 +34,39 @@ export interface CreateSessionInput {
   prompt: string;
 }
 
+export interface InteractionResponseAcknowledgement {
+  status: 'accepted';
+}
+
+export interface AuditReadOptionsV2 {
+  cursor?: string;
+  limit?: number;
+  sessionId?: string;
+}
+
+type WithoutCommandId<T> = T extends unknown ? Omit<T, 'commandId'> : never;
+export type RendererSessionCommand = WithoutCommandId<
+  Exclude<AgentCommandV2, { type: 'approval.respond' | 'question.respond' }>
+>;
+
 export interface AgentDockBridge {
   getDaemonStatus(): Promise<DaemonStatus>;
   onDaemonStatus(callback: (status: DaemonStatus) => void): () => void;
   listProviders(): Promise<ProviderStatus[]>;
+  listProvidersV2(): Promise<ProviderStatusV2[]>;
   createSession(input: CreateSessionInput): Promise<AgentSession>;
   cancelSession(sessionId: string): Promise<void>;
   onSessionEvent(callback: (sessionId: string, event: AgentEvent) => void): () => void;
   createInteractiveSession(input: CreateSessionV2Request): Promise<AgentSessionV2>;
-  sendSessionCommand(command: AgentCommandV2): Promise<CommandAcknowledgementV2>;
+  sendSessionCommand(command: RendererSessionCommand): Promise<CommandAcknowledgementV2>;
+  respondApproval(
+    interactionHandle: string,
+    decision: ApprovalDecisionV2,
+  ): Promise<InteractionResponseAcknowledgement>;
+  answerQuestions(
+    interactionHandle: string,
+    answers: RendererQuestionResponse['answers'],
+  ): Promise<InteractionResponseAcknowledgement>;
   cancelInteractiveSession(sessionId: string): Promise<CancelSessionV2Response>;
   onInteractiveSessionEvent(
     callback: (sessionId: string, event: AgentEventV2Envelope) => void,
@@ -40,6 +74,14 @@ export interface AgentDockBridge {
   onInteractiveSessionStreamNotice(
     callback: (sessionId: string, notice: InteractiveSessionStreamNotice) => void,
   ): () => void;
+  onInteractionRequested(callback: (interaction: RendererInteraction) => void): () => void;
+  onInteractionResolved(callback: (resolution: RendererInteractionResolution) => void): () => void;
+  inspectWorkspace(cwd: string): Promise<WorkspaceTrustViewV2>;
+  setWorkspaceTrust(
+    workspaceId: string,
+    input: WorkspaceTrustUpdateRequestV2,
+  ): Promise<WorkspaceTrustViewV2>;
+  readAudit(options?: AuditReadOptionsV2): Promise<AuditReadResponseV2>;
   selectDirectory(): Promise<string | null>;
 }
 

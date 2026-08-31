@@ -59,16 +59,75 @@ describe('InteractionState', () => {
     expect(expired).toHaveBeenCalledOnce();
   });
 
-  it('uses captured provider budget without consulting wall time again', () => {
+  it('starts a fresh full monotonic budget even after a long unpublished interval', () => {
     const scheduler = new FakeScheduler();
     const expired = vi.fn();
     const state = new InteractionState(expired, scheduler);
-    state.register({ ...approval(), providerRemainingMs: 2_000 });
+    state.register(approval());
+    scheduler.advance(3_600_000);
     state.markPublished('request-1');
+    scheduler.advance(299_999);
+    expect(expired).not.toHaveBeenCalled();
+    scheduler.advance(1);
+    expect(expired).toHaveBeenCalledOnce();
+  });
 
+  it('keeps the full local budget after an unpublished delay when the provider deadline is later', () => {
+    const scheduler = new FakeScheduler();
+    const expired = vi.fn();
+    const wallNow = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const state = new InteractionState(expired, scheduler);
+    state.register({ ...approval(), providerDeadlineAtMs: 1_000_000 + 600_000 });
+    wallNow.mockRestore();
+
+    scheduler.advance(120_000);
+    expect(state.markPublished('request-1')).toBe(true);
+    scheduler.advance(299_999);
+    expect(expired).not.toHaveBeenCalled();
+    scheduler.advance(1);
+    expect(expired).toHaveBeenCalledOnce();
+  });
+
+  it('uses the shorter provider deadline after publication', () => {
+    const scheduler = new FakeScheduler();
+    const expired = vi.fn();
+    const wallNow = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const state = new InteractionState(expired, scheduler);
+    state.register({ ...approval(), providerDeadlineAtMs: 1_000_000 + 2_000 });
+    wallNow.mockRestore();
+
+    expect(state.markPublished('request-1')).toBe(true);
     scheduler.advance(1_999);
     expect(expired).not.toHaveBeenCalled();
     scheduler.advance(1);
+    expect(expired).toHaveBeenCalledOnce();
+  });
+
+  it('does not extend a provider deadline after a wall-clock rollback', () => {
+    const scheduler = new FakeScheduler();
+    const expired = vi.fn();
+    const wallNow = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const state = new InteractionState(expired, scheduler);
+    state.register({ ...approval(), providerDeadlineAtMs: 1_000_000 + 2_000 });
+    wallNow.mockReturnValue(1);
+
+    expect(state.markPublished('request-1')).toBe(true);
+    scheduler.advance(2_000);
+    expect(expired).toHaveBeenCalledOnce();
+    wallNow.mockRestore();
+  });
+
+  it('expires immediately when the provider deadline elapsed before publication', () => {
+    const scheduler = new FakeScheduler();
+    const expired = vi.fn();
+    const wallNow = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+    const state = new InteractionState(expired, scheduler);
+    state.register({ ...approval(), providerDeadlineAtMs: 1_000_000 + 2_000 });
+    wallNow.mockRestore();
+
+    scheduler.advance(2_001);
+    expect(state.markPublished('request-1')).toBe(true);
+    scheduler.advance(0);
     expect(expired).toHaveBeenCalledOnce();
   });
 

@@ -617,15 +617,25 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
       record.kind === 'question'
         ? [record, ...this.takePendingTurnInteractions(record.turnId)]
         : [record];
-    await this.resolveInteractions(records, reason, reason !== 'disconnect');
-    if (
-      record.kind === 'question' &&
-      reason !== 'interrupt' &&
-      !this.terminal &&
-      !this.closing &&
-      !this.failing
-    ) {
-      await this.interruptAndConfirmIdle();
+    try {
+      // This public boundary is used for daemon/responder loss, not provider transport loss. The
+      // provider is still live and must receive the fail-closed denial/cancellation.
+      await this.resolveInteractions(records, reason, true);
+      if (
+        record.kind === 'question' &&
+        reason !== 'interrupt' &&
+        !this.terminal &&
+        !this.closing &&
+        !this.failing
+      ) {
+        await this.interruptAndConfirmIdle();
+      }
+    } catch (error) {
+      await this.fail(
+        eventCode(error) ?? 'provider_crash',
+        'provider interaction resolution failed',
+      );
+      throw error;
     }
   }
 
@@ -1066,6 +1076,18 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
       void this.fail('provider_correlation_error', 'provider resolved an unknown interaction');
       return false;
     }
+    if (this.options.interactionOwner === 'daemon') {
+      if (this.resolvingInteractions.get(event.requestId) !== record) {
+        void this.fail(
+          'provider_correlation_error',
+          'provider resolved a daemon-owned interaction without a dispatched response',
+        );
+      }
+      // The provider controls this event's decision/answers. Even while a daemon command is in
+      // flight, only the already-validated daemon command may define the published resolution.
+      // Keep the record resolving so send() synthesizes that authoritative event on success.
+      return false;
+    }
     this.interactions.delete(record.requestId);
     this.resolvingInteractions.delete(record.requestId);
     if (record.timer) clearTimeout(record.timer);
@@ -1217,7 +1239,7 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
       this.rememberResolved(record);
       this.publishSafeResolution(record, reason);
     }
-    if (!notifyProvider || reason === 'disconnect') return;
+    if (!notifyProvider) return;
     await timeout(
       (async () => {
         for (const record of records) {

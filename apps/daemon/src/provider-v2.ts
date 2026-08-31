@@ -6,6 +6,7 @@ import {
   legacyTransports,
   toProviderStatusV2 as toLegacyProviderStatusV2,
 } from './v2-legacy-provider.js';
+import { providerSandboxStatus } from './sandbox-status.js';
 
 export interface ProviderV2Manifest {
   interactive: boolean;
@@ -61,5 +62,6 @@ export function toProviderStatusV2(
     ...toLegacyProviderStatusV2(status),
     transports: manifest.transports,
     capabilities: manifest.supportRecords,
+    sandbox: providerSandboxStatus(status.id, manifest.interactive),
   };
 }

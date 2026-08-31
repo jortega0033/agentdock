@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
+  isApprovalDecisionAllowed,
+  permissionKey,
   utf8ByteLength,
   type AgentCommandV2,
   type AgentEvent,
@@ -8,6 +10,9 @@ import {
   type AgentSession,
   type CapabilitySelection,
   type CommandAcknowledgementV2,
+  type AuditActorV2,
+  type ApprovalDecisionV2,
+  type PermissionActionV2,
   type ProviderId,
   type ProviderTransportV2,
 } from '@agent-dock/shared';
@@ -20,6 +25,11 @@ import {
   type ProviderSessionHandle,
 } from '@agent-dock/agent-runtime';
 import { MemorySessionStore, type SessionStore } from './session-store.js';
+import type { AuditStore } from './audit-store.js';
+import { InteractionState, type PendingInteraction } from './interaction-state.js';
+import { evaluatePermissionPolicy, normalizeApprovalAction } from './permission-policy.js';
+import type { WorkspaceTrustStore } from './workspace-trust-store.js';
+import { revalidateWorkspaceIdentity, type WorkspaceIdentity } from './workspace-identity.js';
 
 interface RuntimeStateBase {
   protocolVersion: 1 | 2;
@@ -38,7 +48,6 @@ interface LegacyRuntimeState extends RuntimeStateBase {
 interface CommandRecord {
   canonicalPayload: string;
   result: Promise<DispatchResult>;
-  settled: boolean;
 }
 
 interface StoredInteractiveEvent {
@@ -59,6 +68,11 @@ interface InteractiveRuntimeState extends RuntimeStateBase {
   pendingCommands: number;
   pendingCommandBytes: number;
   commandLedger: Map<string, CommandRecord>;
+  interactions: InteractionState;
+  approvalActions: Map<string, PermissionActionV2>;
+  sessionGrants: Set<string>;
+  transport: string;
+  workspace?: WorkspaceIdentity;
 }
 
 interface PendingInteractiveStart {
@@ -70,6 +84,7 @@ interface PendingInteractiveStart {
 type RuntimeState = LegacyRuntimeState | InteractiveRuntimeState;
 
 export type DispatchFailureCode =
+  | 'audit_failure'
   | 'command_id_conflict'
   | 'command_out_of_bounds'
   | 'command_rejected'
@@ -77,7 +92,22 @@ export type DispatchFailureCode =
   | 'session_not_capable'
   | 'session_not_found'
   | 'session_terminal'
-  | 'stale_interaction';
+  | 'stale_interaction'
+  | 'workspace_untrusted';
+
+export interface SessionManagerSecurityOptions {
+  auditStore?: AuditStore;
+  trustStore?: WorkspaceTrustStore;
+}
+
+export class WorkspaceAccessError extends Error {
+  readonly code = 'workspace_untrusted';
+
+  constructor(message = 'workspace is untrusted or its incarnation changed') {
+    super(message);
+    this.name = 'WorkspaceAccessError';
+  }
+}
 
 export type DispatchResult =
   | { ok: true; acknowledgement: CommandAcknowledgementV2 }
@@ -119,12 +149,14 @@ export class SessionManager {
   private readonly pendingInteractiveStarts = new Map<string, PendingInteractiveStart>();
   private readonly completedOrder: string[] = [];
   private readonly shutdownController = new AbortController();
+  private readonly blockedWorkspaces = new Set<string>();
   private shuttingDown = false;
 
   constructor(
     private readonly registry: ProviderRegistry,
     private readonly logger: Logger,
     private readonly store: SessionStore = new MemorySessionStore(),
+    private readonly security: SessionManagerSecurityOptions = {},
   ) {}
 
   /** Existing one-shot path. Its process and event contract deliberately remains unchanged. */
@@ -173,10 +205,12 @@ export class SessionManager {
     executionId: string,
     turnId: string,
     signal?: AbortSignal,
+    workspace?: WorkspaceIdentity,
   ): Promise<AgentSession> {
     if (this.shuttingDown) {
       throw new InteractiveSessionError('session_terminal', 'session manager is shutting down');
     }
+    if (workspace) await this.assertWorkspaceTrusted(workspace);
     const providerImpl = this.registry.get(provider);
     if (!providerImpl?.startInteractiveSession) {
       throw new Error(`provider has no interactive transport: ${provider}`);
@@ -207,10 +241,13 @@ export class SessionManager {
         transport,
         executionId,
         turnId,
+        interactionOwner: 'daemon',
         signal: controller.signal,
       });
-      if (controller.signal.aborted || this.shuttingDown) {
+      const workspaceStillTrusted = workspace ? await this.workspaceIsTrusted(workspace) : true;
+      if (controller.signal.aborted || this.shuttingDown || !workspaceStillTrusted) {
         await handle.close();
+        if (!workspaceStillTrusted) throw new WorkspaceAccessError();
         throw new InteractiveSessionError('session_terminal', 'session start was cancelled');
       }
       const runtime: InteractiveRuntimeState = {
@@ -226,6 +263,13 @@ export class SessionManager {
         pendingCommands: 0,
         pendingCommandBytes: 0,
         commandLedger: new Map(),
+        interactions: new InteractionState((interaction) => {
+          void this.expireInteraction(id, interaction, 'timeout');
+        }),
+        approvalActions: new Map(),
+        sessionGrants: new Set(),
+        transport: transport.id,
+        ...(workspace ? { workspace } : {}),
         done: Promise.resolve(),
       };
       this.runtime.set(id, runtime);
@@ -302,7 +346,9 @@ export class SessionManager {
     this.mutateSession(id, (session) => {
       session.status = 'running';
     });
-    for await (const event of runtime.handle.events) {
+    for await (const sourceEvent of runtime.handle.events) {
+      const event = await this.prepareInteractiveEvent(id, runtime, sourceEvent);
+      if (!event) continue;
       this.mutateSession(id, (session) => this.applyInteractiveStatus(session, event));
       const index = runtime.nextEventIndex;
       runtime.nextEventIndex += 1;
@@ -319,6 +365,165 @@ export class SessionManager {
       }
     }
     this.markCompleted(id);
+  }
+
+  private async prepareInteractiveEvent(
+    id: string,
+    runtime: InteractiveRuntimeState,
+    event: AgentEventV2,
+  ): Promise<AgentEventV2 | undefined> {
+    if (event.type === 'approval.requested' || event.type === 'question.requested') {
+      const providerRemainingMs = Math.max(0, Date.parse(event.deadlineAt) - Date.now());
+      const registered = runtime.interactions.register({
+        requestId: event.requestId,
+        turnId: event.turnId,
+        kind: event.type === 'approval.requested' ? 'approval' : 'question',
+        ...(Number.isFinite(providerRemainingMs) ? { providerRemainingMs } : {}),
+      });
+      if (!registered) {
+        this.logger.warn('provider interaction id was already pending', {
+          sessionId: id,
+          requestId: event.requestId,
+        });
+        return undefined;
+      }
+      if (event.type === 'question.requested') return event;
+
+      const action = normalizeApprovalAction(event);
+      runtime.approvalActions.set(event.requestId, action);
+      const trustState = await this.runtimeTrustState(runtime);
+      const policy = evaluatePermissionPolicy(action, {
+        trustState,
+        grants: runtime.sessionGrants,
+      });
+      if (policy.outcome === 'allow') {
+        await this.resolveAutomaticApproval(id, runtime, event, action, 'allow_once', 'policy');
+        return undefined;
+      }
+      if (policy.outcome === 'deny') {
+        await this.resolveAutomaticApproval(id, runtime, event, action, 'deny', 'policy');
+        return undefined;
+      }
+      return {
+        ...event,
+        permission: action,
+        allowedDecisions: policy.allowedDecisions,
+      };
+    }
+
+    if (
+      event.type === 'approval.resolved' ||
+      event.type === 'question.resolved' ||
+      event.type === 'question.cancelled'
+    ) {
+      runtime.interactions.removeResolved(event.requestId);
+      runtime.approvalActions.delete(event.requestId);
+    }
+    return event;
+  }
+
+  private async resolveAutomaticApproval(
+    id: string,
+    runtime: InteractiveRuntimeState,
+    event: Extract<AgentEventV2, { type: 'approval.requested' }>,
+    action: PermissionActionV2,
+    decision: 'allow_once' | 'deny',
+    actor: AuditActorV2,
+  ): Promise<void> {
+    const claimed = runtime.interactions.claim(event.requestId, {
+      turnId: event.turnId,
+      kind: 'approval',
+    });
+    if (!claimed) return;
+    let providerDecision = decision;
+    try {
+      await this.appendApprovalAudit(id, runtime, event, action, decision, actor);
+    } catch (error) {
+      providerDecision = 'deny';
+      this.logger.warn('approval audit failed; denying provider request', {
+        sessionId: id,
+        requestId: event.requestId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    try {
+      await runtime.handle.send({
+        type: 'approval.respond',
+        commandId: randomUUID(),
+        sessionId: id,
+        turnId: event.turnId,
+        requestId: event.requestId,
+        decision: providerDecision,
+      });
+    } finally {
+      runtime.interactions.settle(event.requestId);
+      runtime.approvalActions.delete(event.requestId);
+    }
+  }
+
+  private async appendApprovalAudit(
+    id: string,
+    runtime: InteractiveRuntimeState,
+    event: Pick<Extract<AgentEventV2, { type: 'approval.requested' }>, 'requestId' | 'turnId'>,
+    action: PermissionActionV2,
+    decision: ApprovalDecisionV2,
+    actor: AuditActorV2,
+  ): Promise<void> {
+    const audit = this.security.auditStore;
+    if (!audit) return;
+    const session = this.store.get(id);
+    if (!session || !runtime.workspace) throw new Error('approval audit context is incomplete');
+    await audit.append({
+      schemaVersion: 1,
+      entryId: randomUUID(),
+      recordedAt: new Date().toISOString(),
+      sessionId: id,
+      turnId: event.turnId,
+      requestId: event.requestId,
+      providerId: session.provider,
+      transport: runtime.transport,
+      workspaceFingerprint: runtime.workspace.incarnation,
+      action,
+      permissionKey: permissionKey(action),
+      decision,
+      actor,
+    });
+  }
+
+  private async runtimeTrustState(
+    runtime: InteractiveRuntimeState,
+  ): Promise<'trusted' | 'untrusted' | 'revoking'> {
+    const workspace = runtime.workspace;
+    if (!workspace) return 'trusted';
+    if (this.blockedWorkspaces.has(workspace.workspaceId)) return 'revoking';
+    return (await this.workspaceIsTrusted(workspace)) ? 'trusted' : 'untrusted';
+  }
+
+  private async expireInteraction(
+    id: string,
+    interaction: PendingInteraction,
+    reason: 'disconnect' | 'timeout' | 'trust_revoked',
+  ): Promise<void> {
+    const runtime = this.runtime.get(id);
+    if (!runtime || runtime.kind !== 'interactive') return;
+    const claimed =
+      interaction.kind === 'question'
+        ? [interaction, ...runtime.interactions.claimTurn(interaction.turnId)]
+        : [interaction];
+    try {
+      await runtime.handle.resolveInteraction(interaction.requestId, reason);
+    } catch (error) {
+      this.logger.warn('failed to resolve an expired interaction', {
+        sessionId: id,
+        requestId: interaction.requestId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      for (const record of claimed) {
+        runtime.interactions.settle(record.requestId);
+        runtime.approvalActions.delete(record.requestId);
+      }
+    }
   }
 
   private recordInteractiveEvent(
@@ -476,6 +681,78 @@ export class SessionManager {
     return runtime?.kind === 'interactive' ? runtime.acceptedWork : 'unknown';
   }
 
+  markInteractionPublished(id: string, requestId: string): boolean {
+    const runtime = this.runtime.get(id);
+    return runtime?.kind === 'interactive' ? runtime.interactions.markPublished(requestId) : false;
+  }
+
+  async responderDisconnected(id: string): Promise<void> {
+    const runtime = this.runtime.get(id);
+    if (!runtime || runtime.kind !== 'interactive') return;
+    await this.resolveClaimedInteractions(
+      id,
+      runtime,
+      runtime.interactions.claimAll(),
+      'disconnect',
+    );
+  }
+
+  /** Synchronous first step of revocation: no new command can cross this workspace boundary. */
+  blockWorkspace(workspaceId: string): void {
+    this.blockedWorkspaces.add(workspaceId);
+  }
+
+  allowWorkspace(workspaceId: string): void {
+    this.blockedWorkspaces.delete(workspaceId);
+  }
+
+  async revokeWorkspace(workspaceId: string): Promise<void> {
+    this.blockWorkspace(workspaceId);
+    const affected = [...this.runtime.entries()].filter(
+      (entry): entry is [string, InteractiveRuntimeState] =>
+        entry[1].kind === 'interactive' && entry[1].workspace?.workspaceId === workspaceId,
+    );
+    for (const [id, runtime] of affected) {
+      runtime.sessionGrants.clear();
+      await this.resolveClaimedInteractions(
+        id,
+        runtime,
+        runtime.interactions.claimAll(),
+        'trust_revoked',
+      );
+    }
+    await Promise.allSettled(affected.map(([, runtime]) => this.closeRuntime(runtime)));
+    await Promise.allSettled(affected.map(([, runtime]) => runtime.done));
+  }
+
+  private async resolveClaimedInteractions(
+    id: string,
+    runtime: InteractiveRuntimeState,
+    claimed: PendingInteraction[],
+    reason: 'disconnect' | 'trust_revoked',
+  ): Promise<void> {
+    const resolvedQuestionTurns = new Set<string>();
+    for (const interaction of claimed) {
+      if (interaction.kind === 'question') {
+        if (resolvedQuestionTurns.has(interaction.turnId)) continue;
+        resolvedQuestionTurns.add(interaction.turnId);
+      }
+      try {
+        await runtime.handle.resolveInteraction(interaction.requestId, reason);
+      } catch (error) {
+        this.logger.warn('failed to resolve a pending interaction', {
+          sessionId: id,
+          requestId: interaction.requestId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    for (const interaction of claimed) {
+      runtime.interactions.settle(interaction.requestId);
+      runtime.approvalActions.delete(interaction.requestId);
+    }
+  }
+
   dispatch(
     id: string,
     command: AgentCommandV2,
@@ -499,6 +776,9 @@ export class SessionManager {
     if (newCommandFailure) {
       return Promise.resolve(this.dispatchFailure(newCommandFailure));
     }
+    if (runtime.commandLedger.size >= MAX_COMMAND_LEDGER_ENTRIES) {
+      return Promise.resolve(this.dispatchFailure('session_backpressure'));
+    }
     const bytes = utf8ByteLength(canonicalPayload);
     if (
       runtime.pendingCommands >= MAX_PENDING_COMMANDS ||
@@ -515,16 +795,11 @@ export class SessionManager {
         runtime.pendingCommands -= 1;
         runtime.pendingCommandBytes -= bytes;
       });
-    const record: CommandRecord = { canonicalPayload, result, settled: false };
-    runtime.commandLedger.set(command.commandId, record);
+    runtime.commandLedger.set(command.commandId, { canonicalPayload, result });
     runtime.dispatchTail = result.then(
       () => undefined,
       () => undefined,
     );
-    void result.then(() => {
-      record.settled = true;
-      this.pruneCommandLedger(runtime);
-    });
     return result;
   }
 
@@ -537,19 +812,44 @@ export class SessionManager {
     if (!session || !isSessionActive(session) || this.runtime.get(id) !== runtime) {
       return this.dispatchFailure('session_terminal');
     }
-    try {
-      if (command.type === 'session.interrupt') await runtime.handle.interrupt();
-      else await runtime.handle.send(command);
-      runtime.acceptedWork = 'accepted';
-      return {
-        ok: true,
-        acknowledgement: {
-          status: 'accepted',
-          commandId: command.commandId,
-          sessionId: command.sessionId,
+    if (runtime.workspace && !(await this.workspaceIsTrusted(runtime.workspace))) {
+      if (command.type === 'approval.respond' || command.type === 'question.respond') {
+        const claimed = runtime.interactions.claim(command.requestId, {
           turnId: command.turnId,
-        },
-      };
+          kind: command.type === 'approval.respond' ? 'approval' : 'question',
+        });
+        if (claimed) await this.expireInteraction(id, claimed, 'trust_revoked');
+      }
+      return this.dispatchFailure('workspace_untrusted');
+    }
+    try {
+      if (command.type === 'approval.respond') {
+        return await this.dispatchApproval(id, runtime, command);
+      }
+      if (command.type === 'question.respond') {
+        const interaction = runtime.interactions.claim(command.requestId, {
+          turnId: command.turnId,
+          kind: 'question',
+        });
+        if (!interaction) return this.dispatchFailure('stale_interaction');
+        try {
+          await runtime.handle.send(command);
+        } finally {
+          runtime.interactions.settle(command.requestId);
+        }
+      } else if (command.type === 'session.interrupt') {
+        const pending = runtime.interactions.claimAll();
+        try {
+          await runtime.handle.interrupt();
+        } finally {
+          for (const interaction of pending) {
+            runtime.interactions.settle(interaction.requestId);
+            runtime.approvalActions.delete(interaction.requestId);
+          }
+        }
+      } else await runtime.handle.send(command);
+      runtime.acceptedWork = 'accepted';
+      return this.acknowledgement(command);
     } catch (error) {
       if (error instanceof InteractiveSessionError && error.code === 'stale_interaction') {
         return this.dispatchFailure('stale_interaction');
@@ -561,8 +861,84 @@ export class SessionManager {
     }
   }
 
+  private async dispatchApproval(
+    id: string,
+    runtime: InteractiveRuntimeState,
+    command: Extract<AgentCommandV2, { type: 'approval.respond' }>,
+  ): Promise<DispatchResult> {
+    const action = runtime.approvalActions.get(command.requestId);
+    const pending = runtime.interactions.get(command.requestId);
+    if (
+      !action ||
+      !pending ||
+      pending.state === 'resolving' ||
+      pending.turnId !== command.turnId ||
+      pending.kind !== 'approval'
+    ) {
+      return this.dispatchFailure('stale_interaction');
+    }
+    if (!isApprovalDecisionAllowed(action, command.decision)) {
+      return this.dispatchFailure('command_rejected');
+    }
+    if (
+      !runtime.interactions.claim(command.requestId, {
+        turnId: command.turnId,
+        kind: 'approval',
+      })
+    ) {
+      return this.dispatchFailure('stale_interaction');
+    }
+
+    let auditFailed = false;
+    try {
+      await this.appendApprovalAudit(id, runtime, command, action, command.decision, 'user');
+    } catch (error) {
+      auditFailed = true;
+      this.logger.warn('approval audit failed', {
+        sessionId: id,
+        requestId: command.requestId,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    const allowRequested = command.decision !== 'deny';
+    const workspaceStillTrusted = runtime.workspace
+      ? await this.workspaceIsTrusted(runtime.workspace)
+      : true;
+    const providerDecision =
+      allowRequested && !auditFailed && workspaceStillTrusted ? 'allow_once' : 'deny';
+    try {
+      await runtime.handle.send({ ...command, decision: providerDecision });
+      if (providerDecision === 'allow_once' && command.decision === 'allow_session') {
+        runtime.sessionGrants.add(permissionKey(action));
+      }
+    } finally {
+      runtime.interactions.settle(command.requestId);
+      runtime.approvalActions.delete(command.requestId);
+    }
+    if (allowRequested && auditFailed) return this.dispatchFailure('audit_failure');
+    if (allowRequested && !workspaceStillTrusted) {
+      return this.dispatchFailure('workspace_untrusted');
+    }
+    runtime.acceptedWork = 'accepted';
+    return this.acknowledgement(command);
+  }
+
+  private acknowledgement(command: AgentCommandV2): DispatchResult {
+    return {
+      ok: true,
+      acknowledgement: {
+        status: 'accepted',
+        commandId: command.commandId,
+        sessionId: command.sessionId,
+        turnId: command.turnId,
+      },
+    };
+  }
+
   private dispatchFailure(code: DispatchFailureCode): DispatchResult {
     const messages: Record<DispatchFailureCode, string> = {
+      audit_failure: 'approval audit failed; the action was denied',
       command_id_conflict: 'command id was reused with a different payload',
       command_out_of_bounds: 'command exceeds the frozen capability constraints',
       command_rejected: 'provider rejected the command',
@@ -571,16 +947,9 @@ export class SessionManager {
       session_not_found: 'session not found',
       session_terminal: 'commands cannot reach a terminal session',
       stale_interaction: 'interaction is stale or belongs to another session or turn',
+      workspace_untrusted: 'workspace is untrusted or its incarnation changed',
     };
     return { ok: false, code, message: messages[code] };
-  }
-
-  private pruneCommandLedger(runtime: InteractiveRuntimeState): void {
-    while (runtime.commandLedger.size > MAX_COMMAND_LEDGER_ENTRIES) {
-      const entry = [...runtime.commandLedger.entries()].find(([, record]) => record.settled);
-      if (!entry) return;
-      runtime.commandLedger.delete(entry[0]);
-    }
   }
 
   async cancel(id: string, protocolVersion?: 1 | 2): Promise<boolean> {
@@ -672,8 +1041,26 @@ export class SessionManager {
     return this.shutdownController.signal;
   }
 
+  private async assertWorkspaceTrusted(workspace: WorkspaceIdentity): Promise<void> {
+    if (!(await this.workspaceIsTrusted(workspace))) throw new WorkspaceAccessError();
+  }
+
+  private async workspaceIsTrusted(workspace: WorkspaceIdentity): Promise<boolean> {
+    if (this.blockedWorkspaces.has(workspace.workspaceId) || !workspace.reusable) return false;
+    if (!(await revalidateWorkspaceIdentity(workspace))) return false;
+    const trustStore = this.security.trustStore;
+    if (!trustStore) return false;
+    return (await trustStore.inspect(workspace)).state === 'trusted';
+  }
+
   private closeRuntime(runtime: RuntimeState): Promise<void> {
-    return runtime.kind === 'legacy' ? runtime.handle.cancel() : runtime.handle.close();
+    if (runtime.kind === 'legacy') return runtime.handle.cancel();
+    runtime.sessionGrants.clear();
+    for (const interaction of runtime.interactions.claimAll()) {
+      runtime.interactions.settle(interaction.requestId);
+      runtime.approvalActions.delete(interaction.requestId);
+    }
+    return runtime.handle.close();
   }
 
   private async waitForDone(runtime: RuntimeState, timeoutMs: number): Promise<void> {

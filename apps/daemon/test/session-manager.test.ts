@@ -560,6 +560,7 @@ function makeControllableInteractiveSession(options: InteractiveSessionOptions =
       sent.push(command);
       await options.send?.(command, index);
     },
+    resolveInteraction: async () => undefined,
     interrupt: async () => {
       interruptCalls += 1;
       await options.interrupt?.();

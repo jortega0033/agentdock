@@ -12,6 +12,7 @@ import {
   type CapabilitySelection,
   type Effect,
 } from './capabilities-v2.js';
+import { approvalDecisionV2Schema, permissionActionV2Schema } from './policy-v2.js';
 
 const MAX_CONTENT_BYTES = 256 * 1024;
 const MAX_COMMAND_BYTES = 1024 * 1024;
@@ -255,7 +256,7 @@ export const approvalResponseCommandV2Schema = z
     type: z.literal('approval.respond'),
     turnId: turnIdSchema,
     requestId: requestIdSchema,
-    decision: z.enum(['allow_once', 'deny']),
+    decision: approvalDecisionV2Schema,
   })
   .strict();
 
@@ -544,6 +545,8 @@ const approvalRequestedEventSchema = z
     reason: utf8ByteLimitedStringSchema(4 * 1024).optional(),
     possibleEffects: uniqueEffectsSchema,
     effectsComplete: z.boolean(),
+    permission: permissionActionV2Schema.optional(),
+    allowedDecisions: z.array(approvalDecisionV2Schema).min(1).max(3).optional(),
     deadlineAt: z.string().datetime({ offset: true }),
   })
   .strict()
@@ -588,6 +591,7 @@ const questionCancelledEventSchema = z
       'interrupt',
       'cancel',
       'shutdown',
+      'trust_revoked',
       'provider_cancelled',
     ]),
   })

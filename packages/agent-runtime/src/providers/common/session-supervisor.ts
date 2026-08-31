@@ -599,6 +599,36 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
     }
   }
 
+  async resolveInteraction(
+    requestId: string,
+    reason:
+      'cancel' | 'disconnect' | 'interrupt' | 'overflow' | 'shutdown' | 'timeout' | 'trust_revoked',
+  ): Promise<void> {
+    this.assertOpen();
+    const record = this.interactions.get(requestId);
+    if (!record) {
+      throw new InteractiveSessionError(
+        'stale_interaction',
+        'interaction is stale or belongs to another turn',
+      );
+    }
+    this.interactions.delete(requestId);
+    const records =
+      record.kind === 'question'
+        ? [record, ...this.takePendingTurnInteractions(record.turnId)]
+        : [record];
+    await this.resolveInteractions(records, reason, reason !== 'disconnect');
+    if (
+      record.kind === 'question' &&
+      reason !== 'interrupt' &&
+      !this.terminal &&
+      !this.closing &&
+      !this.failing
+    ) {
+      await this.interruptAndConfirmIdle();
+    }
+  }
+
   async close(): Promise<void> {
     if (this.failing) return this.failing;
     if (this.closing) return this.closing;
@@ -890,7 +920,9 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
       kind: event.type === 'approval.requested' ? 'approval' : 'question',
       requestId: event.requestId,
       turnId: event.turnId,
-      timer: setTimeout(() => void this.timeoutInteraction(event.requestId), delay),
+      ...(this.options.interactionOwner === 'daemon'
+        ? {}
+        : { timer: setTimeout(() => void this.timeoutInteraction(event.requestId), delay) }),
     };
     record.timer?.unref?.();
     this.interactions.set(event.requestId, record);
@@ -1073,7 +1105,8 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
 
   private publishSafeResolution(
     record: InteractionRecord,
-    reason: 'cancel' | 'disconnect' | 'interrupt' | 'overflow' | 'shutdown' | 'timeout',
+    reason:
+      'cancel' | 'disconnect' | 'interrupt' | 'overflow' | 'shutdown' | 'timeout' | 'trust_revoked',
   ): void {
     if (record.timer) clearTimeout(record.timer);
     if (record.kind === 'approval') {
@@ -1175,7 +1208,8 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
 
   private async resolveInteractions(
     records: InteractionRecord[],
-    reason: 'cancel' | 'disconnect' | 'interrupt' | 'overflow' | 'shutdown' | 'timeout',
+    reason:
+      'cancel' | 'disconnect' | 'interrupt' | 'overflow' | 'shutdown' | 'timeout' | 'trust_revoked',
     notifyProvider: boolean,
     responseTimeoutMs = this.commandTimeoutMs,
   ): Promise<void> {

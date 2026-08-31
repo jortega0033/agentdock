@@ -6,6 +6,7 @@ import type { InteractiveProviderTransport, StartInteractiveSessionOptions } fro
 import {
   buildClaudeSdkVersionProbeEnvironment,
   ClaudeProvider,
+  parseClaudeSdkVersion,
   type ClaudeProviderDependencies,
 } from '../src/providers/claude/adapter.js';
 import {
@@ -140,6 +141,19 @@ function dependencies(
 }
 
 describe('ClaudeProvider Agent SDK admission', () => {
+  it.each([
+    ['claude 2.1.251', '2.1.251'],
+    ['v2.1.251-beta.1+build.7', '2.1.251-beta.1+build.7'],
+  ])('parses bounded SDK version output: %s', (output, expected) => {
+    expect(parseClaudeSdkVersion(output)).toBe(expected);
+  });
+
+  it('bounds malformed version output before parsing', () => {
+    const malformed = `${'9'.repeat(100_000)}.${'9'.repeat(100_000)}.${'9'.repeat(100_000)}`;
+    expect(parseClaudeSdkVersion(malformed)).toBeUndefined();
+    expect(parseClaudeSdkVersion('x'.repeat(100_000))).toBeUndefined();
+  });
+
   it('keeps SDK version probes credential-free and control-free', () => {
     expect(
       buildClaudeSdkVersionProbeEnvironment({

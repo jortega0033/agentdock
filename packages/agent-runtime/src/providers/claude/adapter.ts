@@ -43,7 +43,14 @@ export interface ClaudeProviderDependencies {
 }
 
 export function parseClaudeSdkVersion(output: string): string | undefined {
-  return output.match(/\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?/)?.[0];
+  // Version output is provider-controlled; inspect a bounded prefix so malformed output cannot
+  // force an unbounded regex scan or pathological backtracking.
+  const version = output
+    .slice(0, 4_096)
+    .match(
+      /(?<!\d)\d{1,9}\.\d{1,9}\.\d{1,9}(?:-[0-9A-Za-z]{1,32}(?:\.[0-9A-Za-z]{1,32}){0,8})?(?:\+[0-9A-Za-z]{1,32}(?:\.[0-9A-Za-z]{1,32}){0,8})?\b/,
+    );
+  return version?.[0];
 }
 
 /**

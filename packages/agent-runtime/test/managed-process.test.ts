@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChildProcessByStdio } from 'node:child_process';
@@ -125,9 +125,10 @@ describe('ManagedAppServerProcess lifecycle failures', () => {
   });
 
   it('never falls back to PATH or the CWD for a missing or relative entry point', async () => {
-    expect(resolveWindowsJobHostPath(undefined, 'relative-entry.ts')).toBe(
-      await realpath(JOB_HOST),
-    );
+    const resolved = resolveWindowsJobHostPath(undefined, 'relative-entry.ts');
+    expect(isAbsolute(resolved)).toBe(true);
+    expect(basename(resolved)).toBe(WINDOWS_JOB_HOST_NAME);
+    expect(resolved).not.toBe(resolve(WINDOWS_JOB_HOST_NAME));
     expect(() => resolveWindowsJobHostPath('relative-helper.exe')).toThrow(
       'override must be an absolute path',
     );

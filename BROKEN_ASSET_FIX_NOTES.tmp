@@ -1,1 +1,0 @@
-This temporary file should not be committed.

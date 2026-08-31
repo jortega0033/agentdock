@@ -379,7 +379,7 @@ export const providerRuntimeMetadataV2Schema = z
     cliVersion: providerRuntimeVersionV2Schema.optional(),
     schemaVersion: providerRuntimeVersionV2Schema.optional(),
     fixtureSet: providerRuntimeVersionV2Schema.optional(),
-    requestedTransportMode: z.enum(['auto', 'app-server', 'exec']).optional(),
+    requestedTransportMode: z.enum(['auto', 'app-server', 'exec', 'sdk', 'cli']).optional(),
     fallbackReason: providerFallbackReasonV2Schema.optional(),
   })
   .strict();

@@ -122,6 +122,22 @@ describe('providerCapabilitiesSchema', () => {
 });
 
 describe('providerStatusSchema', () => {
+  it.each(['claude_subscription', 'bedrock', 'vertex', 'foundry'] as const)(
+    'accepts the non-secret Claude auth source %s',
+    (authSource) => {
+      expect(
+        providerStatusSchema.safeParse({
+          id: 'claude',
+          name: 'Claude Agent',
+          installed: true,
+          authenticated: 'authenticated',
+          authSource,
+          capabilities: {},
+        }).success,
+      ).toBe(true);
+    },
+  );
+
   it('accepts a full provider status with capabilities', () => {
     const status = {
       id: 'claude',

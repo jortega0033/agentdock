@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseClaudeAuthStatus } from '../src/providers/claude/detect.js';
+import { parseClaudeAuthSource, parseClaudeAuthStatus } from '../src/providers/claude/detect.js';
 
 describe('parseClaudeAuthStatus — pure parser (AD-16)', () => {
   it('returns "authenticated" for { loggedIn: true }', () => {
@@ -34,9 +34,34 @@ describe('parseClaudeAuthStatus — pure parser (AD-16)', () => {
   });
 
   it('tolerates unrecognized extra fields alongside a valid loggedIn', () => {
-    expect(parseClaudeAuthStatus(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', extra: { nested: 1 } }))).toBe(
-      'authenticated',
-    );
+    expect(
+      parseClaudeAuthStatus(
+        JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', extra: { nested: 1 } }),
+      ),
+    ).toBe('authenticated');
+  });
+});
+
+describe('parseClaudeAuthSource — bounded non-secret label', () => {
+  it.each([
+    ['claude.ai', 'claude_subscription'],
+    ['apiKey', 'api_key'],
+    ['console API key', 'api_key'],
+    ['Bedrock', 'bedrock'],
+    ['Vertex AI', 'vertex'],
+    ['Azure Foundry', 'foundry'],
+  ] as const)('maps %s to %s', (authMethod, expected) => {
+    expect(parseClaudeAuthSource(JSON.stringify({ loggedIn: true, authMethod }))).toBe(expected);
+  });
+
+  it('never projects a value from unauthenticated, malformed, or unrecognized output', () => {
+    expect(
+      parseClaudeAuthSource(JSON.stringify({ loggedIn: false, authMethod: 'claude.ai' })),
+    ).toBe('unknown');
+    expect(
+      parseClaudeAuthSource(JSON.stringify({ loggedIn: true, authMethod: 'secret-account' })),
+    ).toBe('unknown');
+    expect(parseClaudeAuthSource('not json')).toBe('unknown');
   });
 });
 
@@ -49,21 +74,39 @@ describe('detectClaude — end-to-end failure paths (mocked exec, no real CLI)',
     vi.doMock('../src/detect-executable.js', () => ({ findExecutable: async () => null }));
     const { detectClaude } = await import('../src/providers/claude/detect.js');
     const status = await detectClaude({ debug() {}, info() {}, warn() {}, error() {} });
-    expect(status).toMatchObject({ installed: false, authenticated: 'unknown' });
+    expect(status).toMatchObject({
+      name: 'Claude Agent',
+      installed: false,
+      authenticated: 'unknown',
+      authSource: 'unknown',
+    });
   });
 
   it('reports "unknown" when --version exits non-zero', async () => {
-    vi.doMock('../src/detect-executable.js', () => ({ findExecutable: async () => '/usr/local/bin/claude' }));
+    vi.doMock('../src/detect-executable.js', () => ({
+      findExecutable: async () => '/usr/local/bin/claude',
+    }));
     vi.doMock('../src/process/exec-capture.js', () => ({
-      execCapture: async () => ({ code: 1, stdout: '', stderr: 'command not found', timedOut: false }),
+      execCapture: async () => ({
+        code: 1,
+        stdout: '',
+        stderr: 'command not found',
+        timedOut: false,
+      }),
     }));
     const { detectClaude } = await import('../src/providers/claude/detect.js');
     const status = await detectClaude({ debug() {}, info() {}, warn() {}, error() {} });
-    expect(status).toMatchObject({ installed: true, authenticated: 'unknown', error: 'claude --version failed' });
+    expect(status).toMatchObject({
+      installed: true,
+      authenticated: 'unknown',
+      error: 'claude --version failed',
+    });
   });
 
   it('reports "unknown" when the auth status check times out', async () => {
-    vi.doMock('../src/detect-executable.js', () => ({ findExecutable: async () => '/usr/local/bin/claude' }));
+    vi.doMock('../src/detect-executable.js', () => ({
+      findExecutable: async () => '/usr/local/bin/claude',
+    }));
     vi.doMock('../src/process/exec-capture.js', () => ({
       execCapture: async (_cmd: string, args: string[]) =>
         args.includes('--version')
@@ -72,24 +115,43 @@ describe('detectClaude — end-to-end failure paths (mocked exec, no real CLI)',
     }));
     const { detectClaude } = await import('../src/providers/claude/detect.js');
     const status = await detectClaude({ debug() {}, info() {}, warn() {}, error() {} });
-    expect(status).toMatchObject({ installed: true, authenticated: 'unknown', error: 'auth status check timed out' });
+    expect(status).toMatchObject({
+      installed: true,
+      authenticated: 'unknown',
+      error: 'auth status check timed out',
+    });
   });
 
   it('reports "authenticated" end to end when both commands succeed with a logged-in response', async () => {
-    vi.doMock('../src/detect-executable.js', () => ({ findExecutable: async () => '/usr/local/bin/claude' }));
+    vi.doMock('../src/detect-executable.js', () => ({
+      findExecutable: async () => '/usr/local/bin/claude',
+    }));
     vi.doMock('../src/process/exec-capture.js', () => ({
       execCapture: async (_cmd: string, args: string[]) =>
         args.includes('--version')
           ? { code: 0, stdout: '2.1.228 (Claude Code)', stderr: '', timedOut: false }
-          : { code: 0, stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }), stderr: '', timedOut: false },
+          : {
+              code: 0,
+              stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }),
+              stderr: '',
+              timedOut: false,
+            },
     }));
     const { detectClaude } = await import('../src/providers/claude/detect.js');
     const status = await detectClaude({ debug() {}, info() {}, warn() {}, error() {} });
-    expect(status).toMatchObject({ installed: true, authenticated: 'authenticated', version: '2.1.228' });
+    expect(status).toMatchObject({
+      name: 'Claude Agent',
+      installed: true,
+      authenticated: 'authenticated',
+      authSource: 'claude_subscription',
+      version: '2.1.228',
+    });
   });
 
   it('reports "unknown" with an error when the auth status output is unparseable garbage', async () => {
-    vi.doMock('../src/detect-executable.js', () => ({ findExecutable: async () => '/usr/local/bin/claude' }));
+    vi.doMock('../src/detect-executable.js', () => ({
+      findExecutable: async () => '/usr/local/bin/claude',
+    }));
     vi.doMock('../src/process/exec-capture.js', () => ({
       execCapture: async (_cmd: string, args: string[]) =>
         args.includes('--version')
@@ -98,6 +160,10 @@ describe('detectClaude — end-to-end failure paths (mocked exec, no real CLI)',
     }));
     const { detectClaude } = await import('../src/providers/claude/detect.js');
     const status = await detectClaude({ debug() {}, info() {}, warn() {}, error() {} });
-    expect(status).toMatchObject({ installed: true, authenticated: 'unknown', error: 'could not parse claude auth status output' });
+    expect(status).toMatchObject({
+      installed: true,
+      authenticated: 'unknown',
+      error: 'could not parse claude auth status output',
+    });
   });
 });

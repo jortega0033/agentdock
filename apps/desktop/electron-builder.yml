@@ -34,6 +34,9 @@ files:
 # process against a path inside an asar archive is exactly the kind of "works by accident"
 # behavior this project avoids — apps/daemon/dist/index.js is already a single self-contained
 # esbuild bundle (see apps/daemon/scripts/build.mjs), so nothing else needs to come with it.
+# The Claude Agent SDK executable and its notices are staged beneath that same daemon directory,
+# keeping the executable outside ASAR.  The daemon must pass its absolute resource path to the
+# SDK; no packaged transport may substitute a PATH-discovered Claude CLI.
 extraResources:
   - from: ../daemon/dist
     to: daemon
@@ -62,7 +65,7 @@ nsis:
   shortcutName: AgentDock
   installerIcon: agent-dock.ico
   uninstallerIcon: agent-dock.ico
-  artifactName: "${productName}-Setup-${version}.${ext}"
+  artifactName: '${productName}-Setup-${version}.${ext}'
   # A .blockmap is only useful for differential auto-update downloads, which this project doesn't
   # have — skip generating one rather than ship a file with no purpose.
   differentialPackage: false

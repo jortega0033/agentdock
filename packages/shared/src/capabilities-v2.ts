@@ -1,5 +1,11 @@
 import { z } from 'zod';
-import { PROVIDER_IDS, type AuthStatus, type ProviderId } from './provider.js';
+import {
+  AUTH_SOURCES,
+  PROVIDER_IDS,
+  type AuthSource,
+  type AuthStatus,
+  type ProviderId,
+} from './provider.js';
 import { sandboxStatusV2Schema, type SandboxStatusV2 } from './policy-v2.js';
 
 export const EFFECTS = [
@@ -370,7 +376,7 @@ export interface ProviderStatusV2 {
   name: string;
   installed: boolean;
   authenticated: AuthStatus;
-  authSource?: 'chatgpt' | 'api_key' | 'unknown';
+  authSource?: AuthSource;
   transports: ProviderTransportV2[];
   capabilities: CapabilitySupportRecord[];
   /** Truthful, layered status; policy restrictions never imply OS isolation. */
@@ -988,7 +994,7 @@ export const providerStatusV2Schema = z
     name: z.string(),
     installed: z.boolean(),
     authenticated: z.enum(['authenticated', 'unauthenticated', 'unknown']),
-    authSource: z.enum(['chatgpt', 'api_key', 'unknown']).optional(),
+    authSource: z.enum(AUTH_SOURCES).optional(),
     transports: z.array(providerTransportV2Schema),
     capabilities: z.array(capabilitySupportRecordSchema),
     sandbox: sandboxStatusV2Schema,

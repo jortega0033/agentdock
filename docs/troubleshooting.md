@@ -1,5 +1,17 @@
 # Troubleshooting
 
+## Claude transport mode is unavailable
+
+`AGENT_DOCK_CLAUDE_TRANSPORT` must be exactly `auto`, `sdk`, or `cli`; it defaults to `auto`.
+`cli` uses the unchanged legacy Claude CLI path. SDK mode requires Windows' packaged pinned SDK
+asset (SDK `0.3.251`, embedded Claude executable `2.1.251`), a trusted workspace, and exactly one
+eligible auth source: `ANTHROPIC_API_KEY`, Bedrock, Vertex, or Foundry. Claude.ai/subscription OAuth
+and `CLAUDE_CODE_OAUTH_TOKEN` are never eligible. In `auto`, an SDK eligibility miss selects the
+legacy CLI before any SDK work is accepted; there is no cross-auth fallback after acceptance.
+
+SDK settings, MCP, hooks, plugins, skills, agents, and Bash are intentionally disabled. If SDK mode
+fails closed, use `auto` or `cli` after checking the auth source, trust state, and packaged asset.
+
 ## Claude/Codex not detected (`installed: false`)
 
 `GET /providers` reports `installed: false` when `findExecutable()` couldn't locate the CLI binary
@@ -14,7 +26,7 @@ it searches (a real `where`/`which` lookup, then a curated list of common instal
   (`packages/agent-runtime/src/detect-executable.ts#commonInstallDirs`), that's a real gap worth
   reporting or extending.
 - Restart the daemon after installing a CLI for the first time: `findExecutable()` runs fresh on
-  every `GET /providers` call, but a shell-level `PATH` change made *after* the daemon's own
+  every `GET /providers` call, but a shell-level `PATH` change made _after_ the daemon's own
   process started won't be picked up without restarting the daemon itself (the daemon inherits its
   environment once, at spawn time).
 

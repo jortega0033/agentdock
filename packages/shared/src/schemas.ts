@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { PROVIDER_IDS } from './provider.js';
+import { AUTH_SOURCES, PROVIDER_IDS } from './provider.js';
 
 export const providerIdSchema = z.enum(PROVIDER_IDS);
 
@@ -24,7 +24,7 @@ export const providerStatusSchema = z.object({
   name: z.string(),
   installed: z.boolean(),
   authenticated: z.enum(['authenticated', 'unauthenticated', 'unknown']),
-  authSource: z.enum(['chatgpt', 'api_key', 'unknown']).optional(),
+  authSource: z.enum(AUTH_SOURCES).optional(),
   capabilities: providerCapabilitiesSchema,
   executablePath: z.string().optional(),
   version: z.string().optional(),

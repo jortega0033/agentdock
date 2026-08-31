@@ -116,6 +116,7 @@ export interface SessionManagerSecurityOptions {
   auditStore?: AuditStore;
   trustStore?: WorkspaceTrustStore;
   interactionTimeoutMs?: number;
+  providerStateDirectory?: string;
 }
 
 export class WorkspaceAccessError extends Error {
@@ -300,6 +301,9 @@ export class SessionManager {
         signal: controller.signal,
         providerStatus: detectedProviderStatus,
         workspaceTrust,
+        ...(this.security.providerStateDirectory
+          ? { providerStateDirectory: this.security.providerStateDirectory }
+          : {}),
         beforeWorkDelivery: async () => {
           if (controller.signal.aborted || this.shuttingDown) {
             throw new InteractiveSessionError('session_aborted', 'session start was cancelled');

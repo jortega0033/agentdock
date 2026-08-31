@@ -345,6 +345,9 @@ describe('protocol v2 capability schemas', () => {
       },
     };
     expect(providerStatusV2Schema.safeParse(status).success).toBe(true);
+    for (const authSource of ['claude_subscription', 'bedrock', 'vertex', 'foundry'] as const) {
+      expect(providerStatusV2Schema.safeParse({ ...status, authSource }).success).toBe(true);
+    }
     expect(
       providerStatusV2Schema.safeParse({
         ...status,

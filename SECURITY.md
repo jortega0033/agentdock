@@ -26,7 +26,7 @@ actually demonstrated versus what follows from the design.
 - **Another process running as the same OS user with equivalent privileges.** If a process can
   already read your files, it can already do everything the CLI itself can do. This is a
   localhost trust boundary, not a sandbox between OS users or processes.
-- **A compromised Claude Code or Codex CLI installation.** AgentDock spawns the CLI you already
+- **A compromised legacy Claude or Codex CLI installation.** AgentDock spawns the CLI you already
   installed and authenticated; it does not vet, sandbox, or restrict what that CLI does once
   running.
 - **Malicious code already running with equivalent local privileges** (e.g. another app on the
@@ -38,10 +38,13 @@ actually demonstrated versus what follows from the design.
 
 ## V2 capability and workspace trust model
 
-The statements above describe the current protocol v1 application. AgentDock v1 does not assign
-workspace trust, mediate provider approvals, or attest a Claude/Codex tool sandbox. The
-`BrowserWindow` renderer sandbox described later in this file is unrelated to isolation of an
-agent's shell, filesystem, or network access.
+The v2 provider path assigns explicit workspace trust and requires a trusted workspace for Claude
+Agent SDK sessions. The SDK policy disables settings, MCP, hooks, plugins, skills, agents, and Bash;
+only the reviewed SDK auth sources (Anthropic API key, Bedrock, Vertex, or Foundry) are eligible.
+Claude.ai/subscription OAuth and `CLAUDE_CODE_OAUTH_TOKEN` are excluded. AgentDock never stores or
+logs credentials, and does not fall back from accepted SDK work to the legacy CLI under a different
+auth source. The `BrowserWindow` renderer sandbox described later in this file is unrelated to
+isolation of an agent's shell, filesystem, or network access.
 
 The accepted v2 design adds evidence-backed capability negotiation, default-untrusted workspaces,
 platform-specific sandbox states, approval/audit rules, credential boundaries, data retention, and
@@ -60,8 +63,8 @@ answers a preflight with `Access-Control-Allow-Origin` (see below), so Chromium 
 what an Electron renderer uses for networking) refuses to send the real request at all. **Verified**:
 reproduced with a real browser tab pointed at the Vite dev server, `fetch()`ing the daemon with a
 valid token failed with `TypeError: Failed to fetch`, and DevTools showed the actual cause:
-*"Response to preflight request doesn't pass access control check: No 'Access-Control-Allow-Origin'
-header is present."* This is true in a packaged build too: a `file://`-loaded page is still a
+_"Response to preflight request doesn't pass access control check: No 'Access-Control-Allow-Origin'
+header is present."_ This is true in a packaged build too: a `file://`-loaded page is still a
 distinct origin from `http://127.0.0.1:<port>` and still triggers the same preflight.
 
 The fix is architectural, not a CORS exception: **all daemon HTTP/SSE traffic happens in Electron's
@@ -81,11 +84,11 @@ extra field on the main-process side (a token, a base URL) can never cross into 
 by mistake. See `apps/desktop/test/preload.test.ts` for the regression test against the real
 module, not a mock of it.
 
-One consequence: the daemon no longer needs *any* browser origin allowlisted, in dev or production.
+One consequence: the daemon no longer needs _any_ browser origin allowlisted, in dev or production.
 There is no configuration knob for this at all: the daemon rejects every request that carries an
 Origin header, unconditionally (see [Origin validation](#origin-validation) below), and the
 renderer's CSP `connect-src` is just `'self'` (it makes zero network calls to the daemon to
-restrict). The daemon's HTTP+SSE API is unchanged and still fully usable by any *non-browser*
+restrict). The daemon's HTTP+SSE API is unchanged and still fully usable by any _non-browser_
 client (`curl`, a future CLI client, a VS Code extension) exactly as designed; only the desktop
 app's own renderer was ever the problem, and only the desktop app's own transport changed.
 
@@ -115,7 +118,7 @@ equivalent POSIX-style check on Windows: NTFS ACLs are inherited from the parent
 for a per-user temp root is already restrictive, and a `chmod`-style check would be a claim this
 codebase can't actually verify there. See `apps/daemon/src/discovery-file.ts`.
 
-The discovery *filename* is namespaced per application id (default `agent-dock`, overridable via
+The discovery _filename_ is namespaced per application id (default `agent-dock`, overridable via
 `AGENT_DOCK_APP_ID`) rather than one fixed name. See
 [Single daemon instance](#single-daemon-instance) below for why.
 
@@ -138,7 +141,7 @@ only listens on localhost" changes that. What stops it:
 
 Point 2 is the one that actually matters even if a token somehow leaked: without permissive CORS,
 a browser will not let cross-origin script read the response of a state-changing request even for
-requests that *don't* need a preflight (e.g. a plain `<form>` POST, or a `fetch` with
+requests that _don't_ need a preflight (e.g. a plain `<form>` POST, or a `fetch` with
 `Content-Type: text/plain`), but the request could still fire. That's exactly why every mutating
 route additionally requires the token: form-based "blind" CSRF can't set a custom `Authorization`
 header, so it can't pass the token check either. **Verified**: a simulated cross-origin form-style
@@ -181,7 +184,7 @@ correct for what this daemon actually needs to be reachable by.
   (IPv6 loopback) gets no response: the daemon binds IPv4-only, not dual-stack.
 - Log a complete environment, a raw auth-status response, or a full prompt at the default log
   level (`packages/agent-runtime/src/logger.ts` redacts any meta key matching
-  `/token|secret|password|authorization|api[-_]?key|credential/i`). A non-zero process exit *does*
+  `/token|secret|password|authorization|api[-_]?key|credential/i`). A non-zero process exit _does_
   log a bounded (2000-char) stderr snippet at `warn`: that's the CLI's own diagnostic output, not
   daemon secrets, and a failure with zero visible reason is undebuggable; see
   [docs/providers.md](docs/providers.md) for why this exists.
@@ -244,7 +247,7 @@ environment inheritance remains documented here because v1 still behaves this wa
 
 Every client discovers a given application's daemon through one fixed, namespaced discovery-file
 path (`os.tmpdir()/agent-dock/<app-id>.json`, `<app-id>` defaulting to `agent-dock`, see
-`apps/daemon/src/discovery-file.ts`), so two daemons *sharing the same app id* running at once
+`apps/daemon/src/discovery-file.ts`), so two daemons _sharing the same app id_ running at once
 would silently race over it: whichever started last "wins" the file, leaving the other alive but
 unreachable through discovery. Rather than accept that ambiguity, the daemon refuses to start if
 the discovery file's recorded pid is still alive, and treats a stale file (dead pid, or corrupt
@@ -284,7 +287,7 @@ check, which a URL like `http://localhost:5173.evil.example` would have passed a
 `dist/index.html`, not any local file path); anything else opens in the OS's default browser
 instead via `shell.openExternal`. A `session.setPermissionRequestHandler` denies every permission
 request (camera, microphone, geolocation, notifications, etc.) by default, since nothing in this UI
-asks for any of them. None of this is load-bearing for the *current* UI (it renders no untrusted
+asks for any of them. None of this is load-bearing for the _current_ UI (it renders no untrusted
 content or links, and requests no permissions), but it's cheap defense in depth for forks of this
 boilerplate that later add either.
 

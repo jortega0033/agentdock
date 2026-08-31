@@ -148,8 +148,9 @@ session and never replays it through another transport.
 
 The current `legacy-one-shot` bridge is a migration adapter over the existing v1 process runner.
 It truthfully reports an `untrusted` scope and does not advertise filesystem or network isolation.
-Workspace trust enforcement is added by issue #9; until then this bridge retains the documented v1
-workspace trust boundary and must not be presented as sandboxed execution.
+The Claude Agent SDK transport is selected only with a verified trusted workspace and its reviewed
+restricted tool policy. The legacy bridge retains the documented v1 boundary and must not be
+presented as sandboxed execution.
 
 ## The 52 core capability constraints
 
@@ -367,12 +368,12 @@ narrow Electron bridge. `FakeProvider` exercises the rich interactive path in de
 Compatibility fixtures pin the legacy Claude and Codex CLI paths, plus the fake interactive path,
 to exact provider versions, transports, and fixture sets.
 
-The production Claude and Codex adapters still select `legacy-one-shot`; no native rich provider
-transport is implemented. Workspace trust, verified isolation, durable audit/persistence, and
-native transport work remain outside the current slice and are tracked in
-[issues #10](https://github.com/jortega0033/agentdock/issues/10) and
-[#11](https://github.com/jortega0033/agentdock/issues/11). The existing React renderer still uses
-the v1 flow. A rich interactive timeline and multi-session UI remain separate work in
+The Claude Agent SDK transport is now available when its pinned Windows asset, reviewed
+authentication source, and trusted-workspace requirements are satisfied; the legacy Claude CLI
+compatibility path remains `legacy-one-shot`. Codex app-server is available for its exact validated
+runtime and trust scope, with `legacy-one-shot` retained as its compatibility path. SDK settings,
+MCP, hooks, plugins, skills, agents, and Bash are disabled. The existing React
+renderer still uses the v1 flow. A rich interactive timeline and multi-session UI remain separate work in
 [issues #12](https://github.com/jortega0033/agentdock/issues/12) and
 [#14](https://github.com/jortega0033/agentdock/issues/14).
 

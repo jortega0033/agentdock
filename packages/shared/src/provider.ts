@@ -12,7 +12,16 @@ export type ProviderId = (typeof PROVIDER_IDS)[number];
  */
 export type AuthStatus = 'authenticated' | 'unauthenticated' | 'unknown';
 /** Non-secret account source label reported by a provider CLI; never contains account identity. */
-export type AuthSource = 'chatgpt' | 'api_key' | 'unknown';
+export const AUTH_SOURCES = [
+  'chatgpt',
+  'api_key',
+  'claude_subscription',
+  'bedrock',
+  'vertex',
+  'foundry',
+  'unknown',
+] as const;
+export type AuthSource = (typeof AUTH_SOURCES)[number];
 
 /**
  * What an AgentDock adapter actually does for a provider, not a marketing claim about the

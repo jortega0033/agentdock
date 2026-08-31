@@ -174,7 +174,10 @@ function sameProviderDetectionSnapshot(expected: ProviderStatus, current: Provid
     expected.executablePath === current.executablePath &&
     expected.version === current.version &&
     expected.authenticated === current.authenticated &&
-    expected.authSource === current.authSource
+    expected.authSource === current.authSource &&
+    (expected.accountFingerprint === undefined ||
+      expected.accountFingerprint === current.accountFingerprint) &&
+    (expected.selectedModel === undefined || expected.selectedModel === current.selectedModel)
   );
 }
 

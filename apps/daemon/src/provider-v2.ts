@@ -107,7 +107,7 @@ export interface ProviderV2FallbackIntent {
   request?: CapabilityRequest;
   cwd: string;
   workspaceTrust: WorkspaceTrustEvidence;
-  requestedTransportMode?: 'auto' | 'app-server' | 'exec';
+  requestedTransportMode?: 'auto' | 'app-server' | 'exec' | 'sdk' | 'cli';
   primaryManifest: ProviderV2Manifest;
   primarySelection: CapabilitySelection;
   continuation?: SessionContinuationV2;
@@ -520,7 +520,9 @@ export function toProviderStatusV2(
       // Interactive protocol support is not evidence that AgentDock policy is enforced.
       sandbox: providerSandboxStatus(status.id, false),
       error:
-        'Codex app-server transport is unavailable for the detected CLI version or transport mode',
+        status.id === 'claude'
+          ? 'Claude Agent SDK transport is unavailable for the detected runtime or transport mode'
+          : 'Codex app-server transport is unavailable for the detected CLI version or transport mode',
     };
   }
   return {

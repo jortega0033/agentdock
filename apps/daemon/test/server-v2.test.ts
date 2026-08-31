@@ -1016,6 +1016,36 @@ describe('POST /v2/sessions capability negotiation', () => {
     },
   );
 
+  it.each(['sdk', 'invalid-mode'])(
+    'returns bounded 422 for unsupported Claude transport mode %s',
+    async (mode) => {
+      const previousMode = process.env.AGENT_DOCK_CLAUDE_TRANSPORT;
+      process.env.AGENT_DOCK_CLAUDE_TRANSPORT = mode;
+      try {
+        const registry = new ProviderRegistry();
+        const provider = new ObservationProvider();
+        const start = vi.spyOn(provider, 'startSession');
+        registry.register(provider);
+        const sessionManager = new SessionManager(registry, noopLogger);
+        const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+
+        const response = await app.inject({
+          method: 'POST',
+          url: '/v2/sessions',
+          headers: auth(),
+          payload: { provider: 'claude', cwd, prompt: 'must not start' },
+        });
+
+        expect(response.statusCode).toBe(422);
+        expect(response.json()).toMatchObject({ code: 'provider_transport_unavailable' });
+        expect(start).not.toHaveBeenCalled();
+      } finally {
+        if (previousMode === undefined) delete process.env.AGENT_DOCK_CLAUDE_TRANSPORT;
+        else process.env.AGENT_DOCK_CLAUDE_TRANSPORT = previousMode;
+      }
+    },
+  );
+
   it('returns a bounded visible reason when startup cannot safely fall back', async () => {
     const logger = {
       debug: vi.fn(),

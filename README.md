@@ -5,17 +5,17 @@
   </picture>
 </p>
 
-<p align="center"><strong>Open-source Electron and local-daemon boilerplate for desktop apps that use a user's signed-in Claude Code or Codex CLI.</strong></p>
+<p align="center"><strong>Open-source Electron and local-daemon boilerplate for desktop apps that use Claude Agent, the legacy Claude CLI, or Codex CLI.</strong></p>
 
 <p align="center">Electron · Fastify · React · TypeScript · Apache-2.0</p>
 
 ![AgentDock desktop runtime](./docs/images/social/readme-hero.webp)
 
 AgentDock is built for fork-based reuse. Fork the repository, replace the reference workflow and
-visual identity, and keep the local runtime pieces your product needs. Users continue signing in
-through [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or
-[Codex CLI](https://github.com/openai/codex), so AgentDock does not collect or proxy provider API
-keys.
+visual identity, and keep the local runtime pieces your product needs. Users provide credentials
+through the Claude Agent SDK, the legacy Claude CLI, or [Codex CLI](https://github.com/openai/codex).
+Credentials remain in the user's environment; AgentDock does not collect, store, or proxy provider
+API keys.
 
 ## What AgentDock is not
 
@@ -37,12 +37,14 @@ the product you build from the boilerplate.
 ### Downstream example
 
 Open Vacancy Radar is a downstream product built from AgentDock. It keeps the Electron shell,
-local daemon, and connection to the user's signed-in Claude Code or Codex CLI, then adds a
+local daemon, and connection to Claude Agent, the legacy Claude CLI, or Codex CLI, then adds a
 vacancy-focused workflow and its own product behavior.
 
 ## What the boilerplate provides
 
-- **CLI authentication stays local.** AgentDock never asks for, reads, or proxies API keys.
+- **Provider authentication stays local.** AgentDock never stores or logs credentials. Claude Agent
+  SDK mode accepts only a user-provided Anthropic API key or supported Bedrock, Vertex, or Foundry
+  configuration; Claude.ai/subscription OAuth is not accepted.
 - **One provider-neutral protocol.** Claude and Codex output becomes a typed, ordered event stream.
 - **A deliberate trust boundary.** The sandboxed renderer talks only to Electron main over IPC;
   only the trusted main process can reach the authenticated loopback daemon.
@@ -62,7 +64,7 @@ pnpm dev:desktop
 Install and authenticate at least one supported CLI separately:
 
 ```bash
-# Claude Code
+# Claude (legacy CLI)
 claude auth login
 claude auth status
 
@@ -91,12 +93,21 @@ incremental SSE parsing.
 ```text
 React renderer → typed IPC → Electron main → @agent-dock/client → local Fastify daemon
                                                                └→ agent runtime
-                                                                  ├→ Claude adapter → claude CLI
+                                                                  ├→ Claude Agent SDK or legacy Claude CLI
                                                                   └→ Codex adapter  → codex CLI
 ```
 
 Read [the architecture guide](docs/architecture.md) for component ownership and
 [SECURITY.md](SECURITY.md) for the threat model and local-auth mechanism.
+
+### Claude transport modes
+
+Set `AGENT_DOCK_CLAUDE_TRANSPORT` to `auto` (the default), `sdk`, or `cli`. `auto` selects the
+Claude Agent SDK only when a user-provided `ANTHROPIC_API_KEY` or exactly one of the supported
+Bedrock, Vertex, or Foundry modes is present; it never uses Claude.ai/subscription OAuth or
+`CLAUDE_CODE_OAUTH_TOKEN`. `sdk` requires those same conditions and fails closed when they are not
+met. `cli` keeps the existing legacy Claude CLI path unchanged. There is no SDK-to-CLI fallback
+after SDK work has been accepted.
 
 ## Repository map
 

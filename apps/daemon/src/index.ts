@@ -45,6 +45,7 @@ async function main() {
   const sessionManager = new SessionManager(registry, logger, undefined, {
     auditStore,
     trustStore,
+    providerStateDirectory: durableStateDirectory,
   });
   const token = generateToken();
 

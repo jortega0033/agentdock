@@ -22,6 +22,24 @@ const PACKAGED_JOB_HOST = join(
   'daemon',
   'agent-dock-job-host.exe',
 );
+const PACKAGED_CLAUDE_SDK_BINARY = join(
+  ROOT,
+  'dist-packages',
+  'win-unpacked',
+  'resources',
+  'daemon',
+  'claude-agent-sdk',
+  'claude.exe',
+);
+const PACKAGED_CLAUDE_SDK_NOTICE = join(
+  ROOT,
+  'dist-packages',
+  'win-unpacked',
+  'resources',
+  'daemon',
+  'claude-agent-sdk',
+  'NOTICE.txt',
+);
 const BUILDER_CONFIG = join(ROOT, 'apps', 'desktop', 'electron-builder.yml');
 const TIMEOUT_MS = 15_000;
 
@@ -53,6 +71,19 @@ try {
   await realpath(PACKAGED_APP);
   await realpath(PACKAGED_DAEMON);
   await realpath(PACKAGED_JOB_HOST);
+  await realpath(PACKAGED_CLAUDE_SDK_BINARY);
+  const sdkVersion = await run(PACKAGED_CLAUDE_SDK_BINARY, ['--version']);
+  assert(sdkVersion.code === 0, 'packaged Claude Agent SDK executable version probe failed');
+  assert(
+    /(?:^|\D)2\.1\.251(?:$|\D)/u.test(`${sdkVersion.stdout}\n${sdkVersion.stderr}`),
+    'packaged Claude Agent SDK executable version is not 2.1.251',
+  );
+  const sdkNotice = await readFile(PACKAGED_CLAUDE_SDK_NOTICE, 'utf8');
+  assert(sdkNotice.includes('Claude Agent'), 'packaged SDK branding notice is missing');
+  assert(
+    sdkNotice.includes('Do not use: Claude Code, Claude Code Agent.'),
+    'packaged SDK branding restrictions are missing',
+  );
   await mkdir(shimDir, { recursive: true });
   await writeFile(shimSourcePath, codexShimSource());
   await compileCodexShim(shimSourcePath, shimExecutablePath);

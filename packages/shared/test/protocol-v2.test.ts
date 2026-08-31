@@ -293,6 +293,23 @@ describe('protocol v2 content and interaction schemas', () => {
         earliestSequence: 0,
       }).success,
     ).toBe(true);
+    for (const requestedTransportMode of ['sdk', 'cli'] as const) {
+      expect(
+        agentSessionV2Schema.safeParse({
+          id: sessionId,
+          provider: 'claude',
+          transport: requestedTransportMode === 'sdk' ? 'claude-agent-sdk' : 'legacy-one-shot',
+          cwd: '/tmp',
+          status: 'active',
+          selection,
+          executionId,
+          acceptedWork: 'accepted',
+          startedAt: timestamp,
+          runtimeMetadata: { requestedTransportMode },
+          earliestSequence: 0,
+        }).success,
+      ).toBe(true);
+    }
     expect(
       agentSessionV2Schema.safeParse({
         id: sessionId,

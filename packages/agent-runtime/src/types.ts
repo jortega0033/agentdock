@@ -65,7 +65,7 @@ export interface ProviderRuntimeMetadata {
   cliVersion?: string;
   schemaVersion?: string;
   fixtureSet?: string;
-  requestedTransportMode?: 'auto' | 'app-server' | 'exec';
+  requestedTransportMode?: 'auto' | 'app-server' | 'exec' | 'sdk' | 'cli';
   fallbackReason?: string;
 }
 
@@ -108,6 +108,8 @@ export interface StartInteractiveSessionOptions extends StartSessionOptions {
   signal?: AbortSignal;
   /** Supplied only by the daemon after canonical identity and trust-epoch validation. */
   workspaceTrust?: WorkspaceTrustEvidence;
+  /** Absolute daemon-owned root for provider-private ephemeral session state. */
+  providerStateDirectory?: string;
   /**
    * Daemon-owned last-moment gate for any provider request that delivers user work. Providers must
    * await it immediately before writing the work-bearing request to their native transport.

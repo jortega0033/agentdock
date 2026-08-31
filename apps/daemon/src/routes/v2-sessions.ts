@@ -28,10 +28,18 @@ function parseLastEventId(header: string | string[] | undefined): number | undef
   return Number.isSafeInteger(parsed) && parsed < Number.MAX_SAFE_INTEGER ? parsed + 1 : undefined;
 }
 
-function requestedTransportMode(provider: string): 'auto' | 'app-server' | 'exec' | undefined {
-  if (provider !== 'codex') return undefined;
-  const value = process.env.AGENT_DOCK_CODEX_TRANSPORT ?? 'auto';
-  return value === 'auto' || value === 'app-server' || value === 'exec' ? value : undefined;
+type RequestedTransportMode = 'auto' | 'app-server' | 'exec' | 'sdk' | 'cli';
+
+function requestedTransportMode(provider: string): RequestedTransportMode | undefined {
+  if (provider === 'codex') {
+    const value = process.env.AGENT_DOCK_CODEX_TRANSPORT ?? 'auto';
+    return value === 'auto' || value === 'app-server' || value === 'exec' ? value : undefined;
+  }
+  if (provider === 'claude') {
+    const value = process.env.AGENT_DOCK_CLAUDE_TRANSPORT ?? 'auto';
+    return value === 'auto' || value === 'sdk' || value === 'cli' ? value : undefined;
+  }
+  return undefined;
 }
 
 function sameWorkspaceTrust(
@@ -173,7 +181,10 @@ export function registerV2SessionRoutes(
         );
         if (detected.aborted) return;
         const transportMode = requestedTransportMode(parsed.data.provider);
-        if (parsed.data.provider === 'codex' && transportMode === undefined) {
+        if (
+          (parsed.data.provider === 'codex' || parsed.data.provider === 'claude') &&
+          transportMode === undefined
+        ) {
           reply.code(422).send({
             error: 'requested provider transport is unavailable',
             code: 'provider_transport_unavailable',
@@ -190,11 +201,10 @@ export function registerV2SessionRoutes(
           });
           return;
         }
-        if (
-          parsed.data.provider === 'codex' &&
-          transportMode === 'app-server' &&
-          !manifest.interactive
-        ) {
+        const forcedInteractiveTransport =
+          (parsed.data.provider === 'codex' && transportMode === 'app-server') ||
+          (parsed.data.provider === 'claude' && transportMode === 'sdk');
+        if (forcedInteractiveTransport && !manifest.interactive) {
           reply.code(422).send({
             error: 'requested provider transport is unavailable',
             code: 'provider_transport_unavailable',

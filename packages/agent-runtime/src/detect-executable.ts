@@ -38,7 +38,9 @@ export async function findExecutable(
 
 async function lookupOnPath(name: string): Promise<string | null> {
   const [command, args] =
-    process.platform === 'win32' ? ['where', [name]] : ['which', [name]];
+    process.platform === 'win32'
+      ? [join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'where.exe'), [name]]
+      : ['which', [name]];
   try {
     const result = await execCapture(command, args, { timeoutMs: 5_000 });
     if (result.code !== 0) return null;

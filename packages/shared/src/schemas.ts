@@ -24,6 +24,7 @@ export const providerStatusSchema = z.object({
   name: z.string(),
   installed: z.boolean(),
   authenticated: z.enum(['authenticated', 'unauthenticated', 'unknown']),
+  authSource: z.enum(['chatgpt', 'api_key', 'unknown']).optional(),
   capabilities: providerCapabilitiesSchema,
   executablePath: z.string().optional(),
   version: z.string().optional(),

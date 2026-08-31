@@ -49,10 +49,7 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
     // response header, so an allowlisted origin still couldn't complete a request; it was dead
     // configuration and has been removed rather than fixed, since nothing currently needs it.
     if (req.headers.origin !== undefined) {
-      opts.logger.warn('rejected request carrying an Origin header', {
-        origin: req.headers.origin,
-        url: req.url,
-      });
+      opts.logger.warn('rejected request carrying an Origin header', { method: req.method });
       reply.code(403).send(
         req.url.startsWith('/v2/')
           ? {
@@ -108,7 +105,7 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
         : 500;
 
     if (statusCode >= 500) {
-      opts.logger.error('unhandled route error', { message: err.message, url: req.url });
+      opts.logger.error('unhandled route error', { method: req.method, statusCode });
       reply
         .code(500)
         .send(
@@ -118,7 +115,7 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
         );
       return;
     }
-    opts.logger.warn('client error', { message: err.message, url: req.url, statusCode });
+    opts.logger.warn('client error', { method: req.method, statusCode });
     if (req.url.startsWith('/v2/')) {
       const isPayloadTooLarge = statusCode === 413;
       const isRateLimited = statusCode === 429;

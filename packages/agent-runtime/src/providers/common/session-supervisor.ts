@@ -8,6 +8,7 @@ import {
   type QuestionResponseCommandV2,
 } from '@agent-dock/shared';
 import { AsyncChannel } from '../../process/async-channel.js';
+import { ProviderCommandRejectedError } from '../../types.js';
 import type {
   AcceptedWorkState,
   InteractiveProviderSessionHandle,
@@ -27,7 +28,6 @@ const MAX_TRACKED_CONTENT_BLOCKS = 10_000;
 const MAX_TRACKED_TURN_IDS = 10_000;
 const MAX_PENDING_INTERACTIONS = 32;
 const MAX_RESOLVED_INTERACTIONS = 1_024;
-const MAX_STDERR_BYTES = 200_000;
 const MAX_FAILURE_MESSAGE_BYTES = 4 * 1024;
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 const DEFAULT_INTERACTION_TIMEOUT_MS = 300_000;
@@ -39,12 +39,14 @@ type InteractionRecord =
       requestId: string;
       turnId: string;
       timer?: ReturnType<typeof setTimeout>;
+      expiresAtMs?: number;
     }
   | {
       kind: 'question';
       requestId: string;
       turnId: string;
       timer?: ReturnType<typeof setTimeout>;
+      expiresAtMs?: number;
     };
 
 interface QueuedSupervisorEvent {
@@ -124,6 +126,10 @@ function isInteractionResolutionEvent(
 
 function eventCode(error: unknown): string | undefined {
   return error instanceof InteractiveSessionError ? error.code : undefined;
+}
+
+function publicFailureMessage(error: unknown, fallback: string): string {
+  return error instanceof InteractiveSessionError ? error.message : fallback;
 }
 
 function truncateUtf8(value: string, maxBytes: number): string {
@@ -470,8 +476,6 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
   >();
   private bufferedEvents = 0;
   private bufferedBytes = 0;
-  private stderrBuffer = '';
-  private stderrBytes = 0;
   private sessionStarted = false;
   private providerStatus: 'starting' | 'active' | 'idle' = 'starting';
   private activeTurnId: string | undefined;
@@ -493,6 +497,18 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
   readonly events = this.readEvents();
   readonly accepted: Promise<AcceptedWorkState>;
 
+  get providerSessionId(): string | undefined {
+    return this.transport.providerSessionId;
+  }
+
+  get runtimeMetadata(): InteractiveProviderSessionHandle['runtimeMetadata'] {
+    return this.transport.runtimeMetadata;
+  }
+
+  get continuationEvidence(): InteractiveProviderSessionHandle['continuationEvidence'] {
+    return this.transport.continuationEvidence;
+  }
+
   constructor(
     private readonly transport: InteractiveProviderTransport,
     private readonly options: StartInteractiveSessionOptions,
@@ -504,11 +520,8 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
     this.expectedTurnIds.add(options.turnId);
     this.accepted = this.watchAcceptedWork();
     void this.consume();
-    void this.consumeStderr().catch((error: unknown) =>
-      this.fail(
-        'provider_crash',
-        error instanceof Error ? error.message : 'provider stderr stream failed',
-      ),
+    void this.consumeStderr().catch(() =>
+      this.fail('provider_crash', 'provider stderr stream failed'),
     );
     if (options.signal?.aborted) this.abortListener();
     else options.signal?.addEventListener('abort', this.abortListener, { once: true });
@@ -527,7 +540,7 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
       }
       await this.fail(
         eventCode(error) ?? 'provider_crash',
-        error instanceof Error ? error.message : 'provider acceptance failed',
+        publicFailureMessage(error, 'provider acceptance failed'),
       );
       return 'unknown';
     }
@@ -564,6 +577,12 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
         }
       }
     } catch (error) {
+      if (error instanceof ProviderCommandRejectedError) {
+        if (interaction && this.resolvingInteractions.get(interaction.requestId) === interaction) {
+          this.restoreInteraction(interaction);
+        }
+        throw new InteractiveSessionError('command_rejected', error.message);
+      }
       if (interaction && this.resolvingInteractions.get(interaction.requestId) === interaction) {
         this.resolvingInteractions.delete(interaction.requestId);
         this.rememberResolved(interaction);
@@ -571,7 +590,7 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
       }
       await this.fail(
         eventCode(error) ?? 'provider_crash',
-        error instanceof Error ? error.message : 'provider command failed',
+        publicFailureMessage(error, 'provider command failed'),
       );
       throw error;
     }
@@ -593,7 +612,7 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
     } catch (error) {
       await this.fail(
         eventCode(error) ?? 'provider_crash',
-        error instanceof Error ? error.message : 'provider interrupt failed',
+        publicFailureMessage(error, 'provider interrupt failed'),
       );
       throw error;
     }
@@ -648,10 +667,23 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
   }
 
   private async closeSession(): Promise<void> {
+    const preCloseDeadline = Date.now() + this.closeTimeoutMs;
     const interactions = this.takeAllInteractions();
-    await this.resolveInteractions(interactions, 'cancel', true, this.closeTimeoutMs).catch(
-      () => undefined,
-    );
+    await this.resolveInteractions(
+      interactions,
+      'cancel',
+      true,
+      Math.max(1, preCloseDeadline - Date.now()),
+    ).catch(() => undefined);
+    if (this.providerStatus === 'active' && this.activeTurnId !== undefined) {
+      // Closing stops provider event consumption, so waiting for a normalized idle event here would
+      // be unsound. Still deliver one bounded native interruption before process-tree teardown.
+      await timeout(
+        Promise.resolve().then(() => this.transport.interrupt()),
+        Math.max(1, preCloseDeadline - Date.now()),
+        'command_timeout',
+      ).catch(() => undefined);
+    }
     try {
       await this.stopTransport();
       if (!this.terminal) {
@@ -661,7 +693,7 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
     } catch (error) {
       this.finishFailure(
         eventCode(error) ?? 'provider_force_close_failed',
-        error instanceof Error ? error.message : 'provider process tree was not reaped',
+        publicFailureMessage(error, 'provider process tree was not reaped'),
       );
     }
   }
@@ -698,7 +730,7 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
     } catch (error) {
       await this.fail(
         eventCode(error) ?? 'provider_crash',
-        error instanceof Error ? error.message : 'provider session crashed',
+        publicFailureMessage(error, 'provider session crashed'),
       );
     }
   }
@@ -715,7 +747,7 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
     } catch (error) {
       this.finishFailure(
         eventCode(error) ?? 'provider_force_close_failed',
-        error instanceof Error ? error.message : 'provider process tree was not reaped',
+        publicFailureMessage(error, 'provider process tree was not reaped'),
       );
     }
   }
@@ -766,7 +798,7 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
         await this.stopTransport();
       } catch (error) {
         code = eventCode(error) ?? 'provider_force_close_failed';
-        message = error instanceof Error ? error.message : 'provider process tree was not reaped';
+        message = publicFailureMessage(error, 'provider process tree was not reaped');
       }
       this.finishFailure(code, message);
     });
@@ -776,11 +808,7 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
   private finishFailure(code: string, message: string): void {
     if (this.terminal) return;
     this.terminal = true;
-    const diagnostic = this.stderrBuffer.trim().slice(0, 500);
-    const boundedMessage = truncateUtf8(
-      diagnostic ? `${message}: ${diagnostic}` : message,
-      MAX_FAILURE_MESSAGE_BYTES,
-    );
+    const boundedMessage = truncateUtf8(message, MAX_FAILURE_MESSAGE_BYTES);
     this.closeOutput([
       { type: 'error', code, message: boundedMessage, recoverable: false },
       { type: 'session.failed', code, message: boundedMessage },
@@ -799,7 +827,6 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
     );
     this.options.signal?.removeEventListener('abort', this.abortListener);
     this.settleIdleWaiters(false);
-    this.stderrBuffer = '';
   }
 
   private async stopTransport(): Promise<void> {
@@ -926,13 +953,17 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
     }
     const providerDeadlineMs = Math.max(0, Date.parse(event.deadlineAt) - Date.now());
     const delay = Math.min(this.interactionTimeoutMs, constraints.timeoutMs, providerDeadlineMs);
+    const expiresAtMs = Date.now() + delay;
     const record: InteractionRecord = {
       kind: event.type === 'approval.requested' ? 'approval' : 'question',
       requestId: event.requestId,
       turnId: event.turnId,
       ...(this.options.interactionOwner === 'daemon'
         ? {}
-        : { timer: setTimeout(() => void this.timeoutInteraction(event.requestId), delay) }),
+        : {
+            expiresAtMs,
+            timer: setTimeout(() => void this.timeoutInteraction(event.requestId), delay),
+          }),
     };
     record.timer?.unref?.();
     this.interactions.set(event.requestId, record);
@@ -970,12 +1001,10 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
         this.commandTimeoutMs,
         'command_timeout',
       );
-    } catch (error) {
+    } catch {
       await this.fail(
         'provider_capability_violation',
-        `provider emitted an unselected ${kind} interaction and safe rejection failed: ${
-          error instanceof Error ? error.message : 'unknown provider failure'
-        }`,
+        `provider emitted an unselected ${kind} interaction and safe rejection failed`,
       );
       return false;
     }
@@ -1016,7 +1045,7 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
     } catch (error) {
       await this.fail(
         eventCode(error) ?? 'provider_crash',
-        error instanceof Error ? error.message : 'provider interaction timeout failed',
+        publicFailureMessage(error, 'provider interaction timeout failed'),
       );
     }
   }
@@ -1039,6 +1068,19 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
     if (record.timer) clearTimeout(record.timer);
     this.resolvingInteractions.set(record.requestId, record);
     return record;
+  }
+
+  private restoreInteraction(record: InteractionRecord): void {
+    this.resolvingInteractions.delete(record.requestId);
+    if (this.terminal || this.closing || this.failing) return;
+    if (record.expiresAtMs !== undefined) {
+      const delay = Math.max(0, record.expiresAtMs - Date.now());
+      record.timer = setTimeout(() => void this.timeoutInteraction(record.requestId), delay);
+      record.timer.unref?.();
+    } else {
+      record.timer = undefined;
+    }
+    this.interactions.set(record.requestId, record);
   }
 
   private assertInteractionAvailable(command: AgentCommandV2): void {
@@ -1281,12 +1323,9 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
 
   private async consumeStderr(): Promise<void> {
     for await (const raw of this.transport.stderr) {
-      if (this.terminal || this.stderrBytes >= MAX_STDERR_BYTES) continue;
-      if (typeof raw !== 'string' && !(raw instanceof Uint8Array)) continue;
-      const chunk = Buffer.from(raw);
-      const retained = chunk.subarray(0, MAX_STDERR_BYTES - this.stderrBytes);
-      this.stderrBuffer += retained.toString('utf8');
-      this.stderrBytes += retained.byteLength;
+      // Provider stderr can echo prompts, credentials, and approval payloads. Drain it so the
+      // child cannot block, but never decode, retain, persist, or publish its contents.
+      void raw;
     }
   }
 

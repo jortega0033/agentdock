@@ -8,13 +8,13 @@ import {
   negotiateCapabilities,
   sessionIdParamSchema,
 } from '@agent-dock/shared';
-import type { ProviderRegistry } from '@agent-dock/agent-runtime';
+import type { ProviderRegistry, WorkspaceTrustEvidence } from '@agent-dock/agent-runtime';
 import type { SessionManager } from '../session-manager.js';
 import type { WorkspaceTrustStore } from '../workspace-trust-store.js';
 import { resolveWorkspaceIdentity, revalidateWorkspaceIdentity } from '../workspace-identity.js';
-import { resolveProviderV2Manifest } from '../provider-v2.js';
+import { capabilityRequestForContinuation, resolveProviderV2Manifest } from '../provider-v2.js';
 import { BoundedV2SseWriter } from '../v2-sse-writer.js';
-import { V2SessionFacade } from '../v2-session-facade.js';
+import { V2ProviderStartupError, V2SessionFacade } from '../v2-session-facade.js';
 
 function invalidRequest(reply: FastifyReply, details: unknown): void {
   reply.code(400).send({ error: 'invalid request body', code: 'invalid_request', details });
@@ -26,6 +26,25 @@ function parseLastEventId(header: string | string[] | undefined): number | undef
   if (!/^\d+$/.test(value)) return undefined;
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed < Number.MAX_SAFE_INTEGER ? parsed + 1 : undefined;
+}
+
+function requestedTransportMode(provider: string): 'auto' | 'app-server' | 'exec' | undefined {
+  if (provider !== 'codex') return undefined;
+  const value = process.env.AGENT_DOCK_CODEX_TRANSPORT ?? 'auto';
+  return value === 'auto' || value === 'app-server' || value === 'exec' ? value : undefined;
+}
+
+function sameWorkspaceTrust(
+  expected: WorkspaceTrustEvidence,
+  current: WorkspaceTrustEvidence,
+): boolean {
+  if (expected.state !== current.state) return false;
+  if (expected.state === 'untrusted' || current.state === 'untrusted') return true;
+  return (
+    expected.workspaceId === current.workspaceId &&
+    expected.incarnation === current.incarnation &&
+    expected.trustEpoch === current.trustEpoch
+  );
 }
 
 function raceAbort<T>(
@@ -133,11 +152,61 @@ export function registerV2SessionRoutes(
           }
         }
 
-        const detected = await raceAbort(provider.detect(), controller.signal);
+        const canonicalCwd = workspace?.canonicalPath ?? parsed.data.cwd;
+        const workspaceTrust = await sessionManager.verifiedWorkspaceTrust(workspace);
+        if (controller.signal.aborted) return;
+        if (workspace && workspaceTrust.state !== 'trusted') {
+          reply.code(409).send({
+            error: 'workspace trust changed',
+            code: 'workspace_untrusted',
+          });
+          return;
+        }
+        const detected = await raceAbort(
+          provider.detect({
+            cwd: canonicalCwd,
+            workspaceTrust,
+            signal: controller.signal,
+            includeLaunchScopeEvidence: false,
+          }),
+          controller.signal,
+        );
         if (detected.aborted) return;
-        const manifest = resolveProviderV2Manifest(provider, detected.value);
+        const transportMode = requestedTransportMode(parsed.data.provider);
+        if (parsed.data.provider === 'codex' && transportMode === undefined) {
+          reply.code(422).send({
+            error: 'requested provider transport is unavailable',
+            code: 'provider_transport_unavailable',
+          });
+          return;
+        }
+        let manifest;
+        try {
+          manifest = resolveProviderV2Manifest(provider, detected.value);
+        } catch {
+          reply.code(422).send({
+            error: 'requested provider transport is unavailable',
+            code: 'provider_transport_unavailable',
+          });
+          return;
+        }
+        if (
+          parsed.data.provider === 'codex' &&
+          transportMode === 'app-server' &&
+          !manifest.interactive
+        ) {
+          reply.code(422).send({
+            error: 'requested provider transport is unavailable',
+            code: 'provider_transport_unavailable',
+          });
+          return;
+        }
+        const capabilityRequest = capabilityRequestForContinuation(
+          parsed.data.capabilities,
+          parsed.data.continuation,
+        );
         const negotiation = negotiateCapabilities({
-          request: parsed.data.capabilities,
+          request: capabilityRequest,
           runtimeScope: manifest.runtimeScope,
           supportRecords: manifest.supportRecords,
           transports: manifest.transports,
@@ -170,14 +239,78 @@ export function registerV2SessionRoutes(
           });
           return;
         }
-        const session = await sessions.create(
-          { ...parsed.data, cwd: workspace?.canonicalPath ?? parsed.data.cwd },
-          negotiation.selection,
-          transport,
-          manifest.interactive,
-          controller.signal,
-          workspace,
-        );
+        if (controller.signal.aborted) return;
+        const currentWorkspaceTrust = await sessionManager.verifiedWorkspaceTrust(workspace);
+        if (
+          workspace &&
+          (currentWorkspaceTrust.state !== 'trusted' ||
+            !sameWorkspaceTrust(workspaceTrust, currentWorkspaceTrust))
+        ) {
+          reply.code(409).send({
+            error: 'workspace trust changed',
+            code: 'workspace_untrusted',
+          });
+          return;
+        }
+        const fallbackIntent =
+          manifest.interactive && parsed.data.provider === 'codex'
+            ? {
+                request: capabilityRequest,
+                cwd: canonicalCwd,
+                workspaceTrust: currentWorkspaceTrust,
+                requestedTransportMode: transportMode,
+                primaryManifest: manifest,
+                primarySelection: negotiation.selection,
+                continuation: parsed.data.continuation,
+              }
+            : undefined;
+        const legacyIntent =
+          !manifest.interactive && parsed.data.provider === 'codex' && transportMode === 'auto'
+            ? {
+                request: capabilityRequest,
+                cwd: canonicalCwd,
+                workspaceTrust: currentWorkspaceTrust,
+                manifest,
+                selection: negotiation.selection,
+                continuation: parsed.data.continuation,
+              }
+            : undefined;
+        let session;
+        try {
+          session = await sessions.create(
+            { ...parsed.data, cwd: canonicalCwd },
+            negotiation.selection,
+            transport,
+            manifest.interactive,
+            controller.signal,
+            workspace,
+            {
+              providerStatus: detected.value,
+              ...(fallbackIntent ? { fallbackIntent } : {}),
+              ...(legacyIntent ? { legacyIntent } : {}),
+            },
+          );
+        } catch (error) {
+          if (!(error instanceof V2ProviderStartupError)) throw error;
+          if (error.reasonCode === 'provider_scope_unverified') {
+            reply.code(422).send({
+              error: 'provider launch scope could not be verified',
+              code: 'provider_scope_unverified',
+              details: { reason: error.fallbackReason },
+            });
+            return;
+          }
+          reply.code(502).send({
+            error: error.message,
+            code: error.code,
+            details: {
+              reason: error.reasonCode,
+              deliveryState: error.deliveryState,
+              fallback: error.fallbackReason,
+            },
+          });
+          return;
+        }
         if (controller.signal.aborted || req.raw.aborted || reply.raw.destroyed) {
           await sessions.cancel(session.id);
           return;

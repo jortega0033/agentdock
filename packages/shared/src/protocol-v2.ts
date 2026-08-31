@@ -299,11 +299,47 @@ export type QuestionAnswerV2 = z.infer<typeof questionAnswerV2Schema>;
 export type QuestionResponseCommandV2 = z.infer<typeof questionResponseCommandV2Schema>;
 export type AgentCommandV2 = z.infer<typeof agentCommandV2Schema>;
 
+export const providerSessionIdV2Schema = z
+  .string()
+  .min(1)
+  .refine((value) => utf8ByteLength(value) <= 1_024, {
+    message: 'provider session id must be at most 1024 UTF-8 bytes',
+  })
+  .refine(
+    (value) =>
+      ![...value].some((character) => {
+        const codePoint = character.codePointAt(0) ?? 0;
+        return codePoint <= 31 || codePoint === 127;
+      }),
+    {
+      message: 'provider session id must not contain control characters',
+    },
+  );
+
+export const sessionContinuationV2Schema = z.discriminatedUnion('kind', [
+  z
+    .object({
+      kind: z.literal('resume'),
+      providerSessionId: providerSessionIdV2Schema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('fork'),
+      providerSessionId: providerSessionIdV2Schema,
+    })
+    .strict(),
+]);
+
+export type SessionContinuationV2 = z.infer<typeof sessionContinuationV2Schema>;
+
 export interface CreateSessionV2Request {
   provider: (typeof PROVIDER_IDS)[number];
   cwd: string;
   prompt: string;
   capabilities?: CapabilityRequest;
+  /** Absence starts a fresh provider thread. */
+  continuation?: SessionContinuationV2;
 }
 
 export const createSessionV2RequestSchema = z
@@ -312,6 +348,7 @@ export const createSessionV2RequestSchema = z
     cwd: z.string().min(1, 'cwd is required'),
     prompt: z.string().min(1, 'prompt is required').max(200_000, 'prompt is too long'),
     capabilities: capabilityRequestSchema.optional(),
+    continuation: sessionContinuationV2Schema.optional(),
   })
   .strict()
   .superRefine((request, ctx) => {
@@ -328,6 +365,27 @@ export const sessionStatusV2Schema = z.enum([
   'interrupted',
 ]);
 
+const providerRuntimeVersionV2Schema = nonemptyWireStringSchema.refine(
+  (value) => /^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(value),
+  { message: 'runtime version metadata must contain only safe version characters' },
+);
+const providerFallbackReasonV2Schema = nonemptyWireStringSchema.refine(
+  (value) => /^[a-z0-9][a-z0-9._-]*$/.test(value),
+  { message: 'fallback reason must be a safe reason code' },
+);
+
+export const providerRuntimeMetadataV2Schema = z
+  .object({
+    cliVersion: providerRuntimeVersionV2Schema.optional(),
+    schemaVersion: providerRuntimeVersionV2Schema.optional(),
+    fixtureSet: providerRuntimeVersionV2Schema.optional(),
+    requestedTransportMode: z.enum(['auto', 'app-server', 'exec']).optional(),
+    fallbackReason: providerFallbackReasonV2Schema.optional(),
+  })
+  .strict();
+
+export type ProviderRuntimeMetadataV2 = z.infer<typeof providerRuntimeMetadataV2Schema>;
+
 export interface AgentSessionV2 {
   id: SessionId;
   provider: (typeof PROVIDER_IDS)[number];
@@ -342,6 +400,10 @@ export interface AgentSessionV2 {
   startedAt: string;
   completedAt?: string;
   error?: string;
+  /** Opaque provider-native thread/session id; bounded and never used as a process id. */
+  providerSessionId?: string;
+  /** Bounded, non-secret provider transport facts. Native payloads and credentials are forbidden. */
+  runtimeMetadata?: ProviderRuntimeMetadataV2;
   earliestSequence: number;
 }
 
@@ -360,6 +422,8 @@ export const agentSessionV2Schema = z
     startedAt: z.string().datetime({ offset: true }),
     completedAt: z.string().datetime({ offset: true }).optional(),
     error: z.string().optional(),
+    providerSessionId: providerSessionIdV2Schema.optional(),
+    runtimeMetadata: providerRuntimeMetadataV2Schema.optional(),
     earliestSequence: z.number().int().finite().nonnegative(),
   })
   .strict();

@@ -80,10 +80,8 @@ async function main() {
     logger.info('shutting down', { signal });
     sessionManager.beginShutdown();
     await sessionManager.cancelAll();
-    const closing = app.close().catch((error: unknown) => {
-      logger.warn('daemon HTTP shutdown failed', {
-        message: error instanceof Error ? error.message : String(error),
-      });
+    const closing = app.close().catch(() => {
+      logger.warn('daemon HTTP shutdown failed');
     });
     if (!(await settlesWithin(closing, 5_000))) {
       logger.warn('daemon HTTP shutdown exceeded deadline; closing active sockets');
@@ -98,8 +96,8 @@ async function main() {
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 }
 
-main().catch((err) => {
-  console.error('daemon failed to start:', err instanceof Error ? err.message : err);
+main().catch(() => {
+  console.error('daemon failed to start');
   process.exit(1);
 });
 

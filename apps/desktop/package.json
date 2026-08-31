@@ -11,6 +11,7 @@
     "build": "tsc -p tsconfig.json --noEmit && vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "test:packaged-daemon-win": "node scripts/packaged-daemon-win-smoke.mjs",
     "package": "electron-builder",
     "package:win": "electron-builder --win nsis"
   },

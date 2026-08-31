@@ -7,6 +7,7 @@
 // dependency it imports into one plain-JS file that plain Node can run standalone — which is
 // exactly what Electron's packaged-mode sidecar (electron/main.ts) needs.
 import { build } from 'esbuild';
+import { buildWindowsJobHost } from './build-windows-job-host.mjs';
 
 await build({
   entryPoints: ['src/index.ts'],
@@ -22,3 +23,5 @@ await build({
     js: "import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);",
   },
 });
+
+await buildWindowsJobHost();

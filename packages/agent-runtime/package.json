@@ -8,8 +8,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "test:conformance": "vitest run --maxWorkers=1 test/provider-conformance.test.ts test/fixture-safety.test.mjs test/claude-contract.test.ts test/codex-contract.test.ts"
+    "test": "node ../../apps/daemon/scripts/build-windows-job-host.mjs && vitest run",
+    "test:conformance": "node ../../apps/daemon/scripts/build-windows-job-host.mjs && vitest run --maxWorkers=1 test/provider-conformance.test.ts test/fixture-safety.test.mjs test/claude-contract.test.ts test/codex-contract.test.ts"
   },
   "dependencies": {
     "@agent-dock/shared": "workspace:*"

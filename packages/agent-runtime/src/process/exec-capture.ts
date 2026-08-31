@@ -1,5 +1,21 @@
 import { spawnProcess } from './spawn-process.js';
 
+const TERMINATION_WAIT_MS = 5_000;
+
+async function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export interface ExecResult {
   code: number | null;
   stdout: string;
@@ -33,13 +49,34 @@ export async function execCapture(
 
   const timeoutMs = opts.timeoutMs ?? 10_000;
   let timedOut = false;
+  let resolveTimeout!: () => void;
+  const timeout = new Promise<void>((resolve) => {
+    resolveTimeout = resolve;
+  });
   const timer = setTimeout(() => {
     timedOut = true;
-    kill();
+    resolveTimeout();
   }, timeoutMs);
 
-  const { code } = await exit;
+  const outcome = await Promise.race([
+    exit.then((result) => ({ type: 'exit' as const, result })),
+    timeout.then(() => ({ type: 'timeout' as const })),
+  ]);
   clearTimeout(timer);
 
-  return { code, stdout, stderr, timedOut };
+  if (outcome.type === 'exit') {
+    return { code: outcome.result.code, stdout, stderr, timedOut };
+  }
+
+  // spawnProcess.kill is itself idempotent and reaps its child. Bound both that work and the
+  // exit wait here: detection must return even if a platform helper rejects or never reports exit.
+  await settleWithin(
+    Promise.resolve()
+      .then(kill)
+      .catch(() => undefined),
+    TERMINATION_WAIT_MS,
+  );
+  const reaped = await settleWithin(exit, TERMINATION_WAIT_MS);
+
+  return { code: reaped?.code ?? null, stdout, stderr, timedOut: true };
 }

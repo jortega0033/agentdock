@@ -236,6 +236,39 @@ describe('protocol v2 content and interaction schemas', () => {
     ).toBe(false);
   });
 
+  it('accepts only the strict public resume/fork continuation union', () => {
+    for (const kind of ['resume', 'fork'] as const) {
+      expect(
+        createSessionV2RequestSchema.safeParse({
+          provider: 'codex',
+          cwd: '/tmp',
+          prompt: 'continue',
+          continuation: { kind, providerSessionId: 'native-thread-1' },
+        }).success,
+      ).toBe(true);
+    }
+    expect(
+      createSessionV2RequestSchema.safeParse({
+        provider: 'codex',
+        cwd: '/tmp',
+        prompt: 'continue',
+        continuation: {
+          kind: 'fork',
+          providerSessionId: 'native-thread-1',
+          lastTurnId: 'must-not-be-public',
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      createSessionV2RequestSchema.safeParse({
+        provider: 'codex',
+        cwd: '/tmp',
+        prompt: 'continue',
+        continuation: { kind: 'resume', providerSessionId: 'bad\nthread' },
+      }).success,
+    ).toBe(false);
+  });
+
   it('validates session snapshots and cancellation acknowledgements', () => {
     expect(
       agentSessionV2Schema.safeParse({
@@ -249,9 +282,47 @@ describe('protocol v2 content and interaction schemas', () => {
         currentTurnId: turnId,
         acceptedWork: 'accepted',
         startedAt: timestamp,
+        providerSessionId: 'thread_123',
+        runtimeMetadata: {
+          cliVersion: '0.147.0',
+          schemaVersion: 'schema-0.147.0',
+          fixtureSet: 'codex-app-server-0.147.0-v1',
+          requestedTransportMode: 'auto',
+          fallbackReason: 'app_server_handshake_failed',
+        },
         earliestSequence: 0,
       }).success,
     ).toBe(true);
+    expect(
+      agentSessionV2Schema.safeParse({
+        id: sessionId,
+        provider: 'codex',
+        transport: 'legacy-one-shot',
+        cwd: '/tmp',
+        status: 'active',
+        selection,
+        executionId,
+        acceptedWork: 'unknown',
+        startedAt: timestamp,
+        runtimeMetadata: { fallbackReason: 'prompt: secret value' },
+        earliestSequence: 0,
+      }).success,
+    ).toBe(false);
+    expect(
+      agentSessionV2Schema.safeParse({
+        id: sessionId,
+        provider: 'codex',
+        transport: 'codex-app-server',
+        cwd: '/tmp',
+        status: 'active',
+        selection,
+        executionId,
+        acceptedWork: 'accepted',
+        startedAt: timestamp,
+        providerSessionId: `thread-${'x'.repeat(1_025)}`,
+        earliestSequence: 0,
+      }).success,
+    ).toBe(false);
     expect(
       cancelSessionV2ResponseSchema.safeParse({ status: 'cancelling', sessionId }).success,
     ).toBe(true);

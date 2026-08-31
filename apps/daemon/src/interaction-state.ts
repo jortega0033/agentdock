@@ -132,6 +132,30 @@ export class InteractionState {
     return claimed;
   }
 
+  /**
+   * Returns a provider-rejected response to the pending state without extending its original
+   * monotonic publication deadline. A retry may claim it again only while that budget remains.
+   */
+  release(requestId: string): boolean {
+    const record = this.pending.get(requestId);
+    if (!record || record.interaction.state !== 'resolving') return false;
+    const deadlineMonotonicMs = record.interaction.deadlineMonotonicMs;
+    record.interaction = {
+      ...record.interaction,
+      state: deadlineMonotonicMs === undefined ? 'unpublished' : 'pending',
+    };
+    if (deadlineMonotonicMs !== undefined) {
+      record.timer = this.scheduler.set(
+        Math.max(0, deadlineMonotonicMs - this.scheduler.now()),
+        () => {
+          const claimed = this.claim(requestId);
+          if (claimed) this.onTimeout(claimed);
+        },
+      );
+    }
+    return true;
+  }
+
   settle(requestId: string): boolean {
     const record = this.pending.get(requestId);
     if (!record || record.interaction.state !== 'resolving') return false;

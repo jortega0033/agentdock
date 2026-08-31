@@ -31,6 +31,9 @@ export function providerSandboxStatus(
       : { mechanism: 'agentdock_policy', state: 'not_requested', evidence: [] },
     os: {
       mechanism: 'os_sandbox',
+      // Codex 0.147.0 readiness reports only ready/notConfigured/updateRequired. It does not reveal
+      // whether setup used the elevated or unelevated implementation. Until AgentDock owns an
+      // explicit setup flow, make no Windows OS-isolation claim instead of treating them alike.
       state: platform === 'win32' ? 'unavailable' : 'unknown',
       evidence: [],
     },

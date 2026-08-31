@@ -2,6 +2,8 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   agentEventV2EnvelopeSchema,
   agentSessionV2Schema,
+  providerSessionIdV2Schema,
+  providerRuntimeMetadataV2Schema,
   utf8ByteLength,
   type AgentCommandV2,
   type AgentEventEnvelope,
@@ -10,10 +12,33 @@ import {
   type AgentSessionV2,
   type CapabilitySelection,
   type CreateSessionV2Request,
+  type ProviderRuntimeMetadataV2,
+  type ProviderStatus,
   type ProviderTransportV2,
 } from '@agent-dock/shared';
+import {
+  ProviderTransportStartupError,
+  type ProviderContinuationEvidence,
+  type ProviderDeliveryState,
+  type WorkspaceTrustEvidence,
+} from '@agent-dock/agent-runtime';
 import type { DispatchResult, SessionManager } from './session-manager.js';
 import type { WorkspaceIdentity } from './workspace-identity.js';
+import {
+  freezeProviderContinuationScope,
+  planLegacyProviderFallback,
+  planPinnedLegacyDispatch,
+  providerContinuationScopesEqual,
+  providerFallbackScopesEqual,
+  providerStatusMatchesFrozenScope,
+  type FrozenProviderSessionScope,
+  type PinnedLegacyDispatchPlan,
+  type ProviderContinuationScope,
+  type ProviderV2FallbackPlan,
+  type ProviderV2FallbackIntent,
+  type ProviderV2FallbackPlanning,
+  type ProviderV2LegacyIntent,
+} from './provider-v2.js';
 
 interface ToolCorrelation {
   toolCallId: string;
@@ -40,6 +65,34 @@ interface V2SessionMetadata {
   status: AgentSessionV2['status'];
   pendingInteractions: Map<string, { kind: 'approval' | 'question'; turnId: string }>;
   responderLease?: string;
+  providerSessionId?: string;
+  runtimeMetadata?: ProviderRuntimeMetadataV2;
+  continuationScope?: ProviderContinuationScope;
+  continuationLease?: { providerSessionId: string; leaseId: string };
+  continuationTargetLease?: { providerSessionId: string; leaseId: string };
+}
+
+export interface V2SessionCreateContext {
+  providerStatus?: ProviderStatus;
+  fallbackIntent?: ProviderV2FallbackIntent;
+  primaryScope?: FrozenProviderSessionScope;
+  fallback?: ProviderV2FallbackPlan;
+  fallbackDeniedReason?: ProviderV2FallbackPlanning['deniedReason'];
+  legacyIntent?: ProviderV2LegacyIntent;
+  legacyDispatch?: PinnedLegacyDispatchPlan;
+}
+
+export class V2ProviderStartupError extends Error {
+  readonly code = 'provider_transport_startup_failed' as const;
+
+  constructor(
+    readonly reasonCode: string,
+    readonly deliveryState: ProviderDeliveryState,
+    readonly fallbackReason: string,
+  ) {
+    super('provider transport failed before the session could start');
+    this.name = 'V2ProviderStartupError';
+  }
 }
 
 const ALL_EFFECTS = [
@@ -55,6 +108,13 @@ const MAX_WIRE_STRING_BYTES = 256;
 const MAX_REPLAY_EVENTS = 5_000;
 const MAX_REPLAY_BYTES = 16 * 1024 * 1024;
 const RESPONDER_LEASE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const MAX_CONTINUATION_BINDINGS = 1_024;
+
+interface ProviderContinuationBinding {
+  sessionId: string;
+  scope: ProviderContinuationScope;
+  leaseId?: string;
+}
 
 function isTerminal(event: AgentEventV2Envelope): boolean {
   return (
@@ -90,8 +150,42 @@ function validTokenCount(value: number | undefined): boolean {
   return value === undefined || (Number.isSafeInteger(value) && value >= 0);
 }
 
+function safeReasonCode(value: string): string {
+  return /^[a-z0-9][a-z0-9._-]{0,255}$/.test(value) ? value : 'provider_transport_startup_failed';
+}
+
+function sameWorkspaceTrust(
+  expected: WorkspaceTrustEvidence,
+  current: WorkspaceTrustEvidence,
+): boolean {
+  if (expected.state !== current.state) return false;
+  if (expected.state === 'untrusted' || current.state === 'untrusted') return true;
+  return (
+    expected.workspaceId === current.workspaceId &&
+    expected.incarnation === current.incarnation &&
+    expected.trustEpoch === current.trustEpoch
+  );
+}
+
+function sameProviderDetectionSnapshot(expected: ProviderStatus, current: ProviderStatus): boolean {
+  return (
+    expected.id === current.id &&
+    expected.installed === current.installed &&
+    expected.executablePath === current.executablePath &&
+    expected.version === current.version &&
+    expected.authenticated === current.authenticated &&
+    expected.authSource === current.authSource
+  );
+}
+
+function safeRuntimeMetadata(value: unknown): ProviderRuntimeMetadataV2 | undefined {
+  const parsed = providerRuntimeMetadataV2Schema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
 export class V2SessionFacade {
   private readonly metadata = new Map<string, V2SessionMetadata>();
+  private readonly continuationBindings = new Map<string, ProviderContinuationBinding>();
 
   constructor(private readonly sessions: SessionManager) {}
 
@@ -102,40 +196,456 @@ export class V2SessionFacade {
     interactive: boolean,
     signal?: AbortSignal,
     workspace?: WorkspaceIdentity,
+    context?: V2SessionCreateContext,
   ): Promise<AgentSessionV2> {
     this.prune();
     const executionId = randomUUID();
     const turnId = randomUUID();
-    const session = interactive
-      ? await this.sessions.createInteractive(
+    let continuationBinding: ProviderContinuationBinding | undefined;
+    const continuationLease = input.continuation
+      ? { providerSessionId: input.continuation.providerSessionId, leaseId: executionId }
+      : undefined;
+    let continuationTargetLease: { providerSessionId: string; leaseId: string } | undefined;
+    if (input.continuation) {
+      const requiredCapability =
+        input.continuation.kind === 'resume' ? 'session.resume' : 'session.fork';
+      if (!selection.enabled.some(({ id }) => id === requiredCapability)) {
+        throw new V2ProviderStartupError(
+          'continuation_capability_not_selected',
+          'not_delivered',
+          'continuation_capability_not_selected',
+        );
+      }
+      continuationBinding = this.continuationBindings.get(input.continuation.providerSessionId);
+      if (!continuationBinding) {
+        throw new V2ProviderStartupError(
+          'continuation_binding_not_found',
+          'not_delivered',
+          'continuation_binding_not_found',
+        );
+      }
+      if (continuationBinding.leaseId) {
+        throw new V2ProviderStartupError(
+          'continuation_in_use',
+          'not_delivered',
+          'continuation_in_use',
+        );
+      }
+      // No await may occur between checking and taking this in-memory lease.
+      continuationBinding.leaseId = executionId;
+    }
+    let retainContinuationLease = false;
+    try {
+      let activeSelection = selection;
+      let activeInteractive = interactive;
+      let fallbackRuntimeMetadata: ProviderRuntimeMetadataV2 | undefined;
+      let primaryScope = context?.primaryScope;
+      let fallback = context?.fallback;
+      let fallbackDeniedReason = context?.fallbackDeniedReason;
+      const currentWorkspaceTrust = await this.sessions.verifiedWorkspaceTrust(workspace);
+      let launchProviderStatus = context?.providerStatus;
+      let continuationScope: ProviderContinuationScope | undefined;
+      let expectedContinuationEvidence:
+        { accountFingerprint: string; selectedModel: string } | undefined;
+      if (primaryScope && fallback) {
+        expectedContinuationEvidence = {
+          accountFingerprint: primaryScope.accountFingerprint,
+          selectedModel: primaryScope.model,
+        };
+      }
+      if (input.continuation) {
+        expectedContinuationEvidence = {
+          accountFingerprint: continuationBinding!.scope.accountFingerprint,
+          selectedModel: continuationBinding!.scope.selectedModel,
+        };
+        continuationScope = context?.providerStatus
+          ? freezeProviderContinuationScope({
+              status: context.providerStatus,
+              cwd: input.cwd,
+              workspaceTrust: currentWorkspaceTrust,
+              evidence: expectedContinuationEvidence,
+            })
+          : undefined;
+        if (!continuationScope) {
+          throw new V2ProviderStartupError(
+            'continuation_scope_mismatch',
+            'not_delivered',
+            'continuation_scope_mismatch',
+          );
+        }
+        if (!providerContinuationScopesEqual(continuationBinding!.scope, continuationScope)) {
+          throw new V2ProviderStartupError(
+            'continuation_scope_mismatch',
+            'not_delivered',
+            'continuation_scope_mismatch',
+          );
+        }
+        if (
+          !interactive &&
+          (context?.providerStatus?.accountFingerprint !==
+            expectedContinuationEvidence.accountFingerprint ||
+            context?.providerStatus?.selectedModel !== expectedContinuationEvidence.selectedModel)
+        ) {
+          throw new V2ProviderStartupError(
+            'continuation_scope_mismatch',
+            'not_delivered',
+            'continuation_scope_mismatch',
+          );
+        }
+      }
+      const fallbackIntent = context?.fallbackIntent;
+      const initialProviderStatus = context?.providerStatus;
+      const beforeProviderThreadStart =
+        fallbackIntent && initialProviderStatus
+          ? async (evidence: Readonly<ProviderContinuationEvidence> | undefined): Promise<void> => {
+              const prePlanningTrust = await this.sessions.verifiedWorkspaceTrust(workspace);
+              if (
+                signal?.aborted ||
+                !sameWorkspaceTrust(fallbackIntent.workspaceTrust, prePlanningTrust)
+              ) {
+                throw new ProviderTransportStartupError(
+                  'workspace_trust_changed',
+                  'not_delivered',
+                  'Workspace trust changed before provider thread startup',
+                );
+              }
+              const evidencedStatus = evidence
+                ? { ...initialProviderStatus, ...evidence }
+                : initialProviderStatus;
+              const planning = planLegacyProviderFallback({
+                ...fallbackIntent,
+                status: evidencedStatus,
+                workspaceTrust: prePlanningTrust,
+              });
+              const postPlanningTrust = await this.sessions.verifiedWorkspaceTrust(workspace);
+              if (signal?.aborted || !sameWorkspaceTrust(prePlanningTrust, postPlanningTrust)) {
+                throw new ProviderTransportStartupError(
+                  'workspace_trust_changed',
+                  'not_delivered',
+                  'Workspace trust changed before provider thread startup',
+                );
+              }
+              primaryScope = planning.primaryScope;
+              fallback = planning.fallback;
+              fallbackDeniedReason = planning.deniedReason;
+              launchProviderStatus = evidencedStatus;
+            }
+          : undefined;
+      let session: AgentSession;
+      try {
+        if (interactive) {
+          session = await this.sessions.createInteractive(
+            input.provider,
+            input.cwd,
+            input.prompt,
+            selection,
+            transport,
+            executionId,
+            turnId,
+            signal,
+            workspace,
+            context?.providerStatus,
+            input.continuation,
+            expectedContinuationEvidence,
+            beforeProviderThreadStart,
+          );
+        } else if (context?.legacyIntent && context.providerStatus) {
+          const legacyIntent = context.legacyIntent;
+          const preProbeTrust = await this.sessions.verifiedWorkspaceTrust(workspace);
+          const redetected = await this.sessions.redetectProvider(input.provider, signal, {
+            cwd: input.cwd,
+            workspaceTrust: preProbeTrust,
+            includeLaunchScopeEvidence: true,
+          });
+          const preSpawnTrust = await this.sessions.verifiedWorkspaceTrust(workspace);
+          if (
+            !redetected ||
+            signal?.aborted ||
+            !sameProviderDetectionSnapshot(context.providerStatus, redetected) ||
+            !sameWorkspaceTrust(legacyIntent.workspaceTrust, preProbeTrust) ||
+            !sameWorkspaceTrust(legacyIntent.workspaceTrust, preSpawnTrust)
+          ) {
+            throw new V2ProviderStartupError(
+              'provider_scope_revalidation_failed',
+              'not_delivered',
+              'provider_scope_revalidation_failed',
+            );
+          }
+          const planning = planPinnedLegacyDispatch({
+            ...legacyIntent,
+            status: redetected,
+            workspaceTrust: preSpawnTrust,
+          });
+          if (!planning.dispatch) {
+            throw new V2ProviderStartupError(
+              'provider_scope_unverified',
+              'not_delivered',
+              planning.deniedReason ?? 'fallback_scope_mismatch',
+            );
+          }
+          session = this.sessions.create(
+            input.provider,
+            input.cwd,
+            input.prompt,
+            undefined,
+            2,
+            workspace,
+            redetected,
+            planning.dispatch.sandbox,
+            planning.dispatch.frozenScope.model,
+          );
+          launchProviderStatus = redetected;
+        } else if (context?.legacyDispatch) {
+          const preProbeTrust = await this.sessions.verifiedWorkspaceTrust(workspace);
+          const redetected = await this.sessions.redetectProvider(input.provider, signal, {
+            cwd: input.cwd,
+            workspaceTrust: preProbeTrust,
+            includeLaunchScopeEvidence: true,
+          });
+          const preSpawnTrust = await this.sessions.verifiedWorkspaceTrust(workspace);
+          if (
+            !redetected ||
+            signal?.aborted ||
+            !providerStatusMatchesFrozenScope(redetected, context.legacyDispatch.frozenScope) ||
+            !sameWorkspaceTrust(context.legacyDispatch.frozenScope.workspaceTrust, preProbeTrust) ||
+            !sameWorkspaceTrust(context.legacyDispatch.frozenScope.workspaceTrust, preSpawnTrust)
+          ) {
+            throw new V2ProviderStartupError(
+              'provider_scope_revalidation_failed',
+              'not_delivered',
+              'provider_scope_revalidation_failed',
+            );
+          }
+          session = this.sessions.create(
+            input.provider,
+            input.cwd,
+            input.prompt,
+            undefined,
+            2,
+            workspace,
+            redetected,
+            context.legacyDispatch.sandbox,
+            context.legacyDispatch.frozenScope.model,
+          );
+          launchProviderStatus = redetected;
+        } else {
+          if (input.continuation?.kind === 'fork') {
+            throw new V2ProviderStartupError(
+              'legacy_fork_unsupported',
+              'not_delivered',
+              'continuation_capability_not_selected',
+            );
+          }
+          const preSpawnTrust = await this.sessions.verifiedWorkspaceTrust(workspace);
+          if (signal?.aborted || !sameWorkspaceTrust(currentWorkspaceTrust, preSpawnTrust)) {
+            throw new V2ProviderStartupError(
+              'provider_scope_revalidation_failed',
+              'not_delivered',
+              'provider_scope_revalidation_failed',
+            );
+          }
+          session = this.sessions.create(
+            input.provider,
+            input.cwd,
+            input.prompt,
+            input.continuation?.providerSessionId,
+            2,
+            workspace,
+            context?.providerStatus,
+          );
+        }
+      } catch (error) {
+        if (!(error instanceof ProviderTransportStartupError)) throw error;
+        const reasonCode = safeReasonCode(error.reasonCode);
+        const candidateFallback = fallback;
+        const candidatePrimaryScope = primaryScope;
+        const staticallyEligible =
+          interactive &&
+          reasonCode !== 'codex_continuation_scope_changed' &&
+          error.deliveryState === 'not_delivered' &&
+          !signal?.aborted &&
+          context?.providerStatus !== undefined &&
+          candidatePrimaryScope !== undefined &&
+          candidateFallback !== undefined &&
+          candidateFallback.selection.transport === candidateFallback.transport.id &&
+          providerFallbackScopesEqual(candidatePrimaryScope, candidateFallback.frozenScope);
+        if (!staticallyEligible) {
+          throw new V2ProviderStartupError(
+            reasonCode,
+            error.deliveryState,
+            fallbackDeniedReason ??
+              (error.deliveryState === 'not_delivered'
+                ? 'fallback_scope_mismatch'
+                : error.deliveryState === 'ambiguous'
+                  ? 'fallback_delivery_ambiguous'
+                  : 'fallback_after_delivery_forbidden'),
+          );
+        }
+        const currentTrust = await this.sessions.verifiedWorkspaceTrust(workspace);
+        if (!sameWorkspaceTrust(candidatePrimaryScope.workspaceTrust, currentTrust)) {
+          throw new V2ProviderStartupError(
+            reasonCode,
+            error.deliveryState,
+            'fallback_scope_mismatch',
+          );
+        }
+        const redetectedStatus = await this.sessions.redetectProvider(input.provider, signal, {
+          cwd: input.cwd,
+          workspaceTrust: currentTrust,
+          includeLaunchScopeEvidence: true,
+        });
+        const preFallbackTrust = await this.sessions.verifiedWorkspaceTrust(workspace);
+        if (!redetectedStatus) {
+          throw new V2ProviderStartupError(
+            reasonCode,
+            error.deliveryState,
+            'fallback_provider_redetect_failed',
+          );
+        }
+        if (
+          signal?.aborted ||
+          !sameWorkspaceTrust(candidatePrimaryScope.workspaceTrust, preFallbackTrust)
+        ) {
+          throw new V2ProviderStartupError(
+            reasonCode,
+            error.deliveryState,
+            'fallback_scope_mismatch',
+          );
+        }
+        if (!providerStatusMatchesFrozenScope(redetectedStatus, candidatePrimaryScope)) {
+          throw new V2ProviderStartupError(
+            reasonCode,
+            error.deliveryState,
+            'fallback_provider_scope_changed',
+          );
+        }
+
+        // This is deliberately not a loop: one verified pre-delivery app-server failure can start
+        // one pinned legacy process, and a failure of that process is returned as-is.
+        session = this.sessions.create(
           input.provider,
           input.cwd,
           input.prompt,
-          selection,
-          transport,
-          executionId,
-          turnId,
-          signal,
+          undefined,
+          2,
           workspace,
-        )
-      : this.sessions.create(input.provider, input.cwd, input.prompt, undefined, 2, workspace);
-    const metadata: V2SessionMetadata = {
-      selection,
-      executionId,
-      turnId,
-      events: new Map(),
-      listeners: new Set(),
-      replayBytes: 0,
-      nextSequence: 0,
-      nativeTools: new Map(),
-      interactive,
-      status: v2Status(session.status),
-      pendingInteractions: new Map(),
-    };
-    this.metadata.set(session.id, metadata);
-    if (interactive) this.attachInteractiveSource(session.id, metadata);
-    else this.attachSource(session.id, metadata);
-    return this.project(session) as AgentSessionV2;
+          redetectedStatus,
+          'workspace-write',
+          candidateFallback.frozenScope.model,
+        );
+        launchProviderStatus = redetectedStatus;
+        activeSelection = candidateFallback.selection;
+        activeInteractive = false;
+        fallbackRuntimeMetadata = safeRuntimeMetadata({
+          ...candidateFallback.runtimeMetadata,
+          fallbackReason: reasonCode,
+        });
+      }
+      const providerMetadata = activeInteractive
+        ? this.sessions.interactiveProviderMetadata(session.id)
+        : undefined;
+      const runtimeMetadata =
+        safeRuntimeMetadata(providerMetadata?.runtimeMetadata) ?? fallbackRuntimeMetadata;
+      const actualContinuationEvidence =
+        providerMetadata?.continuationEvidence ??
+        (launchProviderStatus?.accountFingerprint && launchProviderStatus.selectedModel
+          ? {
+              accountFingerprint: launchProviderStatus.accountFingerprint,
+              selectedModel: launchProviderStatus.selectedModel,
+            }
+          : undefined);
+      if (
+        input.continuation &&
+        expectedContinuationEvidence &&
+        (!actualContinuationEvidence ||
+          actualContinuationEvidence.accountFingerprint !==
+            expectedContinuationEvidence.accountFingerprint ||
+          actualContinuationEvidence.selectedModel !== expectedContinuationEvidence.selectedModel)
+      ) {
+        await this.sessions.remove(session.id);
+        throw new V2ProviderStartupError(
+          'continuation_scope_mismatch',
+          'delivered',
+          'continuation_scope_mismatch',
+        );
+      }
+      continuationScope = launchProviderStatus
+        ? freezeProviderContinuationScope({
+            status: launchProviderStatus,
+            cwd: input.cwd,
+            workspaceTrust: currentWorkspaceTrust,
+            ...(actualContinuationEvidence ? { evidence: actualContinuationEvidence } : {}),
+          })
+        : undefined;
+      const metadata: V2SessionMetadata = {
+        selection: activeSelection,
+        executionId,
+        turnId,
+        events: new Map(),
+        listeners: new Set(),
+        replayBytes: 0,
+        nextSequence: 0,
+        nativeTools: new Map(),
+        interactive: activeInteractive,
+        status: v2Status(session.status),
+        pendingInteractions: new Map(),
+        ...(providerMetadata?.providerSessionId
+          ? { providerSessionId: providerMetadata.providerSessionId }
+          : {}),
+        ...(runtimeMetadata ? { runtimeMetadata } : {}),
+        ...(continuationScope ? { continuationScope } : {}),
+        ...(continuationLease ? { continuationLease } : {}),
+      };
+      if (metadata.providerSessionId && continuationScope) {
+        const leaseForkTarget = input.continuation?.kind === 'fork';
+        const reuseResumedSource =
+          input.continuation?.kind === 'resume' &&
+          metadata.providerSessionId === input.continuation.providerSessionId;
+        const bound = this.bindContinuation(
+          metadata.providerSessionId,
+          session.id,
+          continuationScope,
+          leaseForkTarget ? executionId : undefined,
+          reuseResumedSource,
+        );
+        if (!bound) {
+          await this.sessions.remove(session.id);
+          throw new V2ProviderStartupError(
+            'continuation_binding_collision',
+            'delivered',
+            'continuation_binding_collision',
+          );
+        }
+        if (
+          leaseForkTarget &&
+          metadata.providerSessionId !== continuationLease?.providerSessionId
+        ) {
+          continuationTargetLease = {
+            providerSessionId: metadata.providerSessionId,
+            leaseId: executionId,
+          };
+          metadata.continuationTargetLease = continuationTargetLease;
+        }
+      }
+      this.metadata.set(session.id, metadata);
+      if (activeInteractive) this.attachInteractiveSource(session.id, metadata);
+      else this.attachSource(session.id, metadata);
+      retainContinuationLease = true;
+      return this.project(session) as AgentSessionV2;
+    } finally {
+      if (continuationLease && !retainContinuationLease) {
+        this.releaseContinuationLease(
+          continuationLease.providerSessionId,
+          continuationLease.leaseId,
+        );
+      }
+      if (continuationTargetLease && !retainContinuationLease) {
+        this.releaseContinuationLease(
+          continuationTargetLease.providerSessionId,
+          continuationTargetLease.leaseId,
+        );
+      }
+    }
   }
 
   get(id: string): AgentSessionV2 | undefined {
@@ -201,6 +711,7 @@ export class V2SessionFacade {
     const removed = await this.sessions.remove(id, 2);
     if (removed) {
       const metadata = this.metadata.get(id);
+      this.releaseMetadataContinuationLeases(metadata);
       metadata?.sourceUnsubscribe?.();
       this.metadata.delete(id);
     }
@@ -264,8 +775,62 @@ export class V2SessionFacade {
       startedAt: session.startedAt,
       ...(session.completedAt === undefined ? {} : { completedAt: session.completedAt }),
       ...(session.error === undefined ? {} : { error: session.error }),
+      ...(metadata.providerSessionId === undefined
+        ? {}
+        : { providerSessionId: metadata.providerSessionId }),
+      ...(metadata.runtimeMetadata === undefined
+        ? {}
+        : { runtimeMetadata: metadata.runtimeMetadata }),
       earliestSequence: this.replayWindow(session.id)?.earliestSequence ?? 0,
     }) as AgentSessionV2;
+  }
+
+  private bindContinuation(
+    providerSessionId: string,
+    sessionId: string,
+    scope: ProviderContinuationScope,
+    leaseId?: string,
+    allowExisting = false,
+  ): boolean {
+    const existing = this.continuationBindings.get(providerSessionId);
+    if (existing && !providerContinuationScopesEqual(existing.scope, scope)) return false;
+    if (existing && !allowExisting) return false;
+    if (leaseId && existing?.leaseId && existing.leaseId !== leaseId) return false;
+    const next = existing ?? { sessionId, scope };
+    next.sessionId = sessionId;
+    next.scope = scope;
+    if (leaseId) next.leaseId = leaseId;
+    this.continuationBindings.delete(providerSessionId);
+    while (!existing && this.continuationBindings.size >= MAX_CONTINUATION_BINDINGS) {
+      const oldest = [...this.continuationBindings].find(([, binding]) => !binding.leaseId)?.[0];
+      if (!oldest) return false;
+      this.continuationBindings.delete(oldest);
+    }
+    this.continuationBindings.set(providerSessionId, next);
+    return true;
+  }
+
+  private releaseContinuationLease(providerSessionId: string, leaseId: string): void {
+    const binding = this.continuationBindings.get(providerSessionId);
+    if (binding?.leaseId === leaseId) delete binding.leaseId;
+  }
+
+  private releaseMetadataContinuationLeases(metadata: V2SessionMetadata | undefined): void {
+    if (!metadata) return;
+    if (metadata.continuationLease) {
+      this.releaseContinuationLease(
+        metadata.continuationLease.providerSessionId,
+        metadata.continuationLease.leaseId,
+      );
+    }
+    if (metadata.continuationTargetLease) {
+      this.releaseContinuationLease(
+        metadata.continuationTargetLease.providerSessionId,
+        metadata.continuationTargetLease.leaseId,
+      );
+    }
+    delete metadata.continuationLease;
+    delete metadata.continuationTargetLease;
   }
 
   private attachSource(id: string, metadata: V2SessionMetadata): void {
@@ -276,10 +841,22 @@ export class V2SessionFacade {
       id,
       0,
       (_sourceSequence, sourceEvent) => {
+        if (sourceEvent.type === 'session.completed' && sourceEvent.providerSessionId) {
+          const providerSessionId = providerSessionIdV2Schema.safeParse(
+            sourceEvent.providerSessionId,
+          );
+          if (providerSessionId.success) {
+            metadata.providerSessionId = providerSessionId.data;
+            if (metadata.continuationScope) {
+              this.bindContinuation(providerSessionId.data, id, metadata.continuationScope);
+            }
+          }
+        }
         for (const event of this.convert(id, metadata, sourceEvent)) {
           this.publish(metadata, event);
           if (isTerminal(event)) {
             ended = true;
+            this.releaseMetadataContinuationLeases(metadata);
             metadata.sourceUnsubscribe?.();
             metadata.sourceUnsubscribe = undefined;
           }
@@ -321,6 +898,7 @@ export class V2SessionFacade {
       this.publish(metadata, event);
       if (isTerminal(event)) {
         ended = true;
+        this.releaseMetadataContinuationLeases(metadata);
         metadata.sourceUnsubscribe?.();
         metadata.sourceUnsubscribe = undefined;
       }
@@ -724,6 +1302,7 @@ export class V2SessionFacade {
     const retained = new Set(this.sessions.list(2).map((session) => session.id));
     for (const [id, metadata] of this.metadata) {
       if (!retained.has(id)) {
+        this.releaseMetadataContinuationLeases(metadata);
         metadata.sourceUnsubscribe?.();
         this.metadata.delete(id);
       }

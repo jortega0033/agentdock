@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   CLAUDE_LEGACY_COMPATIBILITY,
+  CODEX_APP_SERVER_COMPATIBILITY,
+  CODEX_APP_SERVER_FIXTURE_SET,
   CODEX_LEGACY_COMPATIBILITY,
   FAKE_INTERACTIVE_COMPATIBILITY,
   PROVIDER_COMPATIBILITY_MANIFEST,
@@ -32,6 +34,16 @@ describe('provider compatibility manifest', () => {
       expect(entry.fixtureSet).toBeTruthy();
       expect(entry.acceptedWorkBoundary).toBeTruthy();
     }
+  });
+
+  it('pins the live app-server fixture separately from replay fixtures', () => {
+    expect(CODEX_APP_SERVER_COMPATIBILITY).toMatchObject({
+      provider: 'codex',
+      providerVersion: '0.147.0',
+      transport: 'codex-app-server',
+      fixtureSet: CODEX_APP_SERVER_FIXTURE_SET,
+      acceptedWorkBoundary: 'turn-start-write-attempt',
+    });
   });
 
   it('derives fake interactive support metadata from its manifest entry', async () => {

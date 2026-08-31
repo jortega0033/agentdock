@@ -1,0 +1,58 @@
+{
+  "schema": "agent-dock/provider-fixture@1",
+  "schemaSet": "agent-dock-provider-fixture-v1",
+  "fixtureSet": "fake-interactive-v1",
+  "id": "fake-interactive-resume",
+  "protocol": "v2",
+  "provider": { "id": "claude", "implementation": "fake", "version": "fake-interactive-v1" },
+  "transport": { "id": "fake-interactive", "version": "1" },
+  "scenario": "resume",
+  "covers": ["resume"],
+  "startup": { "started": "resolve", "acceptedWork": "accepted" },
+  "nativeInput": [
+    { "resumeProviderSessionId": "<redacted:provider-session-id>", "prompt": "<redacted:prompt>" }
+  ],
+  "nativeOutput": [
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": {
+        "type": "session.started",
+        "provider": "claude",
+        "transport": "fake-interactive",
+        "selection": "<fixture-selection>"
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": { "type": "turn.started", "turnId": "<turn-id>" }
+    },
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": { "type": "turn.completed", "turnId": "<turn-id>" }
+    },
+    { "phase": "startup", "channel": "events", "value": { "type": "session.completed" } }
+  ],
+  "controls": [],
+  "expectedNormalizedEvents": [
+    {
+      "type": "session.started",
+      "provider": "claude",
+      "transport": "fake-interactive",
+      "selection": "<fixture-selection>"
+    },
+    { "type": "turn.started", "turnId": "<turn-id>" },
+    { "type": "turn.completed", "turnId": "<turn-id>" },
+    { "type": "session.completed" }
+  ],
+  "terminalState": {
+    "type": "session.completed",
+    "count": 1,
+    "acceptedWork": "accepted",
+    "workMayHaveStarted": true,
+    "fallbackAllowed": false
+  },
+  "cleanup": { "closeCalls": 1, "forceCloseCalls": 0, "interactionResolutions": 0, "reaped": true }
+}

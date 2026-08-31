@@ -1,0 +1,161 @@
+{
+  "schema": "agent-dock/provider-fixture@1",
+  "schemaSet": "agent-dock-provider-fixture-v1",
+  "fixtureSet": "claude-legacy-2.1.228-v1",
+  "id": "claude-legacy-2.1.228-fresh-session",
+  "protocol": "v1",
+  "provider": {
+    "id": "claude",
+    "implementation": "claude",
+    "version": "2.1.228"
+  },
+  "transport": {
+    "id": "legacy-one-shot",
+    "version": "claude-stream-json-v1"
+  },
+  "scenario": "fresh-session",
+  "covers": ["fresh-session", "tools", "usage", "unknown-additive-fields"],
+  "startup": {
+    "started": "resolve",
+    "acceptedWork": "accepted"
+  },
+  "nativeInput": [
+    {
+      "prompt": { "$fixturePlaceholder": "prompt" },
+      "argv": [
+        "-p",
+        "--input-format",
+        "text",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--session-id",
+        "<session-id>"
+      ],
+      "stdin": { "$fixturePlaceholder": "prompt" }
+    }
+  ],
+  "nativeOutput": [
+    {
+      "phase": "startup",
+      "channel": "stdout",
+      "value": {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "claude-fixture-fresh-session",
+        "future_metadata": { "revision": 2 }
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "stdout",
+      "value": {
+        "type": "assistant",
+        "message": {
+          "content": [
+            {
+              "type": "tool_use",
+              "id": "<tool-call-id>",
+              "name": "fixture_tool",
+              "input": { "$fixturePlaceholder": "tool_input" }
+            }
+          ],
+          "future_message_revision": 2
+        },
+        "future_top_level_flag": true
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "stdout",
+      "value": {
+        "type": "user",
+        "message": {
+          "content": [
+            {
+              "type": "tool_result",
+              "tool_use_id": "<tool-call-id>",
+              "content": { "$fixturePlaceholder": "tool_result" },
+              "is_error": false
+            }
+          ]
+        }
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "stdout",
+      "value": {
+        "type": "future.event",
+        "payload": { "revision": 2 }
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "stdout",
+      "value": {
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": { "$fixturePlaceholder": "tool_result" },
+        "total_cost_usd": 0.01,
+        "usage": {
+          "input_tokens": 12,
+          "output_tokens": 4,
+          "cache_read_input_tokens": 0,
+          "future_counter": 1
+        },
+        "session_id": "claude-fixture-fresh-session",
+        "future_top_level_flag": true
+      }
+    }
+  ],
+  "controls": [],
+  "expectedNormalizedEvents": [
+    {
+      "type": "session.started",
+      "sessionId": "<session-id>",
+      "provider": "claude"
+    },
+    {
+      "type": "status",
+      "status": "initialized"
+    },
+    {
+      "type": "tool.started",
+      "toolName": "fixture_tool",
+      "toolCallId": "<tool-call-id>",
+      "input": { "$fixturePlaceholder": "tool_input" }
+    },
+    {
+      "type": "tool.completed",
+      "toolCallId": "<tool-call-id>",
+      "result": { "$fixturePlaceholder": "tool_result" },
+      "isError": false
+    },
+    {
+      "type": "usage",
+      "inputTokens": 12,
+      "outputTokens": 4,
+      "cachedInputTokens": 0,
+      "cost": 0.01
+    },
+    {
+      "type": "session.completed",
+      "providerSessionId": "claude-fixture-fresh-session"
+    }
+  ],
+  "terminalState": {
+    "type": "session.completed",
+    "count": 1,
+    "acceptedWork": "accepted",
+    "workMayHaveStarted": true,
+    "fallbackAllowed": false
+  },
+  "cleanup": {
+    "closeCalls": 0,
+    "forceCloseCalls": 0,
+    "interactionResolutions": 0,
+    "reaped": true
+  }
+}

@@ -1,0 +1,151 @@
+{
+  "schema": "agent-dock/provider-fixture@1",
+  "schemaSet": "agent-dock-provider-fixture-v1",
+  "fixtureSet": "codex-legacy-0.147.0-v1",
+  "id": "codex-legacy-0.147.0-fresh-session",
+  "protocol": "v1",
+  "provider": {
+    "id": "codex",
+    "implementation": "codex",
+    "version": "0.147.0"
+  },
+  "transport": {
+    "id": "legacy-one-shot",
+    "version": "codex-jsonl-v1"
+  },
+  "scenario": "fresh-session",
+  "covers": ["fresh-session", "tools", "usage", "unknown-additive-fields"],
+  "startup": {
+    "started": "resolve",
+    "acceptedWork": "accepted"
+  },
+  "nativeInput": [
+    {
+      "prompt": { "$fixturePlaceholder": "prompt" },
+      "argv": ["exec", { "$fixturePlaceholder": "prompt" }, "--json", "--skip-git-repo-check"],
+      "stdin": null
+    }
+  ],
+  "nativeOutput": [
+    {
+      "phase": "startup",
+      "channel": "stdout",
+      "value": {
+        "type": "thread.started",
+        "thread_id": "codex-fixture-fresh-thread",
+        "future_metadata": { "revision": 2 }
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "stdout",
+      "value": {
+        "type": "turn.started",
+        "future_top_level_flag": true
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "stdout",
+      "value": {
+        "type": "item.started",
+        "item": {
+          "id": "<tool-call-id>",
+          "type": "mcp_tool_call",
+          "tool": "fixture_tool",
+          "arguments": { "$fixturePlaceholder": "tool_input" },
+          "status": "in_progress"
+        }
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "stdout",
+      "value": {
+        "type": "item.completed",
+        "item": {
+          "id": "<tool-call-id>",
+          "type": "mcp_tool_call",
+          "tool": "fixture_tool",
+          "arguments": { "$fixturePlaceholder": "tool_input" },
+          "result": { "$fixturePlaceholder": "tool_result" },
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "stdout",
+      "value": {
+        "type": "future.event",
+        "payload": { "revision": 2 }
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "stdout",
+      "value": {
+        "type": "turn.completed",
+        "usage": {
+          "input_tokens": 20,
+          "output_tokens": 6,
+          "cached_input_tokens": 2,
+          "future_counter": 1
+        },
+        "future_top_level_flag": true
+      }
+    }
+  ],
+  "controls": [],
+  "expectedNormalizedEvents": [
+    {
+      "type": "session.started",
+      "sessionId": "<session-id>",
+      "provider": "codex"
+    },
+    {
+      "type": "status",
+      "status": "thread_started"
+    },
+    {
+      "type": "status",
+      "status": "turn_started"
+    },
+    {
+      "type": "tool.started",
+      "toolName": "fixture_tool",
+      "toolCallId": "<tool-call-id>",
+      "input": { "$fixturePlaceholder": "tool_input" }
+    },
+    {
+      "type": "tool.completed",
+      "toolName": "fixture_tool",
+      "toolCallId": "<tool-call-id>",
+      "result": { "$fixturePlaceholder": "tool_result" },
+      "isError": false
+    },
+    {
+      "type": "usage",
+      "inputTokens": 20,
+      "outputTokens": 6,
+      "cachedInputTokens": 2
+    },
+    {
+      "type": "session.completed",
+      "providerSessionId": "codex-fixture-fresh-thread"
+    }
+  ],
+  "terminalState": {
+    "type": "session.completed",
+    "count": 1,
+    "acceptedWork": "accepted",
+    "workMayHaveStarted": true,
+    "fallbackAllowed": false
+  },
+  "cleanup": {
+    "closeCalls": 0,
+    "forceCloseCalls": 0,
+    "interactionResolutions": 0,
+    "reaped": true
+  }
+}

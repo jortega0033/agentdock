@@ -258,6 +258,9 @@ provider contract or issue #7.
 
 This suite verifies the current protocol v1 adapter contract.
 
+Any checked-in native-frame fixture must follow the
+[provider fixture safety and recording guidance](provider-fixtures.md).
+
 `packages/agent-runtime/test/support/provider-contract.ts` exports `describeProviderContract()`,
 a reusable vitest suite asserting the guarantees _every_ adapter must uphold, run against each
 adapter's real `parseLine`/`buildArgs` (not a re-implementation of them), with a small `node`

@@ -6,6 +6,8 @@ import { buildClaudeArgs } from './build-args.js';
 import { detectClaude } from './detect.js';
 import { parseClaudeLine } from './parser.js';
 
+export const CLAUDE_PROMPT_VIA_STDIN = true;
+
 /**
  * Claude Code CLI adapter. Runs `claude -p ... --output-format stream-json --verbose` and
  * normalizes its JSONL output. Authentication is entirely owned by the `claude` binary; this
@@ -28,7 +30,7 @@ export class ClaudeProvider implements AgentProvider {
         executableNames: ['claude'],
         buildArgs: buildClaudeArgs,
         parseLine: parseClaudeLine,
-        promptViaStdin: true,
+        promptViaStdin: CLAUDE_PROMPT_VIA_STDIN,
       },
       options,
       this.logger,

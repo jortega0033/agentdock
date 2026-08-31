@@ -18,6 +18,7 @@
     "assets:generate": "python scripts/assets/generate_assets.py && python scripts/assets/generate_public_assets.py",
     "assets:validate": "python scripts/assets/validate_assets.py",
     "test": "pnpm -r --filter=./packages/* --filter=./apps/* run test",
+    "test:provider-conformance": "pnpm --filter @agent-dock/agent-runtime run test:conformance",
     "typecheck": "pnpm -r run typecheck",
     "lint": "eslint .",
     "format": "prettier --write ."

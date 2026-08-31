@@ -6,6 +6,8 @@ import { buildCodexArgs } from './build-args.js';
 import { detectCodex } from './detect.js';
 import { parseCodexLine } from './parser.js';
 
+export const CODEX_PROMPT_VIA_STDIN = false;
+
 /**
  * Codex CLI adapter. Runs `codex exec --json ...` (or `codex exec resume <id> --json ...` to
  * continue a prior thread) and normalizes its JSONL event stream. Authentication is entirely
@@ -33,6 +35,7 @@ export class CodexProvider implements AgentProvider {
         executableNames: ['codex'],
         buildArgs: buildCodexArgs,
         parseLine: parseCodexLine,
+        promptViaStdin: CODEX_PROMPT_VIA_STDIN,
       },
       options,
       this.logger,

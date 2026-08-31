@@ -20,6 +20,14 @@ export function parseCodexLoginStatus(output: string): AuthStatus {
   return 'unknown';
 }
 
+/** Preserves the complete CLI semver so prereleases cannot inherit stable fixture evidence. */
+export function parseCodexVersion(output: string): string | undefined {
+  return output
+    .trim()
+    .split(/\s+/)
+    .find((token) => /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(token));
+}
+
 /**
  * Detects the Codex CLI and its login state via `codex login status`, which prints a short
  * human-readable line ("Logged in using ChatGPT" / "Logged in using API key" / not-logged-in
@@ -45,10 +53,11 @@ export async function detectCodex(logger: Logger): Promise<ProviderStatus> {
       error: 'codex --version failed',
     };
   }
-  const versionMatch = versionResult.stdout.trim().match(/[\d.]+/);
-  const version = versionMatch?.[0];
+  const version = parseCodexVersion(versionResult.stdout);
 
-  const statusResult = await execCapture(executablePath, ['login', 'status'], { timeoutMs: 15_000 });
+  const statusResult = await execCapture(executablePath, ['login', 'status'], {
+    timeoutMs: 15_000,
+  });
   if (statusResult.timedOut) {
     return {
       ...base,

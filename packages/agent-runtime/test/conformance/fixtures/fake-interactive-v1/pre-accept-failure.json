@@ -1,0 +1,32 @@
+{
+  "schema": "agent-dock/provider-fixture@1",
+  "schemaSet": "agent-dock-provider-fixture-v1",
+  "fixtureSet": "fake-interactive-v1",
+  "id": "fake-interactive-pre-accept-failure",
+  "protocol": "v2",
+  "provider": { "id": "claude", "implementation": "fake", "version": "fake-interactive-v1" },
+  "transport": { "id": "fake-interactive", "version": "1" },
+  "scenario": "pre-accept-failure",
+  "covers": ["pre-accept-failure", "fallback-boundary"],
+  "startup": { "started": "resolve", "acceptedWork": "reject" },
+  "nativeInput": [{ "prompt": "<redacted:prompt>" }],
+  "nativeOutput": [],
+  "controls": [],
+  "expectedNormalizedEvents": [
+    {
+      "type": "error",
+      "code": "provider_crash",
+      "message": "fixture acceptance failed",
+      "recoverable": false
+    },
+    { "type": "session.failed", "code": "provider_crash", "message": "fixture acceptance failed" }
+  ],
+  "terminalState": {
+    "type": "session.failed",
+    "count": 1,
+    "acceptedWork": "unknown",
+    "workMayHaveStarted": false,
+    "fallbackAllowed": true
+  },
+  "cleanup": { "closeCalls": 1, "forceCloseCalls": 0, "interactionResolutions": 0, "reaped": true }
+}

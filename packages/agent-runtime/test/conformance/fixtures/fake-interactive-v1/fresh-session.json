@@ -1,0 +1,170 @@
+{
+  "schema": "agent-dock/provider-fixture@1",
+  "schemaSet": "agent-dock-provider-fixture-v1",
+  "fixtureSet": "fake-interactive-v1",
+  "id": "fake-interactive-fresh-session",
+  "protocol": "v2",
+  "provider": { "id": "claude", "implementation": "fake", "version": "fake-interactive-v1" },
+  "transport": { "id": "fake-interactive", "version": "1" },
+  "scenario": "fresh-session",
+  "covers": ["fresh-session", "tools", "usage"],
+  "startup": { "started": "resolve", "acceptedWork": "accepted" },
+  "nativeInput": [{ "prompt": "<redacted:prompt>", "cwd": "<redacted:cwd>" }],
+  "nativeOutput": [
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": {
+        "type": "session.started",
+        "provider": "claude",
+        "transport": "fake-interactive",
+        "selection": "<fixture-selection>"
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": { "type": "session.status", "status": "active" }
+    },
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": { "type": "turn.started", "turnId": "<turn-id>" }
+    },
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": {
+        "type": "content.delta",
+        "turnId": "<turn-id>",
+        "contentBlockId": "<content-block-id>",
+        "delta": "<redacted:assistant-content>"
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": {
+        "type": "content.completed",
+        "turnId": "<turn-id>",
+        "block": {
+          "type": "text",
+          "id": "<content-block-id>",
+          "text": "<redacted:assistant-content>"
+        }
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": {
+        "type": "tool.started",
+        "turnId": "<turn-id>",
+        "toolCallId": "<tool-call-id>",
+        "contentBlockId": "<content-block-id>",
+        "toolName": "fixture_tool",
+        "possibleEffects": [],
+        "effectsComplete": true
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": {
+        "type": "tool.completed",
+        "turnId": "<turn-id>",
+        "toolCallId": "<tool-call-id>",
+        "contentBlockId": "<content-block-id>",
+        "toolName": "fixture_tool",
+        "status": "completed",
+        "summary": "<redacted:tool-result>"
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": {
+        "type": "usage.tokens",
+        "turnId": "<turn-id>",
+        "scope": "turn",
+        "inputTokens": 3,
+        "outputTokens": 5,
+        "cachedInputTokens": 1
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": { "type": "turn.completed", "turnId": "<turn-id>" }
+    },
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": { "type": "session.status", "status": "idle" }
+    },
+    { "phase": "startup", "channel": "events", "value": { "type": "session.completed" } }
+  ],
+  "controls": [],
+  "expectedNormalizedEvents": [
+    {
+      "type": "session.started",
+      "provider": "claude",
+      "transport": "fake-interactive",
+      "selection": "<fixture-selection>"
+    },
+    { "type": "session.status", "status": "active" },
+    { "type": "turn.started", "turnId": "<turn-id>" },
+    {
+      "type": "content.delta",
+      "turnId": "<turn-id>",
+      "contentBlockId": "<content-block-id>",
+      "delta": "<redacted:assistant-content>"
+    },
+    {
+      "type": "content.completed",
+      "turnId": "<turn-id>",
+      "block": {
+        "type": "text",
+        "id": "<content-block-id>",
+        "text": "<redacted:assistant-content>"
+      }
+    },
+    {
+      "type": "tool.started",
+      "turnId": "<turn-id>",
+      "toolCallId": "<tool-call-id>",
+      "contentBlockId": "<content-block-id>",
+      "toolName": "fixture_tool",
+      "possibleEffects": [],
+      "effectsComplete": true
+    },
+    {
+      "type": "tool.completed",
+      "turnId": "<turn-id>",
+      "toolCallId": "<tool-call-id>",
+      "contentBlockId": "<content-block-id>",
+      "toolName": "fixture_tool",
+      "status": "completed",
+      "summary": "<redacted:tool-result>"
+    },
+    {
+      "type": "usage.tokens",
+      "turnId": "<turn-id>",
+      "scope": "turn",
+      "inputTokens": 3,
+      "outputTokens": 5,
+      "cachedInputTokens": 1
+    },
+    { "type": "turn.completed", "turnId": "<turn-id>" },
+    { "type": "session.status", "status": "idle" },
+    { "type": "session.completed" }
+  ],
+  "terminalState": {
+    "type": "session.completed",
+    "count": 1,
+    "acceptedWork": "accepted",
+    "workMayHaveStarted": true,
+    "fallbackAllowed": false
+  },
+  "cleanup": { "closeCalls": 1, "forceCloseCalls": 0, "interactionResolutions": 0, "reaped": true }
+}

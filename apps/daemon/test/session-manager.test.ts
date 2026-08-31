@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type {
   AgentCommandV2,
   AgentEvent,
@@ -18,8 +21,11 @@ import type {
   StartInteractiveSessionOptions,
   StartSessionOptions,
 } from '@agent-dock/agent-runtime';
-import { SessionManager } from '../src/session-manager.js';
+import { SessionManager, type SessionManagerSecurityOptions } from '../src/session-manager.js';
+import { AuditStore } from '../src/audit-store.js';
 import { V2SessionFacade } from '../src/v2-session-facade.js';
+import { resolveWorkspaceIdentity, type WorkspaceIdentity } from '../src/workspace-identity.js';
+import { WorkspaceTrustStore } from '../src/workspace-trust-store.js';
 
 const TERMINAL_TYPES = new Set(['session.completed', 'session.failed', 'session.cancelled']);
 
@@ -512,6 +518,7 @@ function deferred<T>(): Deferred<T> {
 interface InteractiveSessionOptions {
   accepted?: Promise<AcceptedWorkState>;
   send?: (command: AgentCommandV2, index: number) => Promise<void>;
+  resolveInteraction?: (requestId: string, reason: string) => Promise<void>;
   interrupt?: () => Promise<void>;
   close?: () => Promise<void>;
 }
@@ -560,6 +567,9 @@ function makeControllableInteractiveSession(options: InteractiveSessionOptions =
       sent.push(command);
       await options.send?.(command, index);
     },
+    resolveInteraction: async (requestId, reason) => {
+      await options.resolveInteraction?.(requestId, reason);
+    },
     interrupt: async () => {
       interruptCalls += 1;
       await options.interrupt?.();
@@ -588,11 +598,16 @@ function makeControllableInteractiveSession(options: InteractiveSessionOptions =
 type ControllableInteractiveSession = ReturnType<typeof makeControllableInteractiveSession>;
 
 class InteractiveTestProvider implements AgentProvider {
-  readonly id: ProviderId = 'claude';
+  readonly id: ProviderId;
   readonly name = 'Interactive Test Provider';
   readonly interactiveOptions: StartInteractiveSessionOptions[] = [];
 
-  constructor(private readonly interactive: ControllableInteractiveSession) {}
+  constructor(
+    private readonly interactive: ControllableInteractiveSession,
+    id: ProviderId = 'claude',
+  ) {
+    this.id = id;
+  }
 
   async detect(): Promise<ProviderStatus> {
     return {
@@ -679,15 +694,28 @@ const INTERACTIVE_SELECTION: CapabilitySelection = {
   effectsComplete: true,
 };
 
+const APPROVAL_SELECTION: CapabilitySelection = {
+  ...INTERACTIVE_SELECTION,
+  enabled: [
+    {
+      id: 'interaction.approval',
+      constraints: { kind: 'interaction', timeoutMs: 60_000, maxPayloadBytes: 64 * 1024 },
+    },
+  ],
+};
+
 const INTERACTIVE_TURN_ID = '123e4567-e89b-42d3-a456-426614174201';
 const INTERACTIVE_EXECUTION_ID = '123e4567-e89b-42d3-a456-426614174202';
 
-async function setupInteractive(options: InteractiveSessionOptions = {}) {
+async function setupInteractive(
+  options: InteractiveSessionOptions = {},
+  security: SessionManagerSecurityOptions = {},
+) {
   const interactive = makeControllableInteractiveSession(options);
   const provider = new InteractiveTestProvider(interactive);
   const registry = new ProviderRegistry();
   registry.register(provider);
-  const sessionManager = new SessionManager(registry, noopLogger);
+  const sessionManager = new SessionManager(registry, noopLogger, undefined, security);
   const session = await sessionManager.createInteractive(
     provider.id,
     '/tmp',
@@ -740,6 +768,66 @@ function createPendingInteractive(sessionManager: SessionManager, signal?: Abort
     INTERACTIVE_TURN_ID,
     signal,
   );
+}
+
+async function trustedWorkspaceFixture(): Promise<{
+  auditStore: AuditStore;
+  cleanup(): Promise<void>;
+  identity: WorkspaceIdentity;
+  trustStore: WorkspaceTrustStore;
+}> {
+  const root = await mkdtemp(join(tmpdir(), 'agent-dock-session-security-'));
+  const workspace = join(root, 'workspace');
+  await mkdir(workspace);
+  const identity = await resolveWorkspaceIdentity(workspace);
+  const trustStore = new WorkspaceTrustStore(join(root, 'workspace-trust.json'));
+  await trustStore.setTrusted(identity);
+  return {
+    auditStore: new AuditStore(join(root, 'audit.jsonl')),
+    cleanup: () => rm(root, { recursive: true, force: true }),
+    identity,
+    trustStore,
+  };
+}
+
+function approvalRequest(requestId: string): Extract<AgentEventV2, { type: 'approval.requested' }> {
+  return {
+    type: 'approval.requested',
+    turnId: INTERACTIVE_TURN_ID,
+    requestId,
+    title: 'Write file',
+    action: 'write',
+    target: 'workspace file',
+    possibleEffects: ['filesystem_write'],
+    effectsComplete: true,
+    deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    permission: {
+      actionClass: 'filesystem',
+      operation: 'filesystem.write',
+      targetFingerprint: 'a'.repeat(64),
+      safeTargetSummary: 'workspace file',
+      risk: 'normal',
+      effectsComplete: true,
+      mcpDestructive: false,
+    },
+  };
+}
+
+function questionRequest(requestId: string): Extract<AgentEventV2, { type: 'question.requested' }> {
+  return {
+    type: 'question.requested',
+    turnId: INTERACTIVE_TURN_ID,
+    requestId,
+    questions: [
+      {
+        id: uuid(70_000),
+        title: 'Choose a value',
+        prompt: 'Which value?',
+        allowsFreeText: true,
+      },
+    ],
+    deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+  };
 }
 
 describe('SessionManager — pending interactive startup', () => {
@@ -806,9 +894,196 @@ describe('SessionManager — pending interactive startup', () => {
     });
     expect(provider.aborts).toBe(1);
   });
+
+  it('synchronously aborts a matching pending start when its workspace is blocked', async () => {
+    const fixture = await trustedWorkspaceFixture();
+    try {
+      const provider = new PendingInteractiveProvider();
+      const registry = new ProviderRegistry();
+      registry.register(provider);
+      const sessionManager = new SessionManager(registry, noopLogger, undefined, {
+        auditStore: fixture.auditStore,
+        trustStore: fixture.trustStore,
+      });
+      const start = sessionManager.createInteractive(
+        provider.id,
+        fixture.identity.canonicalPath,
+        'pending',
+        INTERACTIVE_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+        undefined,
+        fixture.identity,
+      );
+      const rejected = expect(start).rejects.toThrow('interactive startup aborted');
+      await vi.waitFor(() => expect(provider.interactiveOptions).toHaveLength(1));
+
+      sessionManager.blockWorkspace(fixture.identity.workspaceId);
+
+      await rejected;
+      expect(provider.aborts).toBe(1);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
 });
 
 describe('SessionManager — interactive command dispatch', () => {
+  it('times out published approvals and questions exactly once', async () => {
+    const resolved: Array<[string, string]> = [];
+    const published = deferred<void>();
+    const { interactive, sessionManager, session } = await setupInteractive(
+      {
+        resolveInteraction: async (requestId, reason) => {
+          resolved.push([requestId, reason]);
+        },
+      },
+      { interactionTimeoutMs: 5 },
+    );
+    const publishedIds: string[] = [];
+    sessionManager.subscribeInteractive(session.id, 0, (_index, event) => {
+      if (event.type === 'approval.requested' || event.type === 'question.requested') {
+        publishedIds.push(event.requestId);
+        if (publishedIds.length === 2) published.resolve();
+      }
+    });
+
+    const approval = approvalRequest(uuid(71_000));
+    approval.permission!.risk = 'destructive';
+    approval.possibleEffects = ['filesystem_write', 'destructive'];
+    const question = questionRequest(uuid(71_001));
+    interactive.push(approval);
+    interactive.push(question);
+    await published.promise;
+    expect(sessionManager.markInteractionPublished(session.id, approval.requestId)).toBe(true);
+    expect(sessionManager.markInteractionPublished(session.id, question.requestId)).toBe(true);
+
+    await vi.waitFor(() =>
+      expect(resolved).toEqual([
+        [approval.requestId, 'timeout'],
+        [question.requestId, 'timeout'],
+      ]),
+    );
+    await finishInteractive(interactive);
+  });
+
+  it('beginShutdown plus cancelAll resolves each pending approval and question once before close', async () => {
+    const resolved: string[] = [];
+    const order: string[] = [];
+    const published = deferred<void>();
+    const { interactive, sessionManager, session } = await setupInteractive({
+      resolveInteraction: async (requestId) => {
+        resolved.push(requestId);
+        order.push(`resolve:${requestId}`);
+      },
+    });
+    const originalClose = interactive.handle.close;
+    interactive.handle.close = async () => {
+      order.push('close');
+      await originalClose();
+    };
+    const requestIds: string[] = [];
+    sessionManager.subscribeInteractive(session.id, 0, (_index, event) => {
+      if (event.type === 'approval.requested' || event.type === 'question.requested') {
+        requestIds.push(event.requestId);
+        if (requestIds.length === 2) published.resolve();
+      }
+    });
+    const approval = approvalRequest(uuid(72_000));
+    approval.permission!.risk = 'destructive';
+    approval.possibleEffects = ['filesystem_write', 'destructive'];
+    const question = questionRequest(uuid(72_001));
+    interactive.push(approval);
+    interactive.push(question);
+    await published.promise;
+    expect(sessionManager.markInteractionPublished(session.id, approval.requestId)).toBe(true);
+    expect(sessionManager.markInteractionPublished(session.id, question.requestId)).toBe(true);
+
+    sessionManager.beginShutdown();
+    await sessionManager.cancelAll(1_000);
+    expect(resolved).toEqual([approval.requestId, question.requestId]);
+    expect(order.at(-1)).toBe('close');
+    expect(order.slice(0, 2)).toEqual([
+      `resolve:${approval.requestId}`,
+      `resolve:${question.requestId}`,
+    ]);
+  });
+
+  it('scopes allow_session grants to their originating session', async () => {
+    const fixture = await trustedWorkspaceFixture();
+    const interactiveA = makeControllableInteractiveSession();
+    const interactiveB = makeControllableInteractiveSession();
+    try {
+      const providerA = new InteractiveTestProvider(interactiveA, 'claude');
+      const providerB = new InteractiveTestProvider(interactiveB, 'codex');
+      const registry = new ProviderRegistry();
+      registry.register(providerA);
+      registry.register(providerB);
+      const sessionManager = new SessionManager(registry, noopLogger, undefined, {
+        auditStore: fixture.auditStore,
+        trustStore: fixture.trustStore,
+      });
+      const sessionA = await sessionManager.createInteractive(
+        providerA.id,
+        fixture.identity.canonicalPath,
+        'hello A',
+        APPROVAL_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+        undefined,
+        fixture.identity,
+      );
+      const sessionB = await sessionManager.createInteractive(
+        providerB.id,
+        fixture.identity.canonicalPath,
+        'hello B',
+        APPROVAL_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+        undefined,
+        fixture.identity,
+      );
+      const publishedA = deferred<void>();
+      const publishedB = deferred<void>();
+      sessionManager.subscribeInteractive(sessionA.id, 0, (_index, event) => {
+        if (event.type === 'approval.requested') publishedA.resolve();
+      });
+      sessionManager.subscribeInteractive(sessionB.id, 0, (_index, event) => {
+        if (event.type === 'approval.requested') publishedB.resolve();
+      });
+
+      const requestA = approvalRequest(uuid(73_000));
+      if (!requestA.permission) throw new Error('grant fixture requires normalized permission');
+      interactiveA.push(requestA);
+      await publishedA.promise;
+      expect(sessionManager.markInteractionPublished(sessionA.id, requestA.requestId)).toBe(true);
+      const grantResult = await sessionManager.dispatch(sessionA.id, {
+        type: 'approval.respond',
+        commandId: uuid(73_001),
+        sessionId: sessionA.id,
+        turnId: requestA.turnId,
+        requestId: requestA.requestId,
+        decision: 'allow_session',
+      });
+      expect(grantResult).toMatchObject({ ok: true });
+
+      const requestB = { ...approvalRequest(uuid(73_002)), permission: { ...requestA.permission } };
+      interactiveB.push(requestB);
+      await publishedB.promise;
+      expect(sessionManager.markInteractionPublished(sessionB.id, requestB.requestId)).toBe(true);
+      await tick();
+      expect(interactiveB.sent).toEqual([]);
+      expect(sessionManager.get(sessionB.id)?.status).toBe('running');
+      await finishInteractive(interactiveA);
+      await finishInteractive(interactiveB);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
   it('dispatches concurrent commands exactly once and in submission order', async () => {
     const gates = [deferred<void>(), deferred<void>(), deferred<void>()];
     const { interactive, sessionManager, session } = await setupInteractive({
@@ -986,6 +1261,378 @@ describe('SessionManager — interactive command dispatch', () => {
     await tick();
     expect(sessionManager.acceptedWork(session.id)).toBe('accepted');
     await finishInteractive(interactive);
+  });
+
+  it('does not let stale interaction traffic consume the command ledger', async () => {
+    const { interactive, sessionManager, session } = await setupInteractive();
+    for (let index = 0; index < 1_100; index += 1) {
+      const stale: AgentCommandV2 = {
+        type: 'approval.respond',
+        commandId: uuid(30_000 + index),
+        sessionId: session.id,
+        turnId: INTERACTIVE_TURN_ID,
+        requestId: uuid(40_000 + index),
+        decision: 'deny',
+      };
+      await expect(sessionManager.dispatch(session.id, stale)).resolves.toMatchObject({
+        ok: false,
+        code: 'stale_interaction',
+      });
+    }
+
+    const published = deferred<void>();
+    sessionManager.subscribeInteractive(session.id, 0, (_index, event) => {
+      if (event.type === 'approval.requested') published.resolve();
+    });
+    const request = approvalRequest(uuid(50_000));
+    if (!request.permission) throw new Error('approval fixture requires normalized permission');
+    request.permission.risk = 'destructive';
+    request.possibleEffects = ['filesystem_write', 'destructive'];
+    interactive.push(request);
+    await published.promise;
+    for (let index = 0; index < 1_100; index += 1) {
+      await expect(
+        sessionManager.dispatch(session.id, {
+          type: 'approval.respond',
+          commandId: uuid(51_000 + index),
+          sessionId: session.id,
+          turnId: request.turnId,
+          requestId: request.requestId,
+          decision: 'allow_session',
+        }),
+      ).resolves.toMatchObject({ ok: false, code: 'command_rejected' });
+    }
+    const denial: AgentCommandV2 = {
+      type: 'approval.respond',
+      commandId: uuid(53_000),
+      sessionId: session.id,
+      turnId: request.turnId,
+      requestId: request.requestId,
+      decision: 'deny',
+    };
+    await expect(sessionManager.dispatch(session.id, denial)).resolves.toMatchObject({ ok: true });
+
+    const valid = followUpCommand(session.id, 54_000);
+    await expect(sessionManager.dispatch(session.id, valid)).resolves.toMatchObject({ ok: true });
+    expect(interactive.sent).toEqual([denial, valid]);
+    await finishInteractive(interactive);
+  });
+});
+
+describe('SessionManager — secured approvals', () => {
+  it('audits a same-turn approval denied by a question timeout', async () => {
+    const fixture = await trustedWorkspaceFixture();
+    const resolved: Array<[string, string]> = [];
+    const interactive = makeControllableInteractiveSession({
+      resolveInteraction: async (requestId, reason) => {
+        resolved.push([requestId, reason]);
+      },
+    });
+    try {
+      const provider = new InteractiveTestProvider(interactive);
+      const registry = new ProviderRegistry();
+      registry.register(provider);
+      const append = vi.spyOn(fixture.auditStore, 'append');
+      const sessionManager = new SessionManager(registry, noopLogger, undefined, {
+        auditStore: fixture.auditStore,
+        interactionTimeoutMs: 1_000,
+        trustStore: fixture.trustStore,
+      });
+      const session = await sessionManager.createInteractive(
+        provider.id,
+        fixture.identity.canonicalPath,
+        'hello',
+        APPROVAL_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+        undefined,
+        fixture.identity,
+      );
+      const published = deferred<void>();
+      const requestIds: string[] = [];
+      sessionManager.subscribeInteractive(session.id, 0, (_index, event) => {
+        if (event.type === 'approval.requested' || event.type === 'question.requested') {
+          requestIds.push(event.requestId);
+          if (requestIds.length === 2) published.resolve();
+        }
+      });
+      const approval = approvalRequest(uuid(60_010));
+      const question = questionRequest(uuid(60_011));
+      question.deadlineAt = new Date(Date.now() + 20).toISOString();
+      interactive.push(approval);
+      interactive.push(question);
+      await published.promise;
+
+      expect(sessionManager.markInteractionPublished(session.id, approval.requestId)).toBe(true);
+      expect(sessionManager.markInteractionPublished(session.id, question.requestId)).toBe(true);
+      await vi.waitFor(() => expect(resolved).toEqual([[question.requestId, 'timeout']]));
+      await vi.waitFor(() =>
+        expect(append).toHaveBeenCalledWith(
+          expect.objectContaining({
+            actor: 'timeout',
+            decision: 'deny',
+            requestId: approval.requestId,
+          }),
+        ),
+      );
+      expect(
+        append.mock.calls.filter(([entry]) => entry.requestId === approval.requestId),
+      ).toHaveLength(1);
+      await finishInteractive(interactive);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it('audits a supervisor-side fail-closed approval resolution exactly once', async () => {
+    const fixture = await trustedWorkspaceFixture();
+    const interactive = makeControllableInteractiveSession();
+    try {
+      const provider = new InteractiveTestProvider(interactive);
+      const registry = new ProviderRegistry();
+      registry.register(provider);
+      const append = vi.spyOn(fixture.auditStore, 'append');
+      const sessionManager = new SessionManager(registry, noopLogger, undefined, {
+        auditStore: fixture.auditStore,
+        trustStore: fixture.trustStore,
+      });
+      const session = await sessionManager.createInteractive(
+        provider.id,
+        fixture.identity.canonicalPath,
+        'hello',
+        APPROVAL_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+        undefined,
+        fixture.identity,
+      );
+      const published = deferred<void>();
+      sessionManager.subscribeInteractive(session.id, 0, (_index, event) => {
+        if (event.type === 'approval.requested') published.resolve();
+      });
+      const request = approvalRequest(uuid(60_020));
+      interactive.push(request);
+      await published.promise;
+      expect(sessionManager.markInteractionPublished(session.id, request.requestId)).toBe(true);
+
+      const resolution: AgentEventV2 = {
+        type: 'approval.resolved',
+        turnId: request.turnId,
+        requestId: request.requestId,
+        decision: 'denied',
+        actor: 'disconnect',
+      };
+      interactive.push(resolution);
+      interactive.push(resolution);
+      await vi.waitFor(() =>
+        expect(append).toHaveBeenCalledWith(
+          expect.objectContaining({
+            actor: 'disconnect',
+            decision: 'deny',
+            requestId: request.requestId,
+          }),
+        ),
+      );
+      expect(
+        append.mock.calls.filter(([entry]) => entry.requestId === request.requestId),
+      ).toHaveLength(1);
+      await finishInteractive(interactive);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it('fails closed when a secured session has no audit store', async () => {
+    const fixture = await trustedWorkspaceFixture();
+    const interactive = makeControllableInteractiveSession();
+    try {
+      const provider = new InteractiveTestProvider(interactive);
+      const registry = new ProviderRegistry();
+      registry.register(provider);
+      const sessionManager = new SessionManager(registry, noopLogger, undefined, {
+        trustStore: fixture.trustStore,
+      });
+      const session = await sessionManager.createInteractive(
+        provider.id,
+        fixture.identity.canonicalPath,
+        'hello',
+        APPROVAL_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+        undefined,
+        fixture.identity,
+      );
+      const published = deferred<void>();
+      sessionManager.subscribeInteractive(session.id, 0, (_index, event) => {
+        if (event.type === 'approval.requested') published.resolve();
+      });
+      const request = approvalRequest(uuid(60_000));
+      interactive.push(request);
+      await published.promise;
+
+      const command: AgentCommandV2 = {
+        type: 'approval.respond',
+        commandId: uuid(60_001),
+        sessionId: session.id,
+        turnId: request.turnId,
+        requestId: request.requestId,
+        decision: 'allow_once',
+      };
+      await expect(sessionManager.dispatch(session.id, command)).resolves.toMatchObject({
+        ok: false,
+        code: 'audit_failure',
+      });
+      expect(interactive.sent).toEqual([{ ...command, decision: 'deny' }]);
+      await finishInteractive(interactive);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it('fails closed when auditing a session-grant automatic allow fails', async () => {
+    const fixture = await trustedWorkspaceFixture();
+    const interactive = makeControllableInteractiveSession();
+    try {
+      const provider = new InteractiveTestProvider(interactive);
+      const registry = new ProviderRegistry();
+      registry.register(provider);
+      const sessionManager = new SessionManager(registry, noopLogger, undefined, {
+        auditStore: fixture.auditStore,
+        trustStore: fixture.trustStore,
+      });
+      const session = await sessionManager.createInteractive(
+        provider.id,
+        fixture.identity.canonicalPath,
+        'hello',
+        APPROVAL_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+        undefined,
+        fixture.identity,
+      );
+      const published = deferred<void>();
+      sessionManager.subscribeInteractive(session.id, 0, (_index, event) => {
+        if (event.type === 'approval.requested') published.resolve();
+      });
+      const firstRequest = approvalRequest(uuid(60_100));
+      if (!firstRequest.permission) throw new Error('grant fixture requires normalized permission');
+      interactive.push(firstRequest);
+      await published.promise;
+      expect(sessionManager.markInteractionPublished(session.id, firstRequest.requestId)).toBe(
+        true,
+      );
+      await expect(
+        sessionManager.dispatch(session.id, {
+          type: 'approval.respond',
+          commandId: uuid(60_101),
+          sessionId: session.id,
+          turnId: firstRequest.turnId,
+          requestId: firstRequest.requestId,
+          decision: 'allow_session',
+        }),
+      ).resolves.toMatchObject({ ok: true });
+
+      vi.spyOn(fixture.auditStore, 'append').mockRejectedValueOnce(new Error('audit unavailable'));
+      const automaticRequest = {
+        ...approvalRequest(uuid(60_102)),
+        permission: { ...firstRequest.permission },
+      };
+      interactive.push(automaticRequest);
+      await vi.waitFor(() => expect(interactive.sent).toHaveLength(2));
+
+      expect(interactive.sent[1]).toMatchObject({
+        type: 'approval.respond',
+        requestId: automaticRequest.requestId,
+        decision: 'deny',
+      });
+      expect(
+        interactive.sent.filter(
+          (command) =>
+            command.type === 'approval.respond' && command.requestId === automaticRequest.requestId,
+        ),
+      ).toHaveLength(1);
+      await finishInteractive(interactive);
+    } finally {
+      await fixture.cleanup();
+    }
+  });
+
+  it('denies an automatic approval when revocation starts during its audit write', async () => {
+    const fixture = await trustedWorkspaceFixture();
+    const interactive = makeControllableInteractiveSession();
+    try {
+      const provider = new InteractiveTestProvider(interactive);
+      const registry = new ProviderRegistry();
+      registry.register(provider);
+      const sessionManager = new SessionManager(registry, noopLogger, undefined, {
+        auditStore: fixture.auditStore,
+        trustStore: fixture.trustStore,
+      });
+      const session = await sessionManager.createInteractive(
+        provider.id,
+        fixture.identity.canonicalPath,
+        'hello',
+        APPROVAL_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+        undefined,
+        fixture.identity,
+      );
+      const firstPublished = deferred<void>();
+      sessionManager.subscribeInteractive(session.id, 0, (_index, event) => {
+        if (event.type === 'approval.requested') firstPublished.resolve();
+      });
+      const firstRequest = approvalRequest(uuid(61_000));
+      interactive.push(firstRequest);
+      await firstPublished.promise;
+      await expect(
+        sessionManager.dispatch(session.id, {
+          type: 'approval.respond',
+          commandId: uuid(61_001),
+          sessionId: session.id,
+          turnId: firstRequest.turnId,
+          requestId: firstRequest.requestId,
+          decision: 'allow_session',
+        }),
+      ).resolves.toMatchObject({ ok: true });
+
+      const auditStarted = deferred<void>();
+      const releaseAudit = deferred<void>();
+      const append = fixture.auditStore.append.bind(fixture.auditStore);
+      fixture.auditStore.append = async (entry) => {
+        auditStarted.resolve();
+        await releaseAudit.promise;
+        return append(entry);
+      };
+      const secondRequest = approvalRequest(uuid(61_002));
+      interactive.push(secondRequest);
+      await auditStarted.promise;
+
+      sessionManager.blockWorkspace(fixture.identity.workspaceId);
+      releaseAudit.resolve();
+      await vi.waitFor(() => expect(interactive.sent).toHaveLength(2));
+
+      expect(interactive.sent[1]).toMatchObject({
+        type: 'approval.respond',
+        requestId: secondRequest.requestId,
+        decision: 'deny',
+      });
+      const effectiveAudit = (await fixture.auditStore.read({ sessionId: session.id })).entries
+        .filter((entry) => entry.requestId === secondRequest.requestId)
+        .map(({ decision, actor }) => ({ decision, actor }));
+      expect(effectiveAudit).toEqual([
+        { decision: 'allow_once', actor: 'policy' },
+        { decision: 'deny', actor: 'policy' },
+      ]);
+      await finishInteractive(interactive);
+    } finally {
+      await fixture.cleanup();
+    }
   });
 });
 

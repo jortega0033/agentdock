@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import {
   FAKE_PROVIDER_CAPABILITIES,
   CLAUDE_LEGACY_COMPATIBILITY,
@@ -155,6 +155,27 @@ function parseSseData(payload: string): unknown[] {
     .map((frame) => frame.split('\n').find((line) => line.startsWith('data: ')))
     .filter((line): line is string => !!line)
     .map((line) => JSON.parse(line.slice('data: '.length)) as unknown);
+}
+
+function openEventStream(
+  app: FastifyInstance,
+  sessionId: string,
+  responder = false,
+): Promise<LightMyRequestResponse> {
+  return new Promise((resolve, reject) => {
+    app.inject(
+      {
+        method: 'GET',
+        url: `/v2/sessions/${sessionId}/events`,
+        headers: { ...auth(), ...(responder ? { 'x-agentdock-responder': '1' } : {}) },
+        payloadAsStream: true,
+      },
+      (error, response) => {
+        if (error || !response) reject(error ?? new Error('event stream did not open'));
+        else resolve(response);
+      },
+    );
+  });
 }
 
 let cwd: string;
@@ -661,18 +682,26 @@ describe('interactive v2 command dispatch', () => {
       requestId: provider.lastInteractionRequestId as string,
       decision: 'allow_once' as const,
     };
+    const responderStream = await openEventStream(app, session.id, true);
+    responderStream.stream().resume();
+    const responderLease = responderStream.headers['x-agentdock-responder-lease'];
+    expect(responderLease).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    const responderHeaders = {
+      ...auth(),
+      'x-agentdock-responder-lease': responderLease as string,
+    };
 
     const accepted = await app.inject({
       method: 'POST',
       url: `/v2/sessions/${session.id}/commands`,
-      headers: auth(),
+      headers: responderHeaders,
       payload: responseCommand,
     });
     expect(accepted.statusCode).toBe(202);
     const retry = await app.inject({
       method: 'POST',
       url: `/v2/sessions/${session.id}/commands`,
-      headers: auth(),
+      headers: responderHeaders,
       payload: responseCommand,
     });
     expect(retry.statusCode).toBe(202);
@@ -682,7 +711,7 @@ describe('interactive v2 command dispatch', () => {
     const stale = await app.inject({
       method: 'POST',
       url: `/v2/sessions/${session.id}/commands`,
-      headers: auth(),
+      headers: responderHeaders,
       payload: { ...responseCommand, commandId: randomUUID() },
     });
     expect(stale.statusCode).toBe(409);
@@ -692,6 +721,115 @@ describe('interactive v2 command dispatch', () => {
       url: `/v2/sessions/${session.id}/cancel`,
       headers: auth(),
     });
+    responderStream.raw.res.destroy();
+  });
+
+  it('authorizes interaction responses only for the sole live responder lease', async () => {
+    const { app, provider } = setupInteractive('approval');
+    const session = await createInteractiveSession(app, ['interaction.approval', 'session.cancel']);
+    await vi.waitFor(() => expect(provider.lastInteractionRequestId).toBeDefined());
+    const responseCommand = {
+      type: 'approval.respond' as const,
+      commandId: randomUUID(),
+      sessionId: session.id,
+      turnId: session.currentTurnId as string,
+      requestId: provider.lastInteractionRequestId as string,
+      decision: 'allow_once' as const,
+    };
+
+    const observerCommand = await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/commands`,
+      headers: auth(),
+      payload: responseCommand,
+    });
+    expect(observerCommand.statusCode).toBe(403);
+    expect(observerCommand.json()).toMatchObject({ code: 'responder_lease_required' });
+
+    const observerStream = await openEventStream(app, session.id);
+    expect(observerStream.headers).not.toHaveProperty('x-agentdock-responder-lease');
+    observerStream.raw.res.destroy();
+
+    const responderStream = await openEventStream(app, session.id, true);
+    responderStream.stream().resume();
+    const responderLease = responderStream.headers['x-agentdock-responder-lease'];
+    expect(responderLease).toMatch(/^[A-Za-z0-9_-]{43}$/);
+
+    const competing = await app.inject({
+      method: 'GET',
+      url: `/v2/sessions/${session.id}/events`,
+      headers: { ...auth(), 'x-agentdock-responder': '1' },
+    });
+    expect(competing.statusCode).toBe(409);
+    expect(competing.json()).toMatchObject({ code: 'responder_already_connected' });
+
+    const competingCommand = await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/commands`,
+      headers: { ...auth(), 'x-agentdock-responder-lease': 'x'.repeat(43) },
+      payload: responseCommand,
+    });
+    expect(competingCommand.statusCode).toBe(403);
+    expect(competingCommand.json()).toMatchObject({ code: 'responder_lease_required' });
+
+    const accepted = await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/commands`,
+      headers: {
+        ...auth(),
+        'x-agentdock-responder-lease': responderLease as string,
+      },
+      payload: responseCommand,
+    });
+    expect(accepted.statusCode).toBe(202);
+    await vi.waitFor(() => expect(provider.interactiveCommands).toHaveLength(1));
+    responderStream.raw.res.destroy();
+  });
+
+  it('admits one responder stream and denies its pending approval exactly once on cancellation', async () => {
+    const { app, provider } = setupInteractive('approval');
+    const session = await createInteractiveSession(app, ['interaction.approval', 'session.cancel']);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const firstStream = app.inject({
+      method: 'GET',
+      url: `/v2/sessions/${session.id}/events`,
+      headers: { ...auth(), 'x-agentdock-responder': '1' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const competing = await app.inject({
+      method: 'GET',
+      url: `/v2/sessions/${session.id}/events`,
+      headers: { ...auth(), 'x-agentdock-responder': '1' },
+    });
+    expect(competing.statusCode).toBe(409);
+    expect(competing.json()).toMatchObject({ code: 'responder_already_connected' });
+
+    await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/cancel`,
+      headers: auth(),
+    });
+    const streamed = parseSseData((await firstStream).body) as Array<{
+      type: string;
+      requestId?: string;
+    }>;
+
+    expect(provider.interactiveResolutions).toEqual([
+      expect.objectContaining({
+        kind: 'approval',
+        requestId: provider.lastInteractionRequestId,
+        decision: 'deny',
+        reason: 'cancel',
+      }),
+    ]);
+    expect(
+      streamed.filter(
+        (event) =>
+          event.type === 'approval.resolved' &&
+          event.requestId === provider.lastInteractionRequestId,
+      ),
+    ).toHaveLength(1);
   });
 
   it('rejects commands for a legacy or unselected session capability', async () => {

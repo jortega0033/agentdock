@@ -1,38 +1,82 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AgentEvent, ProviderId, ProviderStatus } from '@agent-dock/shared';
+import type {
+  AgentEventV2Envelope,
+  ApprovalDecisionV2,
+  CapabilityRequest,
+  ProviderId,
+  ProviderStatusV2,
+  WorkspaceTrustViewV2,
+} from '@agent-dock/shared';
+import type {
+  RendererInteraction,
+  RendererInteractionResolution,
+  RendererQuestionResponse,
+} from '../electron/interaction-broker.js';
 import { ProviderPanel } from './components/ProviderPanel.js';
 import { EventLog } from './components/EventLog.js';
 import { AgentDockMark } from './components/AgentDockMark.js';
+import { InteractionDialog, WorkspaceTrustDialog } from './components/SecurityDialogs.js';
 import runtimeUnavailableIllustration from '../assets/illustrations/runtime-unavailable.svg';
 
 type DaemonState = 'connecting' | 'ready' | 'unavailable';
-type RunStatus = 'idle' | 'starting' | 'running' | 'completed' | 'failed' | 'cancelled';
+type RunStatus =
+  'idle' | 'starting' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
 
 const DAEMON_CONNECT_TIMEOUT_MS = 20_000;
+const INTERACTIVE_CAPABILITIES: CapabilityRequest = {
+  required: [{ id: 'session.cancel' }],
+  optional: [
+    { id: 'interaction.approval' },
+    { id: 'interaction.question' },
+    { id: 'content.streaming' },
+    { id: 'content.tools' },
+    { id: 'content.plans' },
+    { id: 'content.usage.tokens' },
+    { id: 'content.usage.cost' },
+    { id: 'content.thinking' },
+  ],
+  allowExperimental: false,
+};
+
+function terminalStatus(event: AgentEventV2Envelope): RunStatus | undefined {
+  if (event.type === 'session.completed') return 'completed';
+  if (event.type === 'session.failed') return 'failed';
+  if (event.type === 'session.cancelled') return 'cancelled';
+  if (event.type === 'session.interrupted') return 'interrupted';
+  return undefined;
+}
+
+function projectedSessionStatus(
+  status: 'starting' | 'active' | 'idle' | 'completed' | 'failed' | 'cancelled' | 'interrupted',
+): RunStatus {
+  return status === 'starting' || status === 'active' || status === 'idle' ? 'running' : status;
+}
 
 export function App() {
   const [daemonState, setDaemonState] = useState<DaemonState>('connecting');
   const [daemonError, setDaemonError] = useState<string>();
-
-  const [providers, setProviders] = useState<ProviderStatus[]>();
+  const [providers, setProviders] = useState<ProviderStatusV2[]>();
   const [providersError, setProvidersError] = useState<string>();
-
   const [provider, setProvider] = useState<ProviderId>('claude');
   const [cwd, setCwd] = useState('');
   const [prompt, setPrompt] = useState('');
   const [formError, setFormError] = useState<string>();
-
   const [runStatus, setRunStatus] = useState<RunStatus>('idle');
-  const [events, setEvents] = useState<AgentEvent[]>([]);
+  const [events, setEvents] = useState<AgentEventV2Envelope[]>([]);
   const [sessionId, setSessionId] = useState<string>();
-  // Mirrors `sessionId` so the onSessionEvent subscription (set up once, below) always filters
-  // against the current session without needing to resubscribe. A stale closure here would
-  // silently drop events for a session started after the initial subscription.
+  const [workspaceTrust, setWorkspaceTrust] = useState<WorkspaceTrustViewV2>();
+  const [trustPrompt, setTrustPrompt] = useState<WorkspaceTrustViewV2>();
+  const [trustBusy, setTrustBusy] = useState(false);
+  const [trustError, setTrustError] = useState<string>();
+  const [interactions, setInteractions] = useState<RendererInteraction[]>([]);
+  const [interactionBusy, setInteractionBusy] = useState(false);
+  const [interactionError, setInteractionError] = useState<string>();
+  const [revokingTrust, setRevokingTrust] = useState(false);
   const sessionIdRef = useRef<string>();
+  const startingRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
-
     window.agentDock.getDaemonStatus().then((status) => {
       if (cancelled) return;
       if (status.state === 'ready') setDaemonState('ready');
@@ -41,17 +85,14 @@ export function App() {
         setDaemonError(status.error);
       }
     });
-
     const unsubscribeStatus = window.agentDock.onDaemonStatus((status) => {
       setDaemonState(status.state);
       setDaemonError(status.state === 'unavailable' ? status.error : undefined);
     });
-
     const timeout = setTimeout(() => {
       setDaemonState((current) => (current === 'connecting' ? 'unavailable' : current));
       setDaemonError((current) => current ?? 'timed out waiting for the local daemon to start');
     }, DAEMON_CONNECT_TIMEOUT_MS);
-
     return () => {
       cancelled = true;
       clearTimeout(timeout);
@@ -61,27 +102,94 @@ export function App() {
 
   useEffect(() => {
     if (daemonState !== 'ready') return;
-    window.agentDock
-      .listProviders()
+    const listProvidersV2 = window.agentDock.listProvidersV2;
+    if (!listProvidersV2) {
+      setProvidersError('this desktop bridge does not support secure provider discovery');
+      return;
+    }
+    listProvidersV2()
       .then(setProviders)
-      .catch((err: Error) => setProvidersError(err.message));
+      .catch((error: Error) => setProvidersError(error.message));
   }, [daemonState]);
 
-  // One subscription for the whole component lifetime; events are filtered to the session this
-  // render currently cares about. main.ts only ever streams one session at a time in this demo.
   useEffect(() => {
-    return window.agentDock.onSessionEvent((eventSessionId, event) => {
-      if (sessionIdRef.current !== eventSessionId) return;
-      setEvents((prev) => [...prev, event]);
-      if (event.type === 'session.completed') setRunStatus('completed');
-      else if (event.type === 'session.failed') setRunStatus('failed');
-      else if (event.type === 'session.cancelled') setRunStatus('cancelled');
-    });
+    const unsubscribeEvents = window.agentDock.onInteractiveSessionEvent(
+      (eventSessionId, event) => {
+        if (!sessionIdRef.current && startingRef.current) sessionIdRef.current = eventSessionId;
+        if (sessionIdRef.current !== eventSessionId) return;
+        setEvents((current) => [...current, event]);
+        const terminal = terminalStatus(event);
+        if (terminal) {
+          setRunStatus(terminal);
+          startingRef.current = false;
+        } else if (event.type === 'session.status' && event.status !== 'starting') {
+          setRunStatus('running');
+        }
+      },
+    );
+    const unsubscribeNotices = window.agentDock.onInteractiveSessionStreamNotice(
+      (eventSessionId, notice) => {
+        if (sessionIdRef.current !== eventSessionId) return;
+        if (notice.type === 'replay_reset') {
+          setRunStatus(projectedSessionStatus(notice.session.status));
+          return;
+        }
+        setFormError(notice.message);
+        setRunStatus('failed');
+      },
+    );
+    const unsubscribeInteractions =
+      window.agentDock.onInteractionRequested?.((interaction) => {
+        setInteractionError(undefined);
+        setInteractions((current) => [...current, interaction]);
+      }) ?? (() => {});
+    const unsubscribeResolutions =
+      window.agentDock.onInteractionResolved?.((resolution: RendererInteractionResolution) => {
+        setInteractions((current) =>
+          current.filter((item) => item.interactionHandle !== resolution.interactionHandle),
+        );
+        setInteractionBusy(false);
+      }) ?? (() => {});
+    return () => {
+      unsubscribeEvents();
+      unsubscribeNotices();
+      unsubscribeInteractions();
+      unsubscribeResolutions();
+    };
   }, []);
+
+  const startInteractiveSession = useCallback(async () => {
+    setEvents([]);
+    setInteractions([]);
+    setSessionId(undefined);
+    sessionIdRef.current = undefined;
+    startingRef.current = true;
+    setRunStatus('starting');
+    try {
+      const session = await window.agentDock.createInteractiveSession({
+        provider,
+        cwd: cwd.trim(),
+        prompt: prompt.trim(),
+        capabilities: INTERACTIVE_CAPABILITIES,
+      });
+      if (sessionIdRef.current && sessionIdRef.current !== session.id) {
+        throw new Error('interactive event stream did not match the created session');
+      }
+      sessionIdRef.current = session.id;
+      setSessionId(session.id);
+      setRunStatus(projectedSessionStatus(session.status));
+    } catch (error) {
+      sessionIdRef.current = undefined;
+      setRunStatus('failed');
+      setFormError(error instanceof Error ? error.message : 'failed to start session');
+    } finally {
+      startingRef.current = false;
+    }
+  }, [provider, cwd, prompt]);
 
   const handleRun = useCallback(async () => {
     setFormError(undefined);
-
+    setTrustError(undefined);
     if (!cwd.trim()) {
       setFormError('working directory is required');
       return;
@@ -90,32 +198,124 @@ export function App() {
       setFormError('prompt is required');
       return;
     }
-
-    setEvents([]);
-    setRunStatus('starting');
-
-    try {
-      const session = await window.agentDock.createSession({ provider, cwd, prompt });
-      sessionIdRef.current = session.id;
-      setSessionId(session.id);
-      setRunStatus('running');
-    } catch (err) {
+    const inspectWorkspace = window.agentDock.inspectWorkspace;
+    if (!inspectWorkspace) {
       setRunStatus('failed');
-      setFormError(err instanceof Error ? err.message : 'failed to start session');
+      setFormError('this desktop bridge does not support workspace trust');
+      return;
     }
-  }, [provider, cwd, prompt]);
+    setRunStatus('starting');
+    try {
+      const trust = await inspectWorkspace(cwd.trim());
+      setWorkspaceTrust(trust);
+      if (trust.state !== 'trusted') {
+        setTrustPrompt(trust);
+        return;
+      }
+      await startInteractiveSession();
+    } catch (error) {
+      setRunStatus('failed');
+      setFormError(error instanceof Error ? error.message : 'failed to inspect workspace');
+    }
+  }, [cwd, prompt, startInteractiveSession]);
+
+  const handleTrustAndRun = useCallback(async () => {
+    if (!trustPrompt || !window.agentDock.setWorkspaceTrust) return;
+    setTrustBusy(true);
+    setTrustError(undefined);
+    try {
+      const trust = await window.agentDock.setWorkspaceTrust(trustPrompt.workspaceId, {
+        cwd: cwd.trim(),
+        incarnation: trustPrompt.incarnation,
+        state: 'trusted',
+      });
+      setWorkspaceTrust(trust);
+      setTrustPrompt(undefined);
+      await startInteractiveSession();
+    } catch (error) {
+      setTrustError(error instanceof Error ? error.message : 'failed to trust workspace');
+    } finally {
+      setTrustBusy(false);
+    }
+  }, [cwd, startInteractiveSession, trustPrompt]);
 
   const handleCancel = useCallback(async () => {
     if (!sessionId) return;
     try {
-      await window.agentDock.cancelSession(sessionId);
-    } catch {
-      // the session-event stream will still reflect the true terminal state
+      await window.agentDock.cancelInteractiveSession(sessionId);
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : 'failed to cancel session');
     }
   }, [sessionId]);
 
+  const removeInteraction = useCallback((interactionHandle: string) => {
+    setInteractions((current) =>
+      current.filter((interaction) => interaction.interactionHandle !== interactionHandle),
+    );
+  }, []);
+
+  const handleApproval = useCallback(
+    async (decision: ApprovalDecisionV2) => {
+      const interaction = interactions[0];
+      if (!interaction || interaction.kind !== 'approval' || !window.agentDock.respondApproval)
+        return;
+      setInteractionBusy(true);
+      setInteractionError(undefined);
+      try {
+        await window.agentDock.respondApproval(interaction.interactionHandle, decision);
+      } catch (error) {
+        setFormError(
+          `${error instanceof Error ? error.message : 'approval response failed'}; the request will fail closed`,
+        );
+      } finally {
+        removeInteraction(interaction.interactionHandle);
+        setInteractionBusy(false);
+      }
+    },
+    [interactions, removeInteraction],
+  );
+
+  const handleQuestions = useCallback(
+    async (answers: RendererQuestionResponse['answers']) => {
+      const interaction = interactions[0];
+      if (!interaction || interaction.kind !== 'question' || !window.agentDock.answerQuestions)
+        return;
+      setInteractionBusy(true);
+      setInteractionError(undefined);
+      try {
+        await window.agentDock.answerQuestions(interaction.interactionHandle, answers);
+      } catch (error) {
+        setFormError(
+          `${error instanceof Error ? error.message : 'question response failed'}; the request will fail closed`,
+        );
+      } finally {
+        removeInteraction(interaction.interactionHandle);
+        setInteractionBusy(false);
+      }
+    },
+    [interactions, removeInteraction],
+  );
+
+  const handleRevokeTrust = useCallback(async () => {
+    if (!workspaceTrust || !window.agentDock.setWorkspaceTrust) return;
+    setRevokingTrust(true);
+    setFormError(undefined);
+    try {
+      const trust = await window.agentDock.setWorkspaceTrust(workspaceTrust.workspaceId, {
+        cwd: cwd.trim(),
+        incarnation: workspaceTrust.incarnation,
+        state: 'untrusted',
+      });
+      setWorkspaceTrust(trust);
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : 'failed to revoke workspace trust');
+    } finally {
+      setRevokingTrust(false);
+    }
+  }, [cwd, workspaceTrust]);
+
   const isRunning = runStatus === 'starting' || runStatus === 'running';
-  const selectedProviderStatus = providers?.find((p) => p.id === provider);
+  const selectedProviderStatus = providers?.find((status) => status.id === provider);
   const canRun =
     daemonState === 'ready' &&
     !!selectedProviderStatus?.installed &&
@@ -190,21 +390,23 @@ export function App() {
                 Provider
                 <select
                   value={provider}
-                  onChange={(e) => setProvider(e.target.value as ProviderId)}
+                  onChange={(event) => setProvider(event.target.value as ProviderId)}
                   disabled={isRunning}
                 >
                   <option value="claude">Claude Code</option>
                   <option value="codex">Codex</option>
                 </select>
               </label>
-
               <label>
                 Working directory
                 <div className="row">
                   <input
                     type="text"
                     value={cwd}
-                    onChange={(e) => setCwd(e.target.value)}
+                    onChange={(event) => {
+                      setCwd(event.target.value);
+                      setWorkspaceTrust(undefined);
+                    }}
                     placeholder="/path/to/project"
                     disabled={isRunning}
                   />
@@ -213,28 +415,45 @@ export function App() {
                     type="button"
                     disabled={isRunning}
                     onClick={async () => {
-                      const dir = await window.agentDock.selectDirectory();
-                      if (dir) setCwd(dir);
+                      const directory = await window.agentDock.selectDirectory();
+                      if (directory) {
+                        setCwd(directory);
+                        setWorkspaceTrust(undefined);
+                      }
                     }}
                   >
                     Browse
                   </button>
                 </div>
               </label>
-
+              {workspaceTrust?.state === 'trusted' && (
+                <div className="trust-state" role="status">
+                  <span>Trusted workspace: {workspaceTrust.displayName}</span>
+                  <button
+                    className="button button--quiet-danger"
+                    type="button"
+                    disabled={revokingTrust}
+                    onClick={handleRevokeTrust}
+                  >
+                    {revokingTrust ? 'Revoking…' : 'Revoke trust'}
+                  </button>
+                </div>
+              )}
               <label>
                 Prompt
                 <textarea
                   value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
+                  onChange={(event) => setPrompt(event.target.value)}
                   rows={5}
                   placeholder="Describe the task for your agent…"
                   disabled={isRunning}
                 />
               </label>
-
-              {formError && <div className="banner banner--error">{formError}</div>}
-
+              {formError && (
+                <div className="banner banner--error" role="alert">
+                  {formError}
+                </div>
+              )}
               <div className="row run-actions">
                 <button
                   className="button button--primary"
@@ -262,11 +481,36 @@ export function App() {
                 <span className="eyebrow">Normalized event stream</span>
                 <h2>Session</h2>
               </div>
-              <span className={`status status--${runStatus}`}>{runStatus}</span>
+              <span className={`status status--${runStatus}`} aria-live="polite">
+                {runStatus}
+              </span>
             </div>
             <EventLog events={events} />
           </section>
         </main>
+      )}
+
+      {trustPrompt && (
+        <WorkspaceTrustDialog
+          workspace={trustPrompt}
+          busy={trustBusy}
+          error={trustError}
+          onCancel={() => {
+            setTrustPrompt(undefined);
+            setRunStatus('idle');
+          }}
+          onTrust={() => void handleTrustAndRun()}
+        />
+      )}
+      {interactions[0] && (
+        <InteractionDialog
+          interaction={interactions[0]}
+          busy={interactionBusy}
+          error={interactionError}
+          onApproval={(decision) => void handleApproval(decision)}
+          onQuestions={(answers) => void handleQuestions(answers)}
+          onCancelSession={() => void handleCancel()}
+        />
       )}
     </div>
   );

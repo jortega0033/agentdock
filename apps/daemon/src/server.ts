@@ -7,13 +7,19 @@ import { registerProviderRoutes } from './routes/providers.js';
 import { registerSessionRoutes } from './routes/sessions.js';
 import { registerV2ProviderRoutes } from './routes/v2-providers.js';
 import { registerV2SessionRoutes } from './routes/v2-sessions.js';
+import { registerV2AuditRoutes } from './routes/v2-audit.js';
+import { registerV2WorkspaceRoutes } from './routes/v2-workspaces.js';
+import type { AuditStore } from './audit-store.js';
 import type { SessionManager } from './session-manager.js';
+import type { WorkspaceTrustStore } from './workspace-trust-store.js';
 
 export interface BuildServerOptions {
   registry: ProviderRegistry;
   sessionManager: SessionManager;
   token: string;
   logger: Logger;
+  auditStore?: AuditStore;
+  trustStore?: WorkspaceTrustStore;
 }
 
 /**
@@ -78,11 +84,17 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
 
   registerHealthRoute(app, startedAt);
   registerProviderRoutes(app, opts.registry);
-  registerSessionRoutes(app, opts.sessionManager, opts.registry);
+  registerSessionRoutes(app, opts.sessionManager, opts.registry, opts.trustStore);
   registerV2ProviderRoutes(app, opts.registry);
   // Route-level limiter configuration is bound by @fastify/rate-limit's onRoute hook. Register
   // this route only after the plugin has booted so the hook sees it in this synchronous builder.
-  app.after(() => registerV2SessionRoutes(app, opts.sessionManager, opts.registry));
+  app.after(() => {
+    registerV2SessionRoutes(app, opts.sessionManager, opts.registry, opts.trustStore);
+    if (opts.auditStore) registerV2AuditRoutes(app, opts.auditStore);
+    if (opts.trustStore) {
+      registerV2WorkspaceRoutes(app, opts.trustStore, opts.sessionManager);
+    }
+  });
 
   app.setErrorHandler((err: FastifyError, req, reply) => {
     // Fastify's own body-parsing errors (malformed JSON, payload-too-large, ...) carry a real

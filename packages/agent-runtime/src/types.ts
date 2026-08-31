@@ -39,6 +39,8 @@ export interface StartInteractiveSessionOptions extends StartSessionOptions {
   selection: CapabilitySelection;
   executionId: string;
   turnId: string;
+  /** Daemon ownership defers interaction deadlines until responder publication. */
+  interactionOwner?: 'provider' | 'daemon';
   /** Cancels startup or the live session. Teardown still waits for bounded process-tree reaping. */
   signal?: AbortSignal;
 }
@@ -51,13 +53,27 @@ export type ProviderInteractionResolution =
       requestId: string;
       turnId: string;
       decision: 'deny';
-      reason: 'cancel' | 'interrupt' | 'overflow' | 'shutdown' | 'timeout';
+      reason:
+        | 'cancel'
+        | 'disconnect'
+        | 'interrupt'
+        | 'overflow'
+        | 'shutdown'
+        | 'timeout'
+        | 'trust_revoked';
     }
   | {
       kind: 'question';
       requestId: string;
       turnId: string;
-      reason: 'cancel' | 'interrupt' | 'overflow' | 'shutdown' | 'timeout';
+      reason:
+        | 'cancel'
+        | 'disconnect'
+        | 'interrupt'
+        | 'overflow'
+        | 'shutdown'
+        | 'timeout'
+        | 'trust_revoked';
     };
 
 /**
@@ -69,6 +85,12 @@ export interface InteractiveProviderSessionHandle {
   events: AsyncGenerator<AgentEventV2, void, void>;
   accepted: Promise<AcceptedWorkState>;
   send(command: AgentCommandV2): Promise<void>;
+  /** Fail-closed daemon resolution for an unanswered published interaction. */
+  resolveInteraction(
+    requestId: string,
+    reason:
+      'cancel' | 'disconnect' | 'interrupt' | 'overflow' | 'shutdown' | 'timeout' | 'trust_revoked',
+  ): Promise<void>;
   interrupt(): Promise<void>;
   close(): Promise<void>;
 }

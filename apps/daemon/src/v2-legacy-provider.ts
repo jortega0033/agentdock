@@ -15,6 +15,7 @@ import {
   type ProviderStatusV2,
   type ProviderTransportV2,
 } from '@agent-dock/shared';
+import { providerSandboxStatus } from './sandbox-status.js';
 
 export const LEGACY_ONE_SHOT_TRANSPORT = LEGACY_ONE_SHOT_TRANSPORT_ID;
 export const UNVERIFIED_PROVIDER_FIXTURE_SET = 'unverified-provider-fixtures';
@@ -198,6 +199,7 @@ export function toProviderStatusV2(status: ProviderStatus): ProviderStatusV2 {
     authenticated: status.authenticated,
     transports: [LEGACY_TRANSPORT],
     capabilities: legacyCapabilityRecords(status),
+    sandbox: providerSandboxStatus(status.id, false),
     ...(status.executablePath === undefined ? {} : { executablePath: status.executablePath }),
     ...(status.version === undefined ? {} : { version: status.version }),
     ...(status.error === undefined ? {} : { error: status.error }),

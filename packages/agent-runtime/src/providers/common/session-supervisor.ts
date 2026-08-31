@@ -599,6 +599,46 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
     }
   }
 
+  async resolveInteraction(
+    requestId: string,
+    reason:
+      'cancel' | 'disconnect' | 'interrupt' | 'overflow' | 'shutdown' | 'timeout' | 'trust_revoked',
+  ): Promise<void> {
+    this.assertOpen();
+    const record = this.interactions.get(requestId);
+    if (!record) {
+      throw new InteractiveSessionError(
+        'stale_interaction',
+        'interaction is stale or belongs to another turn',
+      );
+    }
+    this.interactions.delete(requestId);
+    const records =
+      record.kind === 'question'
+        ? [record, ...this.takePendingTurnInteractions(record.turnId)]
+        : [record];
+    try {
+      // This public boundary is used for daemon/responder loss, not provider transport loss. The
+      // provider is still live and must receive the fail-closed denial/cancellation.
+      await this.resolveInteractions(records, reason, true);
+      if (
+        record.kind === 'question' &&
+        reason !== 'interrupt' &&
+        !this.terminal &&
+        !this.closing &&
+        !this.failing
+      ) {
+        await this.interruptAndConfirmIdle();
+      }
+    } catch (error) {
+      await this.fail(
+        eventCode(error) ?? 'provider_crash',
+        'provider interaction resolution failed',
+      );
+      throw error;
+    }
+  }
+
   async close(): Promise<void> {
     if (this.failing) return this.failing;
     if (this.closing) return this.closing;
@@ -890,7 +930,9 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
       kind: event.type === 'approval.requested' ? 'approval' : 'question',
       requestId: event.requestId,
       turnId: event.turnId,
-      timer: setTimeout(() => void this.timeoutInteraction(event.requestId), delay),
+      ...(this.options.interactionOwner === 'daemon'
+        ? {}
+        : { timer: setTimeout(() => void this.timeoutInteraction(event.requestId), delay) }),
     };
     record.timer?.unref?.();
     this.interactions.set(event.requestId, record);
@@ -1034,6 +1076,18 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
       void this.fail('provider_correlation_error', 'provider resolved an unknown interaction');
       return false;
     }
+    if (this.options.interactionOwner === 'daemon') {
+      if (this.resolvingInteractions.get(event.requestId) !== record) {
+        void this.fail(
+          'provider_correlation_error',
+          'provider resolved a daemon-owned interaction without a dispatched response',
+        );
+      }
+      // The provider controls this event's decision/answers. Even while a daemon command is in
+      // flight, only the already-validated daemon command may define the published resolution.
+      // Keep the record resolving so send() synthesizes that authoritative event on success.
+      return false;
+    }
     this.interactions.delete(record.requestId);
     this.resolvingInteractions.delete(record.requestId);
     if (record.timer) clearTimeout(record.timer);
@@ -1073,7 +1127,8 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
 
   private publishSafeResolution(
     record: InteractionRecord,
-    reason: 'cancel' | 'disconnect' | 'interrupt' | 'overflow' | 'shutdown' | 'timeout',
+    reason:
+      'cancel' | 'disconnect' | 'interrupt' | 'overflow' | 'shutdown' | 'timeout' | 'trust_revoked',
   ): void {
     if (record.timer) clearTimeout(record.timer);
     if (record.kind === 'approval') {
@@ -1175,7 +1230,8 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
 
   private async resolveInteractions(
     records: InteractionRecord[],
-    reason: 'cancel' | 'disconnect' | 'interrupt' | 'overflow' | 'shutdown' | 'timeout',
+    reason:
+      'cancel' | 'disconnect' | 'interrupt' | 'overflow' | 'shutdown' | 'timeout' | 'trust_revoked',
     notifyProvider: boolean,
     responseTimeoutMs = this.commandTimeoutMs,
   ): Promise<void> {
@@ -1183,7 +1239,7 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
       this.rememberResolved(record);
       this.publishSafeResolution(record, reason);
     }
-    if (!notifyProvider || reason === 'disconnect') return;
+    if (!notifyProvider) return;
     await timeout(
       (async () => {
         for (const record of records) {

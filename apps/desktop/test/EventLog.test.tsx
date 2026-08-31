@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
-import type { AgentEvent } from '@agent-dock/shared';
+import type { AgentEventV2Envelope } from '@agent-dock/shared';
 import { EventLog } from '../src/components/EventLog.js';
 
 describe('EventLog', () => {
@@ -10,12 +10,61 @@ describe('EventLog', () => {
   });
 
   it('renders assistant messages, tool events, and errors without provider-specific logic', () => {
-    const events: AgentEvent[] = [
-      { type: 'session.started', sessionId: 's1', provider: 'claude' },
-      { type: 'assistant.message', text: 'hello there' },
-      { type: 'tool.started', toolName: 'Bash', toolCallId: 'c1' },
-      { type: 'error', message: 'something broke', recoverable: false },
-      { type: 'session.completed' },
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const executionId = '123e4567-e89b-42d3-a456-426614174001';
+    const turnId = '123e4567-e89b-42d3-a456-426614174002';
+    const contentBlockId = '123e4567-e89b-42d3-a456-426614174003';
+    const timestamp = '2026-08-31T00:00:00.000Z';
+    const events: AgentEventV2Envelope[] = [
+      {
+        type: 'session.started',
+        sessionId,
+        executionId,
+        sequence: 0,
+        timestamp,
+        provider: 'claude',
+        transport: 'fake',
+        selection: {
+          transport: 'fake',
+          enabled: [],
+          unavailableOptional: [],
+          possibleEffects: [],
+          effectsComplete: true,
+        },
+      },
+      {
+        type: 'content.delta',
+        sessionId,
+        executionId,
+        turnId,
+        contentBlockId,
+        sequence: 1,
+        timestamp,
+        delta: 'hello there',
+      },
+      {
+        type: 'tool.started',
+        sessionId,
+        executionId,
+        turnId,
+        contentBlockId,
+        toolCallId: '123e4567-e89b-42d3-a456-426614174004',
+        toolName: 'Bash',
+        possibleEffects: ['command'],
+        effectsComplete: true,
+        sequence: 2,
+        timestamp,
+      },
+      {
+        type: 'error',
+        sessionId,
+        executionId,
+        sequence: 3,
+        timestamp,
+        message: 'something broke',
+        recoverable: false,
+      },
+      { type: 'session.completed', sessionId, executionId, sequence: 4, timestamp },
     ];
     render(<EventLog events={events} />);
     expect(screen.getByText('hello there')).toBeInTheDocument();

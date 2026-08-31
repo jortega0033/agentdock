@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import {
   agentEventV2EnvelopeSchema,
   agentSessionV2Schema,
@@ -13,6 +13,7 @@ import {
   type ProviderTransportV2,
 } from '@agent-dock/shared';
 import type { DispatchResult, SessionManager } from './session-manager.js';
+import type { WorkspaceIdentity } from './workspace-identity.js';
 
 interface ToolCorrelation {
   toolCallId: string;
@@ -38,6 +39,7 @@ interface V2SessionMetadata {
   interactive: boolean;
   status: AgentSessionV2['status'];
   pendingInteractions: Map<string, { kind: 'approval' | 'question'; turnId: string }>;
+  responderLease?: string;
 }
 
 const ALL_EFFECTS = [
@@ -52,6 +54,7 @@ const MAX_CONTENT_BYTES = 256 * 1024;
 const MAX_WIRE_STRING_BYTES = 256;
 const MAX_REPLAY_EVENTS = 5_000;
 const MAX_REPLAY_BYTES = 16 * 1024 * 1024;
+const RESPONDER_LEASE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 function isTerminal(event: AgentEventV2Envelope): boolean {
   return (
@@ -98,6 +101,7 @@ export class V2SessionFacade {
     transport: ProviderTransportV2,
     interactive: boolean,
     signal?: AbortSignal,
+    workspace?: WorkspaceIdentity,
   ): Promise<AgentSessionV2> {
     this.prune();
     const executionId = randomUUID();
@@ -112,8 +116,9 @@ export class V2SessionFacade {
           executionId,
           turnId,
           signal,
+          workspace,
         )
-      : this.sessions.create(input.provider, input.cwd, input.prompt, undefined, 2);
+      : this.sessions.create(input.provider, input.cwd, input.prompt, undefined, 2, workspace);
     const metadata: V2SessionMetadata = {
       selection,
       executionId,
@@ -215,6 +220,32 @@ export class V2SessionFacade {
     }
     metadata.listeners.add(listener);
     return () => metadata.listeners.delete(listener);
+  }
+
+  claimResponder(id: string): string | undefined {
+    const metadata = this.metadata.get(id);
+    if (!metadata || metadata.responderLease) return undefined;
+    const lease = randomBytes(32).toString('base64url');
+    metadata.responderLease = lease;
+    return lease;
+  }
+
+  hasResponderLease(id: string, candidate: string | undefined): boolean {
+    const metadata = this.metadata.get(id);
+    const lease = metadata?.responderLease;
+    if (!lease || !candidate || !RESPONDER_LEASE_PATTERN.test(candidate)) return false;
+    return timingSafeEqual(Buffer.from(candidate), Buffer.from(lease));
+  }
+
+  releaseResponder(id: string, lease: string): void {
+    const metadata = this.metadata.get(id);
+    if (!metadata || !this.hasResponderLease(id, lease)) return;
+    delete metadata.responderLease;
+    void this.sessions.responderDisconnected(id);
+  }
+
+  markInteractionPublished(id: string, requestId: string): boolean {
+    return this.sessions.markInteractionPublished(id, requestId);
   }
 
   private project(session: AgentSession): AgentSessionV2 {

@@ -10,6 +10,8 @@ import {
 } from '@agent-dock/shared';
 import type { ProviderRegistry } from '@agent-dock/agent-runtime';
 import type { SessionManager } from '../session-manager.js';
+import type { WorkspaceTrustStore } from '../workspace-trust-store.js';
+import { resolveWorkspaceIdentity, revalidateWorkspaceIdentity } from '../workspace-identity.js';
 import { resolveProviderV2Manifest } from '../provider-v2.js';
 import { BoundedV2SseWriter } from '../v2-sse-writer.js';
 import { V2SessionFacade } from '../v2-session-facade.js';
@@ -55,6 +57,7 @@ export function registerV2SessionRoutes(
   app: FastifyInstance,
   sessionManager: SessionManager,
   registry: ProviderRegistry,
+  trustStore?: WorkspaceTrustStore,
 ): void {
   const sessions = new V2SessionFacade(sessionManager);
 
@@ -108,6 +111,28 @@ export function registerV2SessionRoutes(
       }
       try {
         if (controller.signal.aborted) return;
+        const workspace = trustStore
+          ? await resolveWorkspaceIdentity(parsed.data.cwd).catch(() => undefined)
+          : undefined;
+        if (trustStore) {
+          if (!workspace) {
+            reply.code(400).send({
+              error: 'workspace could not be resolved',
+              code: 'invalid_working_directory',
+            });
+            return;
+          }
+          const trust = await trustStore.inspect(workspace);
+          if (trust.state !== 'trusted') {
+            reply.code(409).send({
+              error: 'workspace is not trusted',
+              code: 'workspace_untrusted',
+              details: trust,
+            });
+            return;
+          }
+        }
+
         const detected = await raceAbort(provider.detect(), controller.signal);
         if (detected.aborted) return;
         const manifest = resolveProviderV2Manifest(provider, detected.value);
@@ -133,12 +158,25 @@ export function registerV2SessionRoutes(
           (candidate) => candidate.id === negotiation.selection.transport,
         );
         if (!transport) throw new Error('negotiation selected an unknown provider transport');
+        if (
+          trustStore &&
+          workspace &&
+          (!(await revalidateWorkspaceIdentity(workspace)) ||
+            (await trustStore.inspect(workspace)).state !== 'trusted')
+        ) {
+          reply.code(409).send({
+            error: 'workspace trust changed',
+            code: 'workspace_untrusted',
+          });
+          return;
+        }
         const session = await sessions.create(
-          parsed.data,
+          { ...parsed.data, cwd: workspace?.canonicalPath ?? parsed.data.cwd },
           negotiation.selection,
           transport,
           manifest.interactive,
           controller.signal,
+          workspace,
         );
         if (controller.signal.aborted || req.raw.aborted || reply.raw.destroyed) {
           await sessions.cancel(session.id);
@@ -182,6 +220,12 @@ export function registerV2SessionRoutes(
       reply.code(400).send({ error: 'invalid Last-Event-ID', code: 'invalid_last_event_id' });
       return;
     }
+    const responderHeader = req.headers['x-agentdock-responder'];
+    if (responderHeader !== undefined && responderHeader !== '1') {
+      reply.code(400).send({ error: 'invalid responder header', code: 'invalid_request' });
+      return;
+    }
+    const responder = responderHeader === '1';
     const replayWindow = sessions.replayWindow(params.data.sessionId);
     if (!replayWindow) {
       reply.code(404).send({ error: 'session not found', code: 'session_not_found' });
@@ -198,16 +242,30 @@ export function registerV2SessionRoutes(
       });
       return;
     }
+    const responderLease = responder ? sessions.claimResponder(params.data.sessionId) : undefined;
+    if (responder && !responderLease) {
+      reply.code(409).send({
+        error: 'session already has an active responder',
+        code: 'responder_already_connected',
+      });
+      return;
+    }
 
     reply.hijack();
     reply.raw.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
+      ...(responderLease === undefined ? {} : { 'X-AgentDock-Responder-Lease': responderLease }),
     });
     let unsubscribe: (() => void) | undefined;
     let cleanupRequested = false;
+    let responderReleased = false;
     const cleanup = (): void => {
+      if (responderLease !== undefined && !responderReleased) {
+        responderReleased = true;
+        sessions.releaseResponder(params.data.sessionId, responderLease);
+      }
       if (!unsubscribe) {
         cleanupRequested = true;
         return;
@@ -216,7 +274,14 @@ export function registerV2SessionRoutes(
       unsubscribe = undefined;
       release();
     };
-    const writer = new BoundedV2SseWriter(reply.raw, cleanup);
+    const writer = new BoundedV2SseWriter(reply.raw, cleanup, (event) => {
+      if (
+        responder &&
+        (event.type === 'approval.requested' || event.type === 'question.requested')
+      ) {
+        sessions.markInteractionPublished(params.data.sessionId, event.requestId);
+      }
+    });
     reply.raw.once('close', () => writer.close());
     writer.start();
 
@@ -254,6 +319,21 @@ export function registerV2SessionRoutes(
       reply.code(400).send({
         error: 'command session id does not match the route',
         code: 'session_id_mismatch',
+      });
+      return;
+    }
+    if (
+      (parsed.data.type === 'approval.respond' || parsed.data.type === 'question.respond') &&
+      !sessions.hasResponderLease(
+        params.data.sessionId,
+        typeof req.headers['x-agentdock-responder-lease'] === 'string'
+          ? req.headers['x-agentdock-responder-lease']
+          : undefined,
+      )
+    ) {
+      reply.code(403).send({
+        error: 'interaction response requires the active responder lease',
+        code: 'responder_lease_required',
       });
       return;
     }

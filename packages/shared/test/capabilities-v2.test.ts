@@ -335,6 +335,14 @@ describe('protocol v2 capability schemas', () => {
         { id: 'cli', priority: 0, stability: 'stable', possibleEffects: [], effectsComplete: true },
       ],
       capabilities: [supportRecord('session.cancel')],
+      sandbox: {
+        providerId: 'claude',
+        platform: 'win32',
+        provider: { mechanism: 'provider_policy', state: 'unknown', evidence: [] },
+        agentDock: { mechanism: 'agentdock_policy', state: 'not_requested', evidence: [] },
+        os: { mechanism: 'os_sandbox', state: 'unavailable', evidence: [] },
+        badge: 'none',
+      },
     };
     expect(providerStatusV2Schema.safeParse(status).success).toBe(true);
     expect(

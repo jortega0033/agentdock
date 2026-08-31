@@ -1,24 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
-  <title id="title">AgentDock mark</title>
-  <desc id="desc">Glossy monochrome hexagonal badge with a stylized A above a dock bar.</desc>
-  <defs>
-    <linearGradient id="badge" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#454545"/>
-      <stop offset="0.48" stop-color="#242424"/>
-      <stop offset="1" stop-color="#0b0b0b"/>
-    </linearGradient>
-    <linearGradient id="edge" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#bdbdbd" stop-opacity=".75"/>
-      <stop offset=".38" stop-color="#646464" stop-opacity=".55"/>
-      <stop offset="1" stop-color="#222" stop-opacity=".8"/>
-    </linearGradient>
-    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
-      <feDropShadow dx="0" dy="2" stdDeviation="1.7" flood-color="#000" flood-opacity=".7"/>
-    </filter>
-  </defs>
-  <path d="M32 3.5c3.2 0 19.2 9.3 21.4 13.1 2.2 3.8 2.2 26.9 0 30.8C51.2 51.2 35.2 60.5 32 60.5s-19.2-9.3-21.4-13.1c-2.2-3.9-2.2-27 0-30.8C12.8 12.8 28.8 3.5 32 3.5Z" fill="url(#badge)" stroke="url(#edge)" stroke-width="1.1"/>
-  <g fill="#fafafa" filter="url(#shadow)">
-    <path d="M32 15.2 45.2 40h-7.6L32 29.1 26.4 40h-7.6L32 15.2Z"/>
-    <path d="M18.4 45.6h27.2l4.1 7.7H14.3l4.1-7.7Z"/>
-  </g>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="AgentDock"><defs>
+  <linearGradient id="badge" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4a4a4a"/><stop offset="0.16" stop-color="#343434"/><stop offset="0.58" stop-color="#1d1d1d"/><stop offset="1" stop-color="#090909"/></linearGradient>
+  <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e6e6e6" stop-opacity="0.72"/><stop offset="0.28" stop-color="#9a9a9a" stop-opacity="0.34"/><stop offset="0.72" stop-color="#585858" stop-opacity="0.18"/><stop offset="1" stop-color="#d7d7d7" stop-opacity="0.34"/></linearGradient>
+  <linearGradient id="mark" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="0.7" stop-color="#f4f4f4"/><stop offset="1" stop-color="#dedede"/></linearGradient>
+  <filter id="badgeShadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="22" stdDeviation="20" flood-color="#000000" flood-opacity="0.72"/></filter>
+  <filter id="markShadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="10" stdDeviation="8" flood-color="#000000" flood-opacity="0.55"/></filter>
+  <clipPath id="hexClip"><path d="M512 76 C553 76 814 226 844 278 C874 330 874 694 844 746 C814 798 553 948 512 948 C471 948 210 798 180 746 C150 694 150 330 180 278 C210 226 471 76 512 76 Z"/></clipPath>
+</defs><g transform="scale(0.0625)"><g filter="url(#badgeShadow)"><path d="M512 76 C553 76 814 226 844 278 C874 330 874 694 844 746 C814 798 553 948 512 948 C471 948 210 798 180 746 C150 694 150 330 180 278 C210 226 471 76 512 76 Z" fill="url(#badge)"/><path d="M512 76 C553 76 814 226 844 278 C874 330 874 694 844 746 C814 798 553 948 512 948 C471 948 210 798 180 746 C150 694 150 330 180 278 C210 226 471 76 512 76 Z" fill="none" stroke="url(#rim)" stroke-width="10"/><ellipse cx="512" cy="142" rx="255" ry="96" fill="#fff" opacity="0.075" clip-path="url(#hexClip)"/></g><g fill="url(#mark)" filter="url(#markShadow)"><path d="M512 270 L694 610 C704 630 691 652 669 652 H603 L512 474 L421 652 H355 C333 652 320 630 330 610 L512 270 Z"/><path d="M360 706 H664 C675 706 685 712 691 722 L736 794 C747 812 734 834 713 834 H311 C290 834 277 812 288 794 L333 722 C339 712 349 706 360 706 Z"/></g></g></svg>

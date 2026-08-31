@@ -520,7 +520,7 @@ textarea {
 }
 
 .provider-panel__empty-illustration,
-.event-log__empty-illustration {
+.activity-timeline__empty-illustration {
   display: block;
   width: 88px;
   height: 88px;
@@ -744,77 +744,6 @@ textarea {
   white-space: pre-wrap;
 }
 
-.event-log {
-  min-height: 500px;
-  max-height: 640px;
-  overflow-y: auto;
-  padding: 12px;
-  border: 1px solid #d8e1ed;
-  border-radius: 12px;
-  background: #0b1020;
-  color: #dbeafe;
-  font-family: 'Cascadia Code', 'SFMono-Regular', Consolas, monospace;
-  font-size: 12px;
-}
-
-.event-log--empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  color: #64748b;
-  text-align: center;
-  font-family: inherit;
-}
-
-.event-log--empty strong {
-  color: #cbd5e1;
-  font-size: 14px;
-}
-
-.event-log__empty-illustration {
-  width: 116px;
-  height: 116px;
-  margin-bottom: 4px;
-  filter: invert(1);
-  opacity: 0.38;
-}
-
-.event-line {
-  display: grid;
-  grid-template-columns: 148px minmax(0, 1fr);
-  gap: 12px;
-  padding: 9px 6px;
-  border-bottom: 1px solid #1e293b;
-}
-
-.event-line:last-child {
-  border-bottom: 0;
-}
-
-.event-line--error {
-  color: #fca5a5;
-}
-
-.event-line--success {
-  color: #86efac;
-}
-
-.event-line--muted {
-  color: #94a3b8;
-}
-
-.event-type {
-  color: #8b9bff;
-  white-space: nowrap;
-}
-
-.event-text {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
 @media (max-width: 920px) {
   body {
     min-width: 560px;
@@ -826,9 +755,5 @@ textarea {
 
   .card--session {
     min-height: auto;
-  }
-
-  .event-log {
-    min-height: 320px;
   }
 }

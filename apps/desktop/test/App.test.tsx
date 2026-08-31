@@ -8,7 +8,10 @@ import type {
   ProviderStatusV2,
   WorkspaceTrustViewV2,
 } from '@agent-dock/shared';
-import type { RendererInteraction } from '../electron/interaction-broker.js';
+import type {
+  RendererInteraction,
+  RendererInteractionResolution,
+} from '../electron/interaction-broker.js';
 import { App } from '../src/App.js';
 import type { AgentDockBridge, DaemonStatus } from '../src/window.js';
 
@@ -89,6 +92,7 @@ const SESSION: AgentSessionV2 = {
 interface BridgeCallbacks {
   event?: (sessionId: string, event: AgentEventV2Envelope) => void;
   interaction?: (interaction: RendererInteraction) => void;
+  resolution?: (resolution: RendererInteractionResolution) => void;
 }
 
 function installBridge(overrides: Partial<AgentDockBridge> = {}): {
@@ -124,7 +128,12 @@ function installBridge(overrides: Partial<AgentDockBridge> = {}): {
         callbacks.interaction = undefined;
       };
     }),
-    onInteractionResolved: vi.fn().mockReturnValue(() => {}),
+    onInteractionResolved: vi.fn((callback) => {
+      callbacks.resolution = callback;
+      return () => {
+        callbacks.resolution = undefined;
+      };
+    }),
     inspectWorkspace: vi.fn().mockResolvedValue(TRUSTED_WORKSPACE),
     setWorkspaceTrust: vi.fn().mockResolvedValue(TRUSTED_WORKSPACE),
     readAudit: vi.fn().mockResolvedValue({ schemaVersion: 1, entries: [] }),
@@ -242,7 +251,7 @@ describe('App security flow', () => {
     await waitFor(() => expect(bridge.cancelInteractiveSession).toHaveBeenCalledWith(SESSION_ID));
     callbacks.event?.(SESSION_ID, event(1, { type: 'session.completed' }));
     await waitFor(() =>
-      expect(screen.getByLabelText('session events')).toHaveTextContent('session completed'),
+      expect(screen.getByLabelText('Session activity')).toHaveTextContent('session completed'),
     );
   });
 
@@ -281,6 +290,48 @@ describe('App security flow', () => {
     await waitFor(() =>
       expect(bridge.respondApproval).toHaveBeenCalledWith(interactionHandle, 'deny'),
     );
+  });
+
+  it('projects opaque approval interactions into one safe lifecycle card', async () => {
+    const { bridge, callbacks } = installBridge();
+    render(<App />);
+    await screen.findByText('Claude Code');
+    fillSessionForm();
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+    await waitFor(() => expect(bridge.createInteractiveSession).toHaveBeenCalledOnce());
+
+    const interactionHandle = 'A'.repeat(43);
+    callbacks.interaction?.({
+      kind: 'approval',
+      interactionHandle,
+      title: 'Run command',
+      action: 'execute',
+      target: 'workspace',
+      possibleEffects: ['command'],
+      effectsComplete: true,
+      allowedDecisions: ['allow_once', 'deny'],
+      deadlineAt: '2026-08-31T00:05:00.000Z',
+    });
+
+    const timeline = await screen.findByLabelText('Session activity');
+    expect(
+      await within(timeline).findByRole('article', {
+        name: 'Run command. Needs attention. Action required',
+      }),
+    ).toBeInTheDocument();
+    expect(timeline).not.toHaveTextContent(interactionHandle);
+
+    callbacks.resolution?.({
+      interactionHandle,
+      kind: 'approval_resolved',
+      reason: 'denied',
+    });
+
+    expect(
+      await within(timeline).findByRole('article', { name: 'Approval denied. Failed' }),
+    ).toBeInTheDocument();
+    expect(within(timeline).getAllByRole('article')).toHaveLength(1);
+    expect(timeline).not.toHaveTextContent(interactionHandle);
   });
 
   it('fails a pending question closed when Escape cancels its session', async () => {

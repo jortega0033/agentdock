@@ -9,4 +9,5 @@ export * from './registry.js';
 export * from './providers/claude/adapter.js';
 export * from './providers/codex/adapter.js';
 export * from './providers/fake/adapter.js';
+export * from './providers/compatibility-manifest.js';
 export * from './providers/common/session-supervisor.js';

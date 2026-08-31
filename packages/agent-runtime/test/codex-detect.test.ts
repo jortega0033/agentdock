@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { parseCodexLoginStatus } from '../src/providers/codex/detect.js';
+import { parseCodexLoginStatus, parseCodexVersion } from '../src/providers/codex/detect.js';
+
+describe('parseCodexVersion', () => {
+  it('preserves stable and prerelease versions exactly', () => {
+    expect(parseCodexVersion('codex-cli 0.147.0')).toBe('0.147.0');
+    expect(parseCodexVersion('codex-cli 0.147.0-alpha.1+build.7')).toBe('0.147.0-alpha.1+build.7');
+    expect(parseCodexVersion('codex-cli unknown')).toBeUndefined();
+  });
+});
 
 describe('parseCodexLoginStatus — pure parser (AD-16)', () => {
   it('returns "authenticated" for a real "Logged in using ChatGPT" line', () => {
@@ -15,7 +23,9 @@ describe('parseCodexLoginStatus — pure parser (AD-16)', () => {
   });
 
   it('returns "unauthenticated" for "Not authenticated" / "No credentials found" variants', () => {
-    expect(parseCodexLoginStatus('Not authenticated. Run `codex login` first.')).toBe('unauthenticated');
+    expect(parseCodexLoginStatus('Not authenticated. Run `codex login` first.')).toBe(
+      'unauthenticated',
+    );
     expect(parseCodexLoginStatus('No credentials found.')).toBe('unauthenticated');
   });
 
@@ -46,17 +56,25 @@ describe('detectCodex — end-to-end failure paths (mocked exec, no real CLI)', 
   });
 
   it('reports "unknown" when --version exits non-zero', async () => {
-    vi.doMock('../src/detect-executable.js', () => ({ findExecutable: async () => '/usr/local/bin/codex' }));
+    vi.doMock('../src/detect-executable.js', () => ({
+      findExecutable: async () => '/usr/local/bin/codex',
+    }));
     vi.doMock('../src/process/exec-capture.js', () => ({
       execCapture: async () => ({ code: 1, stdout: '', stderr: 'not found', timedOut: false }),
     }));
     const { detectCodex } = await import('../src/providers/codex/detect.js');
     const status = await detectCodex({ debug() {}, info() {}, warn() {}, error() {} });
-    expect(status).toMatchObject({ installed: true, authenticated: 'unknown', error: 'codex --version failed' });
+    expect(status).toMatchObject({
+      installed: true,
+      authenticated: 'unknown',
+      error: 'codex --version failed',
+    });
   });
 
   it('reports "unknown" when the login status check times out', async () => {
-    vi.doMock('../src/detect-executable.js', () => ({ findExecutable: async () => '/usr/local/bin/codex' }));
+    vi.doMock('../src/detect-executable.js', () => ({
+      findExecutable: async () => '/usr/local/bin/codex',
+    }));
     vi.doMock('../src/process/exec-capture.js', () => ({
       execCapture: async (_cmd: string, args: string[]) =>
         args.includes('--version')
@@ -65,11 +83,17 @@ describe('detectCodex — end-to-end failure paths (mocked exec, no real CLI)', 
     }));
     const { detectCodex } = await import('../src/providers/codex/detect.js');
     const status = await detectCodex({ debug() {}, info() {}, warn() {}, error() {} });
-    expect(status).toMatchObject({ installed: true, authenticated: 'unknown', error: 'login status check timed out' });
+    expect(status).toMatchObject({
+      installed: true,
+      authenticated: 'unknown',
+      error: 'login status check timed out',
+    });
   });
 
   it('reports "authenticated" end to end when both commands succeed with a logged-in line', async () => {
-    vi.doMock('../src/detect-executable.js', () => ({ findExecutable: async () => '/usr/local/bin/codex' }));
+    vi.doMock('../src/detect-executable.js', () => ({
+      findExecutable: async () => '/usr/local/bin/codex',
+    }));
     vi.doMock('../src/process/exec-capture.js', () => ({
       execCapture: async (_cmd: string, args: string[]) =>
         args.includes('--version')
@@ -78,11 +102,17 @@ describe('detectCodex — end-to-end failure paths (mocked exec, no real CLI)', 
     }));
     const { detectCodex } = await import('../src/providers/codex/detect.js');
     const status = await detectCodex({ debug() {}, info() {}, warn() {}, error() {} });
-    expect(status).toMatchObject({ installed: true, authenticated: 'authenticated', version: '0.147.0' });
+    expect(status).toMatchObject({
+      installed: true,
+      authenticated: 'authenticated',
+      version: '0.147.0',
+    });
   });
 
   it('reports "unauthenticated" end to end for a clean not-logged-in response', async () => {
-    vi.doMock('../src/detect-executable.js', () => ({ findExecutable: async () => '/usr/local/bin/codex' }));
+    vi.doMock('../src/detect-executable.js', () => ({
+      findExecutable: async () => '/usr/local/bin/codex',
+    }));
     vi.doMock('../src/process/exec-capture.js', () => ({
       execCapture: async (_cmd: string, args: string[]) =>
         args.includes('--version')

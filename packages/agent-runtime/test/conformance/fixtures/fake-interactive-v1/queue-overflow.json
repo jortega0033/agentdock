@@ -1,0 +1,82 @@
+{
+  "schema": "agent-dock/provider-fixture@1",
+  "schemaSet": "agent-dock-provider-fixture-v1",
+  "fixtureSet": "fake-interactive-v1",
+  "id": "fake-interactive-queue-overflow",
+  "protocol": "v2",
+  "provider": { "id": "claude", "implementation": "fake", "version": "fake-interactive-v1" },
+  "transport": { "id": "fake-interactive", "version": "1" },
+  "scenario": "queue-overflow",
+  "covers": ["queue-overflow", "queue-bounds"],
+  "startup": { "started": "resolve", "acceptedWork": "accepted" },
+  "nativeInput": [{ "prompt": "<redacted:prompt>" }],
+  "nativeOutput": [
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": {
+        "type": "session.started",
+        "provider": "claude",
+        "transport": "fake-interactive",
+        "selection": "<fixture-selection>"
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": { "type": "turn.started", "turnId": "<turn-id>" }
+    },
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": {
+        "type": "question.requested",
+        "turnId": "<turn-id>",
+        "requestId": "<request-id>",
+        "questions": [
+          {
+            "id": "<question-id>",
+            "title": "Fixture question",
+            "prompt": "<redacted:question>",
+            "allowsFreeText": true
+          }
+        ],
+        "deadlineAt": "<deadline>"
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": { "type": "session.status", "status": "active" },
+      "repeat": 6000
+    }
+  ],
+  "controls": [],
+  "expectedNormalizedEvents": [
+    {
+      "type": "question.cancelled",
+      "turnId": "<turn-id>",
+      "requestId": "<request-id>",
+      "reason": "disconnect"
+    },
+    {
+      "type": "error",
+      "code": "provider_queue_overflow",
+      "message": "provider event queue overflowed",
+      "recoverable": false
+    },
+    {
+      "type": "session.failed",
+      "code": "provider_queue_overflow",
+      "message": "provider event queue overflowed"
+    }
+  ],
+  "terminalState": {
+    "type": "session.failed",
+    "count": 1,
+    "acceptedWork": "accepted",
+    "workMayHaveStarted": true,
+    "fallbackAllowed": false
+  },
+  "cleanup": { "closeCalls": 1, "forceCloseCalls": 0, "interactionResolutions": 0, "reaped": true }
+}

@@ -1,0 +1,54 @@
+{
+  "schema": "agent-dock/provider-fixture@1",
+  "schemaSet": "agent-dock-provider-fixture-v1",
+  "fixtureSet": "fake-interactive-v1",
+  "id": "fake-interactive-malformed-input",
+  "protocol": "v2",
+  "provider": { "id": "claude", "implementation": "fake", "version": "fake-interactive-v1" },
+  "transport": { "id": "fake-interactive", "version": "1" },
+  "scenario": "malformed-input",
+  "covers": ["malformed-input", "missing-required-field"],
+  "startup": { "started": "resolve", "acceptedWork": "accepted" },
+  "nativeInput": [{ "prompt": "<redacted:prompt>" }],
+  "nativeOutput": [
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": {
+        "type": "session.started",
+        "provider": "claude",
+        "transport": "fake-interactive",
+        "selection": "<fixture-selection>"
+      }
+    },
+    { "phase": "startup", "channel": "events", "value": { "type": "turn.started" } }
+  ],
+  "controls": [],
+  "expectedNormalizedEvents": [
+    {
+      "type": "session.started",
+      "provider": "claude",
+      "transport": "fake-interactive",
+      "selection": "<fixture-selection>"
+    },
+    {
+      "type": "error",
+      "code": "provider_frame_invalid",
+      "message": "provider event failed validation",
+      "recoverable": false
+    },
+    {
+      "type": "session.failed",
+      "code": "provider_frame_invalid",
+      "message": "provider event failed validation"
+    }
+  ],
+  "terminalState": {
+    "type": "session.failed",
+    "count": 1,
+    "acceptedWork": "accepted",
+    "workMayHaveStarted": true,
+    "fallbackAllowed": false
+  },
+  "cleanup": { "closeCalls": 1, "forceCloseCalls": 0, "interactionResolutions": 0, "reaped": true }
+}

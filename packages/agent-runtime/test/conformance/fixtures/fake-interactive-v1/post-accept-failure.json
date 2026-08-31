@@ -1,0 +1,60 @@
+{
+  "schema": "agent-dock/provider-fixture@1",
+  "schemaSet": "agent-dock-provider-fixture-v1",
+  "fixtureSet": "fake-interactive-v1",
+  "id": "fake-interactive-post-accept-failure",
+  "protocol": "v2",
+  "provider": { "id": "claude", "implementation": "fake", "version": "fake-interactive-v1" },
+  "transport": { "id": "fake-interactive", "version": "1" },
+  "scenario": "post-accept-failure",
+  "covers": ["post-accept-failure", "fallback-boundary"],
+  "startup": { "started": "resolve", "acceptedWork": "accepted" },
+  "nativeInput": [{ "prompt": "<redacted:prompt>" }],
+  "nativeOutput": [
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": {
+        "type": "session.started",
+        "provider": "claude",
+        "transport": "fake-interactive",
+        "selection": "<fixture-selection>"
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": { "type": "turn.started", "turnId": "<turn-id>" }
+    },
+    {
+      "phase": "startup",
+      "channel": "lifecycle",
+      "value": { "action": "crash", "message": "fixture provider crash" }
+    }
+  ],
+  "controls": [],
+  "expectedNormalizedEvents": [
+    {
+      "type": "session.started",
+      "provider": "claude",
+      "transport": "fake-interactive",
+      "selection": "<fixture-selection>"
+    },
+    { "type": "turn.started", "turnId": "<turn-id>" },
+    {
+      "type": "error",
+      "code": "provider_crash",
+      "message": "fixture provider crash",
+      "recoverable": false
+    },
+    { "type": "session.failed", "code": "provider_crash", "message": "fixture provider crash" }
+  ],
+  "terminalState": {
+    "type": "session.failed",
+    "count": 1,
+    "acceptedWork": "accepted",
+    "workMayHaveStarted": true,
+    "fallbackAllowed": false
+  },
+  "cleanup": { "closeCalls": 1, "forceCloseCalls": 0, "interactionResolutions": 0, "reaped": true }
+}

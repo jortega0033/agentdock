@@ -1,0 +1,107 @@
+{
+  "schema": "agent-dock/provider-fixture@1",
+  "schemaSet": "agent-dock-provider-fixture-v1",
+  "fixtureSet": "fake-interactive-v1",
+  "id": "fake-interactive-question-response",
+  "protocol": "v2",
+  "provider": { "id": "claude", "implementation": "fake", "version": "fake-interactive-v1" },
+  "transport": { "id": "fake-interactive", "version": "1" },
+  "scenario": "question-response",
+  "covers": ["question-response", "command-correlation"],
+  "startup": { "started": "resolve", "acceptedWork": "accepted" },
+  "nativeInput": [{ "prompt": "<redacted:prompt>" }],
+  "nativeOutput": [
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": {
+        "type": "session.started",
+        "provider": "claude",
+        "transport": "fake-interactive",
+        "selection": "<fixture-selection>"
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": { "type": "turn.started", "turnId": "<turn-id>" }
+    },
+    {
+      "phase": "startup",
+      "channel": "events",
+      "value": {
+        "type": "question.requested",
+        "turnId": "<turn-id>",
+        "requestId": "<request-id>",
+        "questions": [
+          {
+            "id": "<question-id>",
+            "title": "Fixture question",
+            "prompt": "<redacted:question>",
+            "allowsFreeText": true
+          }
+        ],
+        "deadlineAt": "<deadline>"
+      }
+    },
+    {
+      "phase": "control:0",
+      "channel": "events",
+      "value": { "type": "turn.completed", "turnId": "<turn-id>" }
+    },
+    { "phase": "control:0", "channel": "events", "value": { "type": "session.completed" } }
+  ],
+  "controls": [
+    {
+      "operation": "send",
+      "afterEvent": "question.requested",
+      "command": {
+        "type": "question.respond",
+        "commandId": "<command-id>",
+        "sessionId": "<session-id>",
+        "turnId": "<turn-id>",
+        "requestId": "<request-id>",
+        "answers": [{ "questionId": "<question-id>", "value": "<redacted:answer>" }]
+      }
+    }
+  ],
+  "expectedNormalizedEvents": [
+    {
+      "type": "session.started",
+      "provider": "claude",
+      "transport": "fake-interactive",
+      "selection": "<fixture-selection>"
+    },
+    { "type": "turn.started", "turnId": "<turn-id>" },
+    {
+      "type": "question.requested",
+      "turnId": "<turn-id>",
+      "requestId": "<request-id>",
+      "questions": [
+        {
+          "id": "<question-id>",
+          "title": "Fixture question",
+          "prompt": "<redacted:question>",
+          "allowsFreeText": true
+        }
+      ],
+      "deadlineAt": "<deadline>"
+    },
+    {
+      "type": "question.resolved",
+      "turnId": "<turn-id>",
+      "requestId": "<request-id>",
+      "answers": [{ "questionId": "<question-id>", "value": "<redacted:answer>" }]
+    },
+    { "type": "turn.completed", "turnId": "<turn-id>" },
+    { "type": "session.completed" }
+  ],
+  "terminalState": {
+    "type": "session.completed",
+    "count": 1,
+    "acceptedWork": "accepted",
+    "workMayHaveStarted": true,
+    "fallbackAllowed": false
+  },
+  "cleanup": { "closeCalls": 1, "forceCloseCalls": 0, "interactionResolutions": 0, "reaped": true }
+}

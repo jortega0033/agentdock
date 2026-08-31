@@ -36,6 +36,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Provider conformance
+        run: pnpm test:provider-conformance
+
       - name: Package (electron-builder, NSIS)
         run: pnpm package:win
 

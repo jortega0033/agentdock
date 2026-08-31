@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import {
   FAKE_PROVIDER_CAPABILITIES,
+  CLAUDE_LEGACY_COMPATIBILITY,
   FakeProvider,
   ProviderRegistry,
   noopLogger,
@@ -36,7 +37,7 @@ class ObservationProvider implements AgentProvider {
     name: this.name,
     installed: true,
     authenticated: 'authenticated',
-    version: '1.2.3',
+    version: CLAUDE_LEGACY_COMPATIBILITY.providerVersion,
     capabilities: { cancellation: true, tools: true, usage: true, thinking: true, resume: false },
   };
 
@@ -69,6 +70,7 @@ class ReplayOverflowProvider implements AgentProvider {
       installed: true,
       authenticated: 'authenticated',
       capabilities: { ...FAKE_PROVIDER_CAPABILITIES },
+      version: CLAUDE_LEGACY_COMPATIBILITY.providerVersion,
     };
   }
 
@@ -94,7 +96,7 @@ function setup(scenario: 'success' | 'failure' | 'hang-until-cancelled' = 'succe
       installed: true,
       authenticated: 'authenticated',
       capabilities: FAKE_PROVIDER_CAPABILITIES,
-      version: '1.2.3',
+      version: CLAUDE_LEGACY_COMPATIBILITY.providerVersion,
     },
     scenario,
   );
@@ -722,7 +724,7 @@ describe('interactive v2 command dispatch', () => {
     ['oversized-frame', 'provider_frame_too_large'],
     ['crash', 'provider_crash'],
   ] as const)('fails %s once with a bounded terminal event', async (scenario, code) => {
-    const { app } = setupInteractive(scenario);
+    const { app, provider } = setupInteractive(scenario);
     const session = await createInteractiveSession(app, ['session.cancel']);
     await new Promise((resolve) => setTimeout(resolve, 30));
 
@@ -738,10 +740,14 @@ describe('interactive v2 command dispatch', () => {
       ),
     );
     expect(terminal).toEqual([expect.objectContaining({ type: 'session.failed', code })]);
+    // The route negotiates and starts exactly one transport. In particular, the accepted
+    // crashing provider must never trigger an automatic fallback and duplicate side effects.
+    expect(provider.interactiveStartedOptions).toHaveLength(1);
+    expect(provider.startedOptions).toHaveLength(0);
   });
 
   it('fails a corrupted fake-provider queue once and preserves replay-gap semantics', async () => {
-    const { app } = setupInteractive('queue-overflow');
+    const { app, provider } = setupInteractive('queue-overflow');
     const session = await createInteractiveSession(app, ['session.cancel']);
     let snapshot = session;
     for (let attempt = 0; attempt < 200 && snapshot.status !== 'failed'; attempt += 1) {
@@ -754,6 +760,8 @@ describe('interactive v2 command dispatch', () => {
       snapshot = agentSessionV2Schema.parse(response.json());
     }
     expect(snapshot.status).toBe('failed');
+    expect(provider.interactiveStartedOptions).toHaveLength(1);
+    expect(provider.startedOptions).toHaveLength(0);
     expect(snapshot.earliestSequence).toBeGreaterThan(0);
 
     const stale = await app.inject({

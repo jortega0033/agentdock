@@ -1,0 +1,105 @@
+{
+  "schema": "agent-dock/provider-fixture@1",
+  "schemaSet": "agent-dock-provider-fixture-v1",
+  "fixtureSet": "codex-legacy-0.147.0-v1",
+  "id": "codex-legacy-0.147.0-resume",
+  "protocol": "v1",
+  "provider": {
+    "id": "codex",
+    "implementation": "codex",
+    "version": "0.147.0"
+  },
+  "transport": {
+    "id": "legacy-one-shot",
+    "version": "codex-jsonl-v1"
+  },
+  "scenario": "resume",
+  "covers": ["resume"],
+  "startup": {
+    "started": "resolve",
+    "acceptedWork": "accepted"
+  },
+  "nativeInput": [
+    {
+      "providerSessionId": "<redacted:provider-session-id>",
+      "prompt": { "$fixturePlaceholder": "prompt" },
+      "argv": [
+        "exec",
+        "resume",
+        "<redacted:provider-session-id>",
+        { "$fixturePlaceholder": "prompt" },
+        "--json",
+        "--skip-git-repo-check"
+      ],
+      "stdin": null
+    }
+  ],
+  "nativeOutput": [
+    {
+      "phase": "startup",
+      "channel": "stdout",
+      "value": {
+        "type": "thread.started",
+        "thread_id": "codex-fixture-resume-thread"
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "stdout",
+      "value": {
+        "type": "turn.started"
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "stdout",
+      "value": {
+        "type": "turn.completed",
+        "usage": {
+          "input_tokens": 3,
+          "output_tokens": 1,
+          "cached_input_tokens": 1
+        }
+      }
+    }
+  ],
+  "controls": [],
+  "expectedNormalizedEvents": [
+    {
+      "type": "session.started",
+      "sessionId": "<session-id>",
+      "provider": "codex"
+    },
+    {
+      "type": "status",
+      "status": "thread_started"
+    },
+    {
+      "type": "status",
+      "status": "turn_started"
+    },
+    {
+      "type": "usage",
+      "inputTokens": 3,
+      "outputTokens": 1,
+      "cachedInputTokens": 1
+    },
+    {
+      "type": "session.completed",
+      "providerSessionId": "codex-fixture-resume-thread"
+    }
+  ],
+  "terminalState": {
+    "type": "session.completed",
+    "count": 1,
+    "acceptedWork": "accepted",
+    "workMayHaveStarted": true,
+    "fallbackAllowed": false
+  },
+  "cleanup": {
+    "closeCalls": 0,
+    "forceCloseCalls": 0,
+    "interactionResolutions": 0,
+    "reaped": true
+  }
+}

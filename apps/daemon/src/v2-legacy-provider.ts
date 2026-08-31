@@ -1,4 +1,9 @@
 import {
+  findProviderCompatibility,
+  LEGACY_ONE_SHOT_TRANSPORT_ID,
+  type ProviderCompatibilityManifestEntry,
+} from '@agent-dock/agent-runtime';
+import {
   CAPABILITY_CATALOG,
   type CapabilityConstraintById,
   type CapabilityScope,
@@ -11,7 +16,8 @@ import {
   type ProviderTransportV2,
 } from '@agent-dock/shared';
 
-export const LEGACY_ONE_SHOT_TRANSPORT = 'legacy-one-shot';
+export const LEGACY_ONE_SHOT_TRANSPORT = LEGACY_ONE_SHOT_TRANSPORT_ID;
+export const UNVERIFIED_PROVIDER_FIXTURE_SET = 'unverified-provider-fixtures';
 
 const ALL_EFFECTS: Effect[] = [
   'read',
@@ -39,16 +45,27 @@ function runtimePlatform(): CapabilityScope['platform'] {
   return 'linux';
 }
 
-function versionsFor(status: ProviderStatus): CapabilityScope['versions'] {
+function compatibilityFor(status: ProviderStatus): ProviderCompatibilityManifestEntry | undefined {
+  return findProviderCompatibility(status.id, status.version, LEGACY_ONE_SHOT_TRANSPORT);
+}
+
+function versionsFor(
+  status: ProviderStatus,
+  compatibility = compatibilityFor(status),
+): CapabilityScope['versions'] {
   return {
     adapterContract: '2',
     transport: status.version ?? 'unknown',
     runtime: process.version,
-    fixtureSet: 'provider-contract-v1',
+    ...(compatibility ? { schema: compatibility.schemaSet } : {}),
+    fixtureSet: compatibility?.fixtureSet ?? UNVERIFIED_PROVIDER_FIXTURE_SET,
   };
 }
 
-export function legacyRuntimeScope(status: ProviderStatus): RuntimeScope {
+function legacyRuntimeScopeFor(
+  status: ProviderStatus,
+  compatibility: ProviderCompatibilityManifestEntry | undefined,
+): RuntimeScope {
   return {
     provider: status.id,
     platform: runtimePlatform(),
@@ -57,8 +74,12 @@ export function legacyRuntimeScope(status: ProviderStatus): RuntimeScope {
     // #9 adds enforcement, but #5 already fixes the truthful initial state. No isolation
     // guarantee is advertised by this bridge, so "untrusted" does not imply sandbox enforcement.
     trustState: 'untrusted',
-    versions: versionsFor(status),
+    versions: versionsFor(status, compatibility),
   };
+}
+
+export function legacyRuntimeScope(status: ProviderStatus): RuntimeScope {
+  return legacyRuntimeScopeFor(status, compatibilityFor(status));
 }
 
 interface LegacyRecordInput<I extends CoreCapabilityId> {
@@ -73,20 +94,20 @@ interface LegacyRecordInput<I extends CoreCapabilityId> {
 
 function legacyRecord<I extends CoreCapabilityId>(
   input: LegacyRecordInput<I>,
+  compatibility: ProviderCompatibilityManifestEntry | undefined,
 ): CoreCapabilitySupportRecord {
   const { status } = input;
   const catalog = CAPABILITY_CATALOG[input.id];
+  const support = input.supported ? (compatibility ? 'supported' : 'unknown') : 'unsupported';
   return {
     id: input.id,
     kind: catalog.kind,
     owner: catalog.owner,
-    support: input.supported ? 'supported' : 'unsupported',
+    support,
     stability: 'stable',
-    evidence: [
-      { kind: 'fixture', reference: 'packages/agent-runtime/test/support/provider-contract.ts' },
-    ],
+    evidence: compatibility ? [{ kind: 'fixture', reference: compatibility.fixtureSet }] : [],
     scope: {
-      ...legacyRuntimeScope(status),
+      ...legacyRuntimeScopeFor(status, compatibility),
       transport: LEGACY_ONE_SHOT_TRANSPORT,
     },
     prerequisites: {
@@ -98,54 +119,74 @@ function legacyRecord<I extends CoreCapabilityId>(
     possibleEffects: input.possibleEffects ?? [],
     effectsComplete: input.effectsComplete ?? true,
     constraints: input.constraints,
-    ...(input.supported ? {} : { reason: 'legacy adapter reports this capability as unsupported' }),
+    ...(support === 'unsupported'
+      ? { reason: 'legacy adapter reports this capability as unsupported' }
+      : support === 'unknown'
+        ? { reason: 'no compatibility fixture matches this provider version and transport' }
+        : {}),
   } as CoreCapabilitySupportRecord;
 }
 
 export function legacyCapabilityRecords(status: ProviderStatus): CapabilitySupportRecord[] {
   const capabilities = status.capabilities;
+  const compatibility = compatibilityFor(status);
   return [
-    legacyRecord({
-      status,
-      id: 'session.cancel',
-      supported: capabilities.cancellation === true,
-      constraints: { kind: 'acknowledgement', timeoutMs: 30_000 },
-      sessionStates: ['starting', 'active', 'idle'],
-    }),
-    legacyRecord({
-      status,
-      id: 'session.resume',
-      supported: capabilities.resume === true,
-      constraints: { kind: 'continuation', native: true },
-      sessionStates: ['terminal'],
-    }),
-    legacyRecord({
-      status,
-      id: 'content.tools',
-      supported: capabilities.tools === true,
-      constraints: { kind: 'effects', allowedEffects: ALL_EFFECTS },
-      possibleEffects: ALL_EFFECTS,
-      effectsComplete: false,
-      sessionStates: ['starting', 'active', 'idle'],
-    }),
-    legacyRecord({
-      status,
-      id: 'content.usage.tokens',
-      supported: capabilities.usage === true,
-      // V1 proves per-turn reports, but does not prove that every adapter produces a session total.
-      constraints: { kind: 'usage', scopes: ['turn'] },
-      sessionStates: ['starting', 'active', 'idle', 'terminal'],
-    }),
-    legacyRecord({
-      status,
-      id: 'content.thinking',
-      // V1 exposes uncorrelated deltas only. V2 requires a stable block id and completion
-      // boundary, so the bridge must summarize these observations instead of advertising core
-      // thinking support.
-      supported: false,
-      constraints: { kind: 'content', maxBlockBytes: 256 * 1024, persistence: 'live_only' },
-      sessionStates: ['starting', 'active', 'idle'],
-    }),
+    legacyRecord(
+      {
+        status,
+        id: 'session.cancel',
+        supported: capabilities.cancellation === true,
+        constraints: { kind: 'acknowledgement', timeoutMs: 30_000 },
+        sessionStates: ['starting', 'active', 'idle'],
+      },
+      compatibility,
+    ),
+    legacyRecord(
+      {
+        status,
+        id: 'session.resume',
+        supported: capabilities.resume === true,
+        constraints: { kind: 'continuation', native: true },
+        sessionStates: ['terminal'],
+      },
+      compatibility,
+    ),
+    legacyRecord(
+      {
+        status,
+        id: 'content.tools',
+        supported: capabilities.tools === true,
+        constraints: { kind: 'effects', allowedEffects: ALL_EFFECTS },
+        possibleEffects: ALL_EFFECTS,
+        effectsComplete: false,
+        sessionStates: ['starting', 'active', 'idle'],
+      },
+      compatibility,
+    ),
+    legacyRecord(
+      {
+        status,
+        id: 'content.usage.tokens',
+        supported: capabilities.usage === true,
+        // V1 proves per-turn reports, but does not prove that every adapter produces a session total.
+        constraints: { kind: 'usage', scopes: ['turn'] },
+        sessionStates: ['starting', 'active', 'idle', 'terminal'],
+      },
+      compatibility,
+    ),
+    legacyRecord(
+      {
+        status,
+        id: 'content.thinking',
+        // V1 exposes uncorrelated deltas only. V2 requires a stable block id and completion
+        // boundary, so the bridge must summarize these observations instead of advertising core
+        // thinking support.
+        supported: false,
+        constraints: { kind: 'content', maxBlockBytes: 256 * 1024, persistence: 'live_only' },
+        sessionStates: ['starting', 'active', 'idle'],
+      },
+      compatibility,
+    ),
   ];
 }
 

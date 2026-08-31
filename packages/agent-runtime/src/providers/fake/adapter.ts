@@ -25,6 +25,10 @@ import {
   InteractiveSessionError,
   superviseInteractiveSession,
 } from '../common/session-supervisor.js';
+import {
+  FAKE_INTERACTIVE_COMPATIBILITY,
+  FAKE_INTERACTIVE_TRANSPORT_ID,
+} from '../compatibility-manifest.js';
 
 export type FakeScenario = 'success' | 'failure' | 'hang-until-cancelled';
 export type FakeInteractiveScenario =
@@ -38,7 +42,7 @@ export type FakeInteractiveScenario =
   | 'crash';
 
 export const FAKE_INTERACTIVE_TRANSPORT: ProviderTransportV2 = {
-  id: 'fake-interactive',
+  id: FAKE_INTERACTIVE_TRANSPORT_ID,
   priority: 1,
   stability: 'stable',
   possibleEffects: [],
@@ -162,9 +166,10 @@ function fakeInteractiveSupport(status: ProviderStatus): ProviderV2Support {
     trustState: 'untrusted' as const,
     versions: {
       adapterContract: '2',
-      transport: 'fake-interactive-v1',
+      transport: FAKE_INTERACTIVE_COMPATIBILITY.providerVersion,
       runtime: process.version,
-      fixtureSet: 'fake-interactive-v1',
+      schema: FAKE_INTERACTIVE_COMPATIBILITY.schemaSet,
+      fixtureSet: FAKE_INTERACTIVE_COMPATIBILITY.fixtureSet,
     },
   };
   const record = (
@@ -178,7 +183,7 @@ function fakeInteractiveSupport(status: ProviderStatus): ProviderV2Support {
       owner: CAPABILITY_CATALOG[id].owner,
       support: 'supported',
       stability: 'stable',
-      evidence: [{ kind: 'fixture', reference: 'FakeProvider interactive contract' }],
+      evidence: [{ kind: 'fixture', reference: FAKE_INTERACTIVE_COMPATIBILITY.fixtureSet }],
       scope,
       prerequisites: {
         capabilities: [],

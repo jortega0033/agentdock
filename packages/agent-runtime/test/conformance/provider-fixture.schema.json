@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-dock.dev/schemas/provider-fixture-v1.json",
+  "title": "Agent Dock provider replay fixture",
+  "description": "Credential-free native provider I/O and its expected normalized event stream. Provider-native values remain open to additive fields while the replay envelope is versioned and strict.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schemaSet",
+    "fixtureSet",
+    "id",
+    "protocol",
+    "provider",
+    "transport",
+    "scenario",
+    "covers",
+    "startup",
+    "nativeInput",
+    "nativeOutput",
+    "controls",
+    "expectedNormalizedEvents",
+    "terminalState",
+    "cleanup"
+  ],
+  "properties": {
+    "schema": { "const": "agent-dock/provider-fixture@1" },
+    "schemaSet": { "const": "agent-dock-provider-fixture-v1" },
+    "fixtureSet": { "$ref": "#/$defs/nonemptyString" },
+    "id": { "$ref": "#/$defs/nonemptyString" },
+    "protocol": { "enum": ["v1", "v2"] },
+    "provider": { "$ref": "#/$defs/provider" },
+    "transport": { "$ref": "#/$defs/transport" },
+    "scenario": { "$ref": "#/$defs/nonemptyString" },
+    "covers": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/nonemptyString" }
+    },
+    "startup": { "$ref": "#/$defs/startup" },
+    "nativeInput": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": { "$ref": "#/$defs/jsonValue" }
+    },
+    "nativeOutput": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/nativeFrame" }
+    },
+    "controls": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/control" }
+    },
+    "expectedNormalizedEvents": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+      }
+    },
+    "terminalState": { "$ref": "#/$defs/terminalState" },
+    "cleanup": { "$ref": "#/$defs/cleanup" }
+  },
+  "$defs": {
+    "nonemptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "jsonValue": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "string" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/jsonValue" }
+        },
+        {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+        }
+      ]
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "implementation", "version"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonemptyString" },
+        "implementation": { "enum": ["claude", "codex", "fake"] },
+        "version": { "$ref": "#/$defs/nonemptyString" }
+      }
+    },
+    "transport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonemptyString" },
+        "version": { "$ref": "#/$defs/nonemptyString" }
+      }
+    },
+    "startup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["started", "acceptedWork"],
+      "properties": {
+        "started": { "const": "resolve" },
+        "acceptedWork": { "enum": ["not_accepted", "accepted", "unknown", "reject"] }
+      }
+    },
+    "nativeFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "channel", "value"],
+      "properties": {
+        "phase": { "$ref": "#/$defs/nonemptyString" },
+        "channel": { "enum": ["stdout", "stderr", "events", "lifecycle"] },
+        "value": { "$ref": "#/$defs/jsonValue" },
+        "repeat": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 6000
+        }
+      }
+    },
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation"],
+      "properties": {
+        "operation": { "enum": ["send", "interrupt", "close"] },
+        "afterEvent": { "$ref": "#/$defs/nonemptyString" },
+        "command": { "$ref": "#/$defs/jsonValue" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "operation": { "const": "send" } },
+            "required": ["operation"]
+          },
+          "then": { "required": ["command"] },
+          "else": { "not": { "required": ["command"] } }
+        }
+      ]
+    },
+    "terminalState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "count", "acceptedWork", "workMayHaveStarted", "fallbackAllowed"],
+      "properties": {
+        "type": {
+          "enum": [
+            "session.completed",
+            "session.failed",
+            "session.cancelled",
+            "session.interrupted"
+          ]
+        },
+        "count": { "const": 1 },
+        "acceptedWork": { "enum": ["not_accepted", "accepted", "unknown"] },
+        "workMayHaveStarted": { "type": "boolean" },
+        "fallbackAllowed": { "type": "boolean" },
+        "message": { "$ref": "#/$defs/nonemptyString" }
+      }
+    },
+    "cleanup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["closeCalls", "forceCloseCalls", "interactionResolutions", "reaped"],
+      "properties": {
+        "closeCalls": { "type": "integer", "minimum": 0 },
+        "forceCloseCalls": { "type": "integer", "minimum": 0 },
+        "interactionResolutions": { "type": "integer", "minimum": 0 },
+        "reaped": { "const": true }
+      }
+    }
+  }
+}

@@ -1,0 +1,103 @@
+{
+  "schema": "agent-dock/provider-fixture@1",
+  "schemaSet": "agent-dock-provider-fixture-v1",
+  "fixtureSet": "claude-legacy-2.1.228-v1",
+  "id": "claude-legacy-2.1.228-resume",
+  "protocol": "v1",
+  "provider": {
+    "id": "claude",
+    "implementation": "claude",
+    "version": "2.1.228"
+  },
+  "transport": {
+    "id": "legacy-one-shot",
+    "version": "claude-stream-json-v1"
+  },
+  "scenario": "resume",
+  "covers": ["resume"],
+  "startup": {
+    "started": "resolve",
+    "acceptedWork": "accepted"
+  },
+  "nativeInput": [
+    {
+      "providerSessionId": "<redacted:provider-session-id>",
+      "prompt": { "$fixturePlaceholder": "prompt" },
+      "argv": [
+        "-p",
+        "--input-format",
+        "text",
+        "--output-format",
+        "stream-json",
+        "--verbose",
+        "--resume",
+        "<redacted:provider-session-id>"
+      ],
+      "stdin": { "$fixturePlaceholder": "prompt" }
+    }
+  ],
+  "nativeOutput": [
+    {
+      "phase": "startup",
+      "channel": "stdout",
+      "value": {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "claude-fixture-resume-session"
+      }
+    },
+    {
+      "phase": "startup",
+      "channel": "stdout",
+      "value": {
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "result": { "$fixturePlaceholder": "tool_result" },
+        "total_cost_usd": 0,
+        "usage": {
+          "input_tokens": 2,
+          "output_tokens": 1,
+          "cache_read_input_tokens": 0
+        },
+        "session_id": "claude-fixture-resume-session"
+      }
+    }
+  ],
+  "controls": [],
+  "expectedNormalizedEvents": [
+    {
+      "type": "session.started",
+      "sessionId": "<session-id>",
+      "provider": "claude"
+    },
+    {
+      "type": "status",
+      "status": "initialized"
+    },
+    {
+      "type": "usage",
+      "inputTokens": 2,
+      "outputTokens": 1,
+      "cachedInputTokens": 0,
+      "cost": 0
+    },
+    {
+      "type": "session.completed",
+      "providerSessionId": "claude-fixture-resume-session"
+    }
+  ],
+  "terminalState": {
+    "type": "session.completed",
+    "count": 1,
+    "acceptedWork": "accepted",
+    "workMayHaveStarted": true,
+    "fallbackAllowed": false
+  },
+  "cleanup": {
+    "closeCalls": 0,
+    "forceCloseCalls": 0,
+    "interactionResolutions": 0,
+    "reaped": true
+  }
+}

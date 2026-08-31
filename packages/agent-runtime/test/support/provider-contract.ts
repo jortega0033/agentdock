@@ -7,6 +7,16 @@ import type { AgentEvent, ProviderCapabilities, ProviderId } from '@agent-dock/s
 import { noopLogger, type Logger } from '../../src/logger.js';
 import { runProviderSession, type ParsedLine } from '../../src/providers/common/run-session.js';
 import type { StartSessionOptions } from '../../src/types.js';
+import {
+  FIXTURE_IDS,
+  canonicalNativeJson,
+  canonicalJson,
+  expectedCanonicalEvents,
+  loadProviderFixtures,
+  recordedLegacyInvocation,
+  recordedNativeInput,
+  replayLegacyFixture,
+} from './provider-fixture.js';
 
 const fixturesDir = fileURLToPath(new URL('../fixtures', import.meta.url));
 
@@ -24,16 +34,25 @@ const KNOWN_EVENT_TYPES = new Set<AgentEvent['type']>([
   'session.cancelled',
 ]);
 
-const TERMINAL_TYPES = new Set<AgentEvent['type']>(['session.completed', 'session.failed', 'session.cancelled']);
+const TERMINAL_TYPES = new Set<AgentEvent['type']>([
+  'session.completed',
+  'session.failed',
+  'session.cancelled',
+]);
+const PROVIDER_CONTRACT_TIMEOUT_MS = 15_000;
 
 export interface ProviderContractSpec {
   providerId: ProviderId;
+  /** Exact compatibility-manifest fixture set replayed through this provider's real parser. */
+  fixtureSet: string;
   /** The real, currently-declared capabilities for this provider — drives which sections run. */
   capabilities: ProviderCapabilities;
   /** The adapter's real parser — this suite exercises actual normalization logic, not a stand-in. */
   parseLine: (raw: unknown, logger: Logger) => ParsedLine;
-  /** The adapter's real argv builder, used only for the (process-free) resume assertion below. */
+  /** The adapter's real argv builder, compared with each fixture's recorded outbound oracle. */
   buildArgs: (opts: StartSessionOptions) => string[];
+  /** Whether the adapter writes the prompt to stdin instead of placing it in argv. */
+  promptViaStdin: boolean;
   /** Fixture script filenames under test/fixtures, run via `node <fixture>` in place of the real CLI. */
   fixtures: { success: string; failure: string; hang: string };
   /** What the `success` fixture's assistant.message text is expected to be. */
@@ -60,134 +79,203 @@ async function collect(events: AsyncGenerator<AgentEvent, void, void>): Promise<
  * consumers — a provider package outside this repo would copy the pattern, not import this file.
  */
 export function describeProviderContract(spec: ProviderContractSpec): void {
-  describe(`provider contract: ${spec.providerId}`, () => {
-    let cwd: string;
-
-    beforeEach(() => {
-      cwd = mkdtempSync(join(tmpdir(), `agent-dock-contract-${spec.providerId}-`));
-    });
-
-    afterEach(() => {
-      rmSync(cwd, { recursive: true, force: true });
-    });
-
-    function runFixture(fixtureName: string, overrides: Partial<StartSessionOptions> = {}) {
-      return runProviderSession(
-        {
-          providerId: spec.providerId,
-          executableNames: [process.execPath],
-          buildArgs: () => [join(fixturesDir, fixtureName)],
-          parseLine: spec.parseLine,
-        },
-        { sessionId: 'contract-session', cwd, prompt: 'hello', ...overrides },
-        noopLogger,
+  describe(
+    `provider contract: ${spec.providerId}`,
+    { timeout: PROVIDER_CONTRACT_TIMEOUT_MS },
+    () => {
+      const replayFixtures = loadProviderFixtures().filter(
+        ({ fixture }) =>
+          fixture.protocol === 'v1' &&
+          fixture.fixtureSet === spec.fixtureSet &&
+          fixture.provider.implementation === spec.providerId,
       );
-    }
+      let cwd: string;
 
-    it('declares a complete ProviderCapabilities shape', () => {
-      for (const key of ['resume', 'cancellation', 'tools', 'usage', 'thinking'] as const) {
-        expect(typeof spec.capabilities[key]).toBe('boolean');
+      beforeEach(() => {
+        cwd = mkdtempSync(join(tmpdir(), `agent-dock-contract-${spec.providerId}-`));
+      });
+
+      afterEach(() => {
+        rmSync(cwd, { recursive: true, force: true });
+      });
+
+      function runFixture(fixtureName: string, overrides: Partial<StartSessionOptions> = {}) {
+        return runProviderSession(
+          {
+            providerId: spec.providerId,
+            executableNames: [process.execPath],
+            buildArgs: () => [join(fixturesDir, fixtureName)],
+            parseLine: spec.parseLine,
+          },
+          { sessionId: 'contract-session', cwd, prompt: 'hello', ...overrides },
+          noopLogger,
+        );
       }
-    });
 
-    describe('session start', () => {
-      it('emits session.started first, tagged with this provider', async () => {
-        const events = await collect(runFixture(spec.fixtures.success).events);
-        expect(events[0]).toMatchObject({ type: 'session.started', provider: spec.providerId });
-      });
-
-      it('rejects a nonexistent working directory before touching the provider CLI', async () => {
-        const events = await collect(runFixture(spec.fixtures.success, { cwd: join(cwd, 'does-not-exist') }).events);
-        expect(events.some((e) => e.type === 'error' && e.code === 'INVALID_CWD')).toBe(true);
-        expect(events.at(-1)).toEqual({ type: 'session.failed', message: 'invalid working directory' });
-      });
-    });
-
-    describe('events', () => {
-      it('never leaks a raw or unrecognized provider event type', async () => {
-        const events = await collect(runFixture(spec.fixtures.success).events);
-        expect(events.length).toBeGreaterThan(0);
-        for (const event of events) {
-          expect(KNOWN_EVENT_TYPES.has(event.type), `unexpected event type leaked: ${event.type}`).toBe(true);
+      it('declares a complete ProviderCapabilities shape', () => {
+        for (const key of ['resume', 'cancellation', 'tools', 'usage', 'thinking'] as const) {
+          expect(typeof spec.capabilities[key]).toBe('boolean');
         }
       });
 
-      it('tolerates an event kind the parser does not recognize without crashing the session', async () => {
-        // The success fixture includes one intentionally-unrecognized event; reaching a normal
-        // terminal state at all proves it didn't abort the session.
-        const events = await collect(runFixture(spec.fixtures.success).events);
-        expect(events.at(-1)?.type).toBe('session.completed');
-      });
-
-      it('normalizes assistant output', async () => {
-        const events = await collect(runFixture(spec.fixtures.success).events);
-        expect(events).toContainEqual({ type: 'assistant.message', text: spec.expectedAssistantText });
-      });
-
-      if (spec.capabilities.tools) {
-        it('normalizes tool events (capabilities.tools is true)', async () => {
-          const events = await collect(runFixture(spec.fixtures.success).events);
-          expect(events.some((e) => e.type === 'tool.started')).toBe(true);
-          expect(events.some((e) => e.type === 'tool.completed')).toBe(true);
+      describe('versioned replay fixtures', () => {
+        it('covers fresh and resumed sessions', () => {
+          const coveredScenarios = new Set(replayFixtures.flatMap(({ fixture }) => fixture.covers));
+          expect(replayFixtures.length).toBeGreaterThan(0);
+          expect(coveredScenarios.has('fresh-session')).toBe(true);
+          expect(coveredScenarios.has('resume')).toBe(true);
         });
-      }
 
-      if (spec.capabilities.usage) {
-        it('normalizes usage accounting (capabilities.usage is true)', async () => {
-          const events = await collect(runFixture(spec.fixtures.success).events);
-          expect(events.some((e) => e.type === 'usage')).toBe(true);
-        });
-      }
-    });
+        for (const { fixture, relativePath } of replayFixtures) {
+          it(`${relativePath} normalizes exactly and replays byte-stably`, () => {
+            const [input] = recordedNativeInput(fixture);
+            const resumeProviderSessionId =
+              typeof input?.providerSessionId === 'string' ? input.providerSessionId : undefined;
+            const invocation: StartSessionOptions = {
+              sessionId: FIXTURE_IDS.session,
+              cwd,
+              prompt: '<redacted:prompt>',
+              ...(resumeProviderSessionId === undefined ? {} : { resumeProviderSessionId }),
+            };
+            const recordedInvocation = recordedLegacyInvocation(fixture);
+            const firstArgs = spec.buildArgs(invocation);
+            expect(spec.buildArgs(invocation)).toEqual(firstArgs);
+            expect(canonicalNativeJson(firstArgs)).toBe(
+              canonicalNativeJson(recordedInvocation.argv),
+            );
+            expect(canonicalNativeJson(spec.promptViaStdin ? invocation.prompt : null)).toBe(
+              canonicalNativeJson(recordedInvocation.stdin),
+            );
+            if (resumeProviderSessionId !== undefined) {
+              expect(firstArgs).toContain(resumeProviderSessionId);
+            }
 
-    describe('terminal states', () => {
-      it('a successful run ends with exactly one terminal event, last in the stream, carrying the provider session id', async () => {
-        const events = await collect(runFixture(spec.fixtures.success).events);
-        const terminalIndices = events.map((e, i) => (TERMINAL_TYPES.has(e.type) ? i : -1)).filter((i) => i >= 0);
-        expect(terminalIndices).toEqual([events.length - 1]);
-        expect(events.at(-1)).toEqual({ type: 'session.completed', providerSessionId: spec.expectedProviderSessionId });
-      });
+            const first = canonicalJson(replayLegacyFixture(fixture, spec.parseLine));
+            const second = canonicalJson(replayLegacyFixture(fixture, spec.parseLine));
 
-      it('a failing run ends with exactly one terminal event, last in the stream, and it is session.failed', async () => {
-        const events = await collect(runFixture(spec.fixtures.failure).events);
-        const terminalIndices = events.map((e, i) => (TERMINAL_TYPES.has(e.type) ? i : -1)).filter((i) => i >= 0);
-        expect(terminalIndices).toEqual([events.length - 1]);
-        expect(events.at(-1)?.type).toBe('session.failed');
-      });
-    });
-
-    if (spec.capabilities.cancellation) {
-      describe('cancellation', () => {
-        it('terminates the process and ends with session.cancelled, never session.completed', async () => {
-          const handle = runFixture(spec.fixtures.hang);
-          const iterator = handle.events;
-          const collected: AgentEvent[] = [];
-          const first = await iterator.next();
-          if (!first.done) collected.push(first.value);
-
-          await handle.cancel();
-          for await (const event of iterator) collected.push(event);
-
-          expect(collected.at(-1)).toEqual({ type: 'session.cancelled' });
-          expect(collected.some((e) => e.type === 'session.completed')).toBe(false);
-        }, 15_000);
-      });
-    }
-
-    if (spec.capabilities.resume) {
-      describe('resume', () => {
-        it('constructs a distinct invocation that references the prior provider session id', () => {
-          const fresh = spec.buildArgs({ sessionId: 'new-session', cwd, prompt: 'hi' });
-          const resumed = spec.buildArgs({
-            sessionId: 'new-session',
-            cwd,
-            prompt: 'hi',
-            resumeProviderSessionId: 'prior-provider-thread-id',
+            expect(first).toBe(expectedCanonicalEvents(fixture));
+            expect(second).toBe(first);
           });
-          expect(resumed).not.toEqual(fresh);
-          expect(resumed).toContain('prior-provider-thread-id');
+        }
+      });
+
+      describe('session start', () => {
+        it('emits session.started first, tagged with this provider', async () => {
+          const events = await collect(runFixture(spec.fixtures.success).events);
+          expect(events[0]).toMatchObject({ type: 'session.started', provider: spec.providerId });
+        });
+
+        it('rejects a nonexistent working directory before touching the provider CLI', async () => {
+          const events = await collect(
+            runFixture(spec.fixtures.success, { cwd: join(cwd, 'does-not-exist') }).events,
+          );
+          expect(events.some((e) => e.type === 'error' && e.code === 'INVALID_CWD')).toBe(true);
+          expect(events.at(-1)).toEqual({
+            type: 'session.failed',
+            message: 'invalid working directory',
+          });
         });
       });
-    }
-  });
+
+      describe('events', () => {
+        it('never leaks a raw or unrecognized provider event type', async () => {
+          const events = await collect(runFixture(spec.fixtures.success).events);
+          expect(events.length).toBeGreaterThan(0);
+          for (const event of events) {
+            expect(
+              KNOWN_EVENT_TYPES.has(event.type),
+              `unexpected event type leaked: ${event.type}`,
+            ).toBe(true);
+          }
+        });
+
+        it('tolerates an event kind the parser does not recognize without crashing the session', async () => {
+          // The success fixture includes one intentionally-unrecognized event; reaching a normal
+          // terminal state at all proves it didn't abort the session.
+          const events = await collect(runFixture(spec.fixtures.success).events);
+          expect(events.at(-1)?.type).toBe('session.completed');
+        });
+
+        it('normalizes assistant output', async () => {
+          const events = await collect(runFixture(spec.fixtures.success).events);
+          expect(events).toContainEqual({
+            type: 'assistant.message',
+            text: spec.expectedAssistantText,
+          });
+        });
+
+        if (spec.capabilities.tools) {
+          it('normalizes tool events (capabilities.tools is true)', async () => {
+            const events = await collect(runFixture(spec.fixtures.success).events);
+            expect(events.some((e) => e.type === 'tool.started')).toBe(true);
+            expect(events.some((e) => e.type === 'tool.completed')).toBe(true);
+          });
+        }
+
+        if (spec.capabilities.usage) {
+          it('normalizes usage accounting (capabilities.usage is true)', async () => {
+            const events = await collect(runFixture(spec.fixtures.success).events);
+            expect(events.some((e) => e.type === 'usage')).toBe(true);
+          });
+        }
+      });
+
+      describe('terminal states', () => {
+        it('a successful run ends with exactly one terminal event, last in the stream, carrying the provider session id', async () => {
+          const events = await collect(runFixture(spec.fixtures.success).events);
+          const terminalIndices = events
+            .map((e, i) => (TERMINAL_TYPES.has(e.type) ? i : -1))
+            .filter((i) => i >= 0);
+          expect(terminalIndices).toEqual([events.length - 1]);
+          expect(events.at(-1)).toEqual({
+            type: 'session.completed',
+            providerSessionId: spec.expectedProviderSessionId,
+          });
+        });
+
+        it('a failing run ends with exactly one terminal event, last in the stream, and it is session.failed', async () => {
+          const events = await collect(runFixture(spec.fixtures.failure).events);
+          const terminalIndices = events
+            .map((e, i) => (TERMINAL_TYPES.has(e.type) ? i : -1))
+            .filter((i) => i >= 0);
+          expect(terminalIndices).toEqual([events.length - 1]);
+          expect(events.at(-1)?.type).toBe('session.failed');
+        });
+      });
+
+      if (spec.capabilities.cancellation) {
+        describe('cancellation', () => {
+          it('terminates the process and ends with session.cancelled, never session.completed', async () => {
+            const handle = runFixture(spec.fixtures.hang);
+            const iterator = handle.events;
+            const collected: AgentEvent[] = [];
+            const first = await iterator.next();
+            if (!first.done) collected.push(first.value);
+
+            await handle.cancel();
+            for await (const event of iterator) collected.push(event);
+
+            expect(collected.at(-1)).toEqual({ type: 'session.cancelled' });
+            expect(collected.some((e) => e.type === 'session.completed')).toBe(false);
+          }, 15_000);
+        });
+      }
+
+      if (spec.capabilities.resume) {
+        describe('resume', () => {
+          it('constructs a distinct invocation that references the prior provider session id', () => {
+            const fresh = spec.buildArgs({ sessionId: 'new-session', cwd, prompt: 'hi' });
+            const resumed = spec.buildArgs({
+              sessionId: 'new-session',
+              cwd,
+              prompt: 'hi',
+              resumeProviderSessionId: 'prior-provider-thread-id',
+            });
+            expect(resumed).not.toEqual(fresh);
+            expect(resumed).toContain('prior-provider-thread-id');
+          });
+        });
+      }
+    },
+  );
 }

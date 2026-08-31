@@ -148,8 +148,8 @@ the local CLI compatibility paths retain this v1 bridge.
    `status`, and broadcasts it to every subscriber of that session's SSE stream.
 10. Main receives each event over its own SSE connection and pushes it to the renderer via
     `sendToRenderer(mainWindow, 'daemon:session-event', ...)`.
-11. The renderer's `onSessionEvent` callback updates `EventLog.tsx`, which renders on a single
-    `switch (event.type)`, never branching on provider id.
+11. The renderer projects the forwarded envelopes into stable, bounded activity items and renders
+    them in `ActivityTimeline.tsx`, never branching on provider id.
 12. Exactly one of `session.completed` / `session.failed` / `session.cancelled` ends the stream;
     both the daemon's SSE response and `@agent-dock/client`'s async generator close at that point,
     with nothing emitted after it.

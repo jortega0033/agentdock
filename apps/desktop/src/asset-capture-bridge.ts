@@ -153,6 +153,10 @@ export function installAssetCaptureBridge(): void {
       } as const;
       const turnId = '123e4567-e89b-42d3-a456-426614174002';
       const contentBlockId = '123e4567-e89b-42d3-a456-426614174003';
+      const planBlockId = '123e4567-e89b-42d3-a456-426614174004';
+      const planStepId = '123e4567-e89b-42d3-a456-426614174005';
+      const toolContentBlockId = '123e4567-e89b-42d3-a456-426614174006';
+      const toolCallId = '123e4567-e89b-42d3-a456-426614174007';
       const timestamp = '2026-08-30T12:00:00.000Z';
       window.setTimeout(() => {
         interactiveEventCallback?.(interactiveSessionId, {
@@ -194,18 +198,77 @@ export function installAssetCaptureBridge(): void {
         });
         if (mode === 'completed') {
           interactiveEventCallback?.(interactiveSessionId, {
-            type: 'turn.completed',
+            type: 'content.completed',
             sessionId: interactiveSessionId,
             executionId: interactiveExecutionId,
             turnId,
             sequence: 4,
+            timestamp,
+            block: {
+              type: 'text',
+              id: contentBlockId,
+              text: 'AgentDock keeps provider authentication inside each installed CLI and applies one local approval policy.',
+            },
+          });
+          interactiveEventCallback?.(interactiveSessionId, {
+            type: 'content.completed',
+            sessionId: interactiveSessionId,
+            executionId: interactiveExecutionId,
+            turnId,
+            sequence: 5,
+            timestamp,
+            block: {
+              type: 'plan',
+              id: planBlockId,
+              title: 'Verify the runtime boundary',
+              steps: [
+                {
+                  id: planStepId,
+                  text: 'Run focused security and renderer checks',
+                  status: 'completed',
+                },
+              ],
+            },
+          });
+          interactiveEventCallback?.(interactiveSessionId, {
+            type: 'tool.started',
+            sessionId: interactiveSessionId,
+            executionId: interactiveExecutionId,
+            turnId,
+            sequence: 6,
+            timestamp,
+            contentBlockId: toolContentBlockId,
+            toolCallId,
+            toolName: 'shell',
+            possibleEffects: ['command'],
+            effectsComplete: true,
+          });
+          interactiveEventCallback?.(interactiveSessionId, {
+            type: 'tool.completed',
+            sessionId: interactiveSessionId,
+            executionId: interactiveExecutionId,
+            turnId,
+            sequence: 7,
+            timestamp,
+            contentBlockId: toolContentBlockId,
+            toolCallId,
+            toolName: 'shell',
+            status: 'completed',
+            summary: 'Focused checks passed: 71 tests',
+          });
+          interactiveEventCallback?.(interactiveSessionId, {
+            type: 'turn.completed',
+            sessionId: interactiveSessionId,
+            executionId: interactiveExecutionId,
+            turnId,
+            sequence: 8,
             timestamp,
           });
           interactiveEventCallback?.(interactiveSessionId, {
             type: 'usage.tokens',
             sessionId: interactiveSessionId,
             executionId: interactiveExecutionId,
-            sequence: 5,
+            sequence: 9,
             timestamp,
             scope: 'session',
             inputTokens: 1842,
@@ -215,7 +278,7 @@ export function installAssetCaptureBridge(): void {
             type: 'session.completed',
             sessionId: interactiveSessionId,
             executionId: interactiveExecutionId,
-            sequence: 6,
+            sequence: 10,
             timestamp,
           });
         }

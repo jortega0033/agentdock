@@ -130,6 +130,7 @@ that the two stay in sync except doing it by hand.
   directly; it's exactly what the `AgentEvent` union exists to shield you from, and it can change
   whenever Claude Code or Codex changes their own output format.
 
-The desktop UI renders `AgentEvent` with a single `switch (event.type)`
-(`apps/desktop/src/components/EventLog.tsx`), it never branches on which provider produced an
-event, and neither should any other consumer of this protocol.
+The desktop timeline accepts both v1 and v2 envelopes, projects them into bounded provider-neutral
+activity items, and never branches on which provider produced an event
+(`apps/desktop/src/components/activity/model.ts`). Other protocol consumers should preserve that
+same boundary.

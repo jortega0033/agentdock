@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import type {
   AgentEventV2Envelope,
   ApprovalDecisionV2,
@@ -13,7 +13,12 @@ import type {
   RendererQuestionResponse,
 } from '../electron/interaction-broker.js';
 import { ProviderPanel } from './components/ProviderPanel.js';
-import { EventLog } from './components/EventLog.js';
+import { ActivityTimeline } from './components/activity/ActivityTimeline.js';
+import {
+  activityHistoryReducer,
+  createActivityHistoryState,
+} from './components/activity/history.js';
+import { RendererInteractionTimelineProjector } from './components/activity/interaction-timeline.js';
 import { AgentDockMark } from './components/AgentDockMark.js';
 import { InteractionDialog, WorkspaceTrustDialog } from './components/SecurityDialogs.js';
 import runtimeUnavailableIllustration from '../assets/illustrations/runtime-unavailable.svg';
@@ -62,7 +67,9 @@ export function App() {
   const [prompt, setPrompt] = useState('');
   const [formError, setFormError] = useState<string>();
   const [runStatus, setRunStatus] = useState<RunStatus>('idle');
-  const [events, setEvents] = useState<AgentEventV2Envelope[]>([]);
+  const [activityHistory, dispatchActivity] = useReducer(activityHistoryReducer, undefined, () =>
+    createActivityHistoryState(),
+  );
   const [sessionId, setSessionId] = useState<string>();
   const [workspaceTrust, setWorkspaceTrust] = useState<WorkspaceTrustViewV2>();
   const [trustPrompt, setTrustPrompt] = useState<WorkspaceTrustViewV2>();
@@ -74,6 +81,7 @@ export function App() {
   const [revokingTrust, setRevokingTrust] = useState(false);
   const sessionIdRef = useRef<string>();
   const startingRef = useRef(false);
+  const interactionTimelineRef = useRef(new RendererInteractionTimelineProjector());
 
   useEffect(() => {
     let cancelled = false;
@@ -117,7 +125,7 @@ export function App() {
       (eventSessionId, event) => {
         if (!sessionIdRef.current && startingRef.current) sessionIdRef.current = eventSessionId;
         if (sessionIdRef.current !== eventSessionId) return;
-        setEvents((current) => [...current, event]);
+        dispatchActivity({ type: 'append', event });
         const terminal = terminalStatus(event);
         if (terminal) {
           setRunStatus(terminal);
@@ -142,9 +150,15 @@ export function App() {
       window.agentDock.onInteractionRequested?.((interaction) => {
         setInteractionError(undefined);
         setInteractions((current) => [...current, interaction]);
+        dispatchActivity({
+          type: 'append',
+          event: interactionTimelineRef.current.projectInteraction(interaction),
+        });
       }) ?? (() => {});
     const unsubscribeResolutions =
       window.agentDock.onInteractionResolved?.((resolution: RendererInteractionResolution) => {
+        const event = interactionTimelineRef.current.projectResolution(resolution);
+        if (event) dispatchActivity({ type: 'append', event });
         setInteractions((current) =>
           current.filter((item) => item.interactionHandle !== resolution.interactionHandle),
         );
@@ -159,7 +173,8 @@ export function App() {
   }, []);
 
   const startInteractiveSession = useCallback(async () => {
-    setEvents([]);
+    dispatchActivity({ type: 'reset' });
+    interactionTimelineRef.current.reset();
     setInteractions([]);
     setSessionId(undefined);
     sessionIdRef.current = undefined;
@@ -478,14 +493,18 @@ export function App() {
           <section className="card card--session">
             <div className="section-heading">
               <div>
-                <span className="eyebrow">Normalized event stream</span>
-                <h2>Session</h2>
+                <span className="eyebrow">Provider-neutral activity</span>
+                <h2>Session timeline</h2>
               </div>
               <span className={`status status--${runStatus}`} aria-live="polite">
                 {runStatus}
               </span>
             </div>
-            <EventLog events={events} />
+            <ActivityTimeline
+              events={activityHistory.events}
+              omittedEventCount={activityHistory.omittedEventCount}
+              focusBlockingCards={interactions.length === 0}
+            />
           </section>
         </main>
       )}

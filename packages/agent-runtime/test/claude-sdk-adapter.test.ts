@@ -1,4 +1,5 @@
 import { PassThrough } from 'node:stream';
+import { resolve } from 'node:path';
 import type { CapabilitySelection, ProviderStatus } from '@agent-dock/shared';
 import { describe, expect, it, vi } from 'vitest';
 import type { InteractiveProviderTransport, StartInteractiveSessionOptions } from '../src/types.js';
@@ -14,6 +15,7 @@ import {
 import type { ClaudeAgentSdkManagedSpawn } from '../src/providers/claude/sdk/index.js';
 
 const executable = 'C:\\agent-dock\\resources\\claude-agent-sdk\\claude.exe';
+const providerStateDirectory = resolve('daemon-state');
 const env = { ANTHROPIC_API_KEY: 'test-key' };
 
 const sdkStatus: ProviderStatus = {
@@ -82,7 +84,7 @@ function options(
       incarnation: 'incarnation-1',
       trustEpoch: 1,
     },
-    providerStateDirectory: 'C:\\daemon-state',
+    providerStateDirectory,
     ...overrides,
   };
 }
@@ -231,7 +233,7 @@ describe('ClaudeProvider Agent SDK admission', () => {
     expect(deps.createSdkTransport).toHaveBeenCalledWith(
       expect.objectContaining({
         executable,
-        daemonConfigRoot: 'C:\\daemon-state',
+        daemonConfigRoot: providerStateDirectory,
         requestedTransportMode: 'auto',
         sdkOptions: expect.objectContaining({
           cwd: 'C:\\workspace',

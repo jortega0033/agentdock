@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { AgentEventV2, CapabilitySelection } from '@agent-dock/shared';
 import type { Options, PermissionResult, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { afterAll, describe, expect, it, vi } from 'vitest';
@@ -13,6 +14,9 @@ import {
 import { resolveClaudeSdkConfigDir } from '../src/providers/claude/sdk-options.js';
 
 const testConfigRoot = mkdtempSync(join(tmpdir(), 'agent-dock-claude-sdk-test-'));
+const packageRoot = fileURLToPath(new URL('..', import.meta.url));
+const packageJsonPath = join(packageRoot, 'package.json');
+const agentRuntimeIndexPath = join(packageRoot, 'src', 'index.ts');
 
 afterAll(() => rmSync(testConfigRoot, { recursive: true, force: true }));
 
@@ -475,12 +479,12 @@ describe('ClaudeAgentSdkTransport', () => {
 
     const firstPermission = sdkOptions.canUseTool?.(
       'Read',
-      { file_path: resolve('package.json') },
+      { file_path: packageJsonPath },
       callback('read-package'),
     );
     const secondPermission = sdkOptions.canUseTool?.(
       'Read',
-      { file_path: resolve('packages/agent-runtime/src/index.ts') },
+      { file_path: agentRuntimeIndexPath },
       callback('read-index'),
     );
     const first = (await nextType(transport, 'approval.requested')) as Extract<
@@ -493,10 +497,7 @@ describe('ClaudeAgentSdkTransport', () => {
     >;
     expect(first.target).not.toBe(second.target);
     expect(new Set([first.target, second.target])).toEqual(
-      new Set([
-        realpathSync.native('package.json'),
-        realpathSync.native('packages/agent-runtime/src/index.ts'),
-      ]),
+      new Set([realpathSync.native(packageJsonPath), realpathSync.native(agentRuntimeIndexPath)]),
     );
     for (const event of [first, second]) {
       await transport.send({

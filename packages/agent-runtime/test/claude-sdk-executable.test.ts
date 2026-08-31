@@ -57,7 +57,10 @@ describe('resolveClaudeSdkExecutable', () => {
   });
 
   it('uses the SDK platform-module resolution as the development fallback', () => {
-    const resolved = resolveClaudeSdkExecutable({ requireResolve: () => process.execPath });
+    const resolved = resolveClaudeSdkExecutable({
+      runtimePlatform: 'win32',
+      requireResolve: () => process.execPath,
+    });
     expect(resolved).toEqual({ ok: true, path: process.execPath, source: 'development-module' });
   });
 });

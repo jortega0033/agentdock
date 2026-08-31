@@ -2,7 +2,7 @@
   "name": "agent-dock",
   "private": true,
   "version": "0.1.0",
-  "description": "Boilerplate for desktop AI apps that bring their own Claude Code / Codex CLI subscription",
+  "description": "Open-source Electron and local-daemon boilerplate for apps using a user's signed-in Claude Code or Codex CLI",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {

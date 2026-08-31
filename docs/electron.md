@@ -33,19 +33,19 @@ webPreferences: {
 
 `webSecurity` is never overridden. `setWindowOpenHandler` denies every `window.open`/`target=_blank`
 popup and opens the URL in the OS browser instead. `will-navigate` (`isAllowedNavigationTarget()`
-in `main.ts`) allows only: in dev mode, the exact dev-server *origin* (a real `new URL(...).origin`
+in `main.ts`) allows only: in dev mode, the exact dev-server _origin_ (a real `new URL(...).origin`
 comparison, not a `startsWith` prefix match (the earlier prefix check would have let
 `http://localhost:5173.evil.example` through against an allowed `http://localhost:5173`); in
 packaged mode, the exact `file://` URL of the app's own `dist/index.html`, not any local file path.
 Anything else redirects to the OS browser instead. A `session.setPermissionRequestHandler` denies
 every permission request by default (camera, mic, geolocation, notifications, ...). None of this
-matters for the *current* UI (it renders no untrusted content or links, and requests no
+matters for the _current_ UI (it renders no untrusted content or links, and requests no
 permissions), but it's cheap defense in depth for a fork that later adds either, see
 [SECURITY.md](../SECURITY.md#electron-hardening).
 
 ## The preload bridge
 
-`electron/preload.ts` exposes exactly seven functions on `window.agentDock` via `contextBridge`,
+`electron/preload.ts` exposes exactly twelve functions on `window.agentDock` via `contextBridge`,
 never a generic "invoke this channel with this payload" tunnel, and never the daemon's base URL or
 bearer token. `getDaemonStatus`/`onDaemonStatus` specifically reconstruct a clean status object
 from the IPC payload rather than passing it through once its shape looks roughly right, so an
@@ -60,14 +60,30 @@ interface AgentDockBridge {
   createSession(input: CreateSessionInput): Promise<AgentSession>;
   cancelSession(sessionId: string): Promise<void>;
   onSessionEvent(callback: (sessionId: string, event: AgentEvent) => void): () => void;
+  createInteractiveSession(input: CreateSessionV2Request): Promise<AgentSessionV2>;
+  sendSessionCommand(command: AgentCommandV2): Promise<CommandAcknowledgementV2>;
+  cancelInteractiveSession(sessionId: string): Promise<CancelSessionV2Response>;
+  onInteractiveSessionEvent(
+    callback: (sessionId: string, event: AgentEventV2Envelope) => void,
+  ): () => void;
+  onInteractiveSessionStreamNotice(
+    callback: (sessionId: string, notice: InteractiveSessionStreamNotice) => void,
+  ): () => void;
   selectDirectory(): Promise<string | null>;
 }
 ```
 
-Each maps to one `ipcMain.handle(...)` in `main.ts`. If you're adding a new capability the renderer
-needs, add a narrow, single-purpose function here; resist the temptation to add a generic
-"send arbitrary IPC channel + payload" escape hatch, since that's exactly the shape that would let a
-compromised renderer reach something it shouldn't.
+Each maps to one fixed request or event channel in `main.ts`. Interactive create, command, and
+cancel inputs are schema-validated in both preload and main. Their successful responses are parsed
+again in preload; command acknowledgements must correlate to the submitted command. Interactive
+events are parsed as `AgentEventV2Envelope` and must match the outer session ID before crossing into
+the renderer. The main process reconnects transiently dropped or overflowed v2 SSE streams from
+the last forwarded sequence while that session remains active. A replay gap sends a validated
+`replay_reset` snapshot before resuming at the daemon's earliest sequence; a permanent stream
+failure sends a sanitized error notice and stops retrying. If you're adding a new capability the
+renderer needs, add a narrow, single-purpose function here; resist the temptation to add a generic
+"send arbitrary IPC channel + payload" escape hatch, since that's exactly the shape that would let
+a compromised renderer reach something it shouldn't.
 
 ## Daemon lifecycle from Electron's side
 
@@ -78,18 +94,22 @@ dev/packaged/unpacked, see [packaging.md](packaging.md#resolvedaemonentry) for t
 then polls the discovery file (`waitForDaemonReady`, 200ms interval, 15s timeout) until it can read
 a port+token and successfully call `client.health()`, which doubles as both the readiness check and
 the protocol-compatibility check in one call. `daemon:status` IPC events (`connecting` / `ready` /
-`unavailable`) let the renderer show its own connection state without ever seeing *why* in terms of
+`unavailable`) let the renderer show its own connection state without ever seeing _why_ in terms of
 daemon internals.
 
 `app.requestSingleInstanceLock()` means a second launch of the app focuses the existing window
 instead of opening a second one, which would otherwise spawn a second daemon and lose the
 single-instance race described in [daemon.md#single-instance-behavior](daemon.md#single-instance-behavior).
 
-On quit, `killDaemon()` aborts the active SSE subscription, best-effort calls
-`POST /sessions/cancel-all` over HTTP to cancel *every* in-flight session (not just the one the UI
-happens to be tracking), then kills the daemon child process. This exists specifically because
+On quit, `killDaemon()` first stops admitting interactive creates, aborts their HTTP requests, and
+waits through the bounded cleanup window; a create that still resolves is cancelled immediately
+instead of joining the active set. It then aborts active SSE
+subscriptions, best-effort calls
+`POST /sessions/cancel-all` over HTTP to cancel every in-flight v1 session, cancels every tracked
+interactive v2 session, then kills the daemon child process. This exists specifically because
 Windows' `child.kill()` doesn't deliver a real `SIGTERM` the daemon's own shutdown handler could
-otherwise catch, see [daemon.md#shutdown](daemon.md#shutdown) for the full explanation.
+otherwise catch, see
+[daemon.md#shutdown](daemon.md#shutdown) for the full explanation.
 
 ## Renderer trust assumptions
 
@@ -109,6 +129,11 @@ process and returns the chosen path (or `null` if cancelled) to the renderer: th
 a session's `cwd` gets set; the renderer cannot read the filesystem itself to construct one.
 
 ## Provider and session flow (what the demo UI actually does)
+
+The renderer still uses the v1 functions below. Issue #7 adds the narrow v2 bridge so a future UI
+does not need a new privileged boundary, but it does not add a rich timeline, approval/question
+controls, steering, or a multi-session workspace. Native Claude/Codex interactive transports also
+remain gated by issue #8 and outside this UI bridge change.
 
 1. On load, the renderer calls `listProviders()` and shows each provider's `installed` /
    `authenticated` state (routing the user to the CLI's own login flow if `installed` is true but

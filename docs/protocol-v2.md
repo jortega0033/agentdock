@@ -37,33 +37,34 @@ only `/v2` routes.
 All routes are relative to `http://127.0.0.1:<port>`. Every route except `GET /health` requires
 `Authorization: Bearer <token>`.
 
-| Route                                 | Success | Purpose                                                                                   |
-| ------------------------------------- | ------: | ----------------------------------------------------------------------------------------- |
-| `GET /v2/providers`                   |   `200` | Strict `{ providers: ProviderStatusV2[] }`                                                |
-| `GET /v2/providers/:providerId`       |   `200` | One `ProviderStatusV2`                                                                    |
-| `POST /v2/sessions`                   |   `201` | Validate and rate-limit `CreateSessionV2Request`, negotiate, then return `AgentSessionV2` |
-| `GET /v2/sessions/:sessionId`         |   `200` | Return the current `AgentSessionV2` snapshot                                              |
-| `GET /v2/sessions/:sessionId/events`  |   `200` | SSE stream of `AgentEventV2Envelope`; `Last-Event-ID` resumes after that sequence         |
-| `POST /v2/sessions/:sessionId/cancel` |   `202` | Return `{ status: 'cancelling', sessionId }` when `session.cancel` was selected           |
-| `DELETE /v2/sessions/:sessionId`      |   `204` | Cancel when necessary, then forget the session                                            |
+| Route                                   | Success | Purpose                                                                                   |
+| --------------------------------------- | ------: | ----------------------------------------------------------------------------------------- |
+| `GET /v2/providers`                     |   `200` | Strict `{ providers: ProviderStatusV2[] }`                                                |
+| `GET /v2/providers/:providerId`         |   `200` | One `ProviderStatusV2`                                                                    |
+| `POST /v2/sessions`                     |   `201` | Validate and rate-limit `CreateSessionV2Request`, negotiate, then return `AgentSessionV2` |
+| `GET /v2/sessions/:sessionId`           |   `200` | Return the current `AgentSessionV2` snapshot                                              |
+| `GET /v2/sessions/:sessionId/events`    |   `200` | SSE stream of `AgentEventV2Envelope`; `Last-Event-ID` resumes after that sequence         |
+| `POST /v2/sessions/:sessionId/commands` |   `202` | Validate and dispatch `AgentCommandV2`, then return `CommandAcknowledgementV2`            |
+| `POST /v2/sessions/:sessionId/cancel`   |   `202` | Return `{ status: 'cancelling', sessionId }` when `session.cancel` was selected           |
+| `DELETE /v2/sessions/:sessionId`        |   `204` | Cancel when necessary, then forget the session                                            |
 
 Protocol v2 has no `cancel-all` route. The unversioned v1 endpoint remains a narrow desktop-shutdown
-mechanism. `AgentCommandV2` is part of the shared contract in this version, but the bidirectional
-`POST /v2/sessions/:sessionId/commands` endpoint is introduced with the session supervisor rather
-than exposing a route that cannot yet dispatch commands safely.
+mechanism. Command dispatch is available only when the frozen selection includes the command's
+capability and the selected provider transport exposes an interactive session. A legacy one-shot
+session rejects commands with `409 session_not_capable`.
 
 Errors are bounded JSON objects with a user-safe `error` string and stable `code` when the daemon
 has a protocol-specific reason. Important statuses are:
 
-| Status | Meaning                                                                                |
-| -----: | -------------------------------------------------------------------------------------- |
-|  `400` | Malformed body, identifier, provider, working directory, or `Last-Event-ID`            |
-|  `401` | Missing or incorrect bearer token                                                      |
-|  `404` | Provider or session does not exist; cancellation also uses this for a terminal session |
-|  `409` | The requested operation conflicts with frozen selection or current session state       |
-|  `413` | Request exceeds the v2 payload bound                                                   |
-|  `422` | A required capability is unavailable; no provider work has started                     |
-|  `429` | Session creation, command, or stream backpressure limit was reached                    |
+| Status | Meaning                                                                                 |
+| -----: | --------------------------------------------------------------------------------------- |
+|  `400` | Malformed body, identifier, provider, directory, cursor, or route/body session mismatch |
+|  `401` | Missing or incorrect bearer token                                                       |
+|  `404` | Provider or session does not exist; cancellation also uses this for a terminal session  |
+|  `409` | The operation conflicts with frozen selection, command identity, or session state       |
+|  `413` | Request exceeds the v2 payload bound                                                    |
+|  `422` | A required capability is unavailable; no provider work has started                      |
+|  `429` | Session creation or command limit; client also maps `stream_overflow` here              |
 
 Session creation is limited to 30 authenticated attempts per minute per local client address. The
 limiter runs before filesystem inspection, provider detection, or process startup; rejected
@@ -267,9 +268,27 @@ Every command carries `commandId`, `sessionId`, and `turnId`. Input commands car
 answers.
 
 Interrupt is never an alias for session cancellation. Approval and question responses are accepted
-exactly once and fail closed on timeout, disconnect, cancellation, or correlation mismatch. This
-ticket publishes and validates the wire contract; the state-aware command endpoint and correlation
-ledger are intentionally activated by issue #7.
+exactly once and fail closed on timeout, disconnect, cancellation, or correlation mismatch.
+
+`POST /v2/sessions/:sessionId/commands` serializes commands per session and returns `202` only
+after the selected provider transport accepts the command across its accepted-work boundary. The
+response is the strict acknowledgement
+`{ status: 'accepted', commandId, sessionId, turnId }`. Repeating a command ID with the same
+canonical payload shares the original in-flight or settled result without redispatch; an accepted
+retry therefore receives the same acknowledgement. Reusing it with a different payload returns
+`409 command_id_conflict`. A command outside the frozen selected constraints returns
+`409 command_out_of_bounds` before provider dispatch.
+
+The daemon admits at most 64 pending commands or 1 MiB of pending canonical command JSON per
+session; exceeding either limit returns `429 session_backpressure`. It retains up to 1,024 settled
+command-ledger entries for retry deduplication. Provider acceptance is bounded to 30 seconds.
+Interactive requests are capped by their frozen selected payload/timeout constraints, 32 pending
+approvals/questions, and five minutes; overflow, timeout, disconnect, interruption, cancellation,
+and shutdown resolve them provider-side fail-closed.
+
+For this route, malformed input or a route/body session mismatch returns `400`; an unknown session
+returns `404`; capability, lifecycle, interaction-correlation, command-ID, and provider-acceptance
+conflicts return `409`; admission backpressure returns `429`.
 
 ## Events and envelopes
 
@@ -296,29 +315,62 @@ Events are ordered per session. Exactly one terminal session event is emitted an
 `earliestSequence`, the daemon returns `409 replay_gap`; the client reloads the current snapshot and
 does not infer omitted events.
 
+Each v2 SSE connection has an independent 256-event / 4 MiB queue. A slow subscriber therefore
+cannot stall provider event production or another subscriber. A terminal event closes the
+connection only after already queued frames drain. If a queue exceeds either limit, the daemon
+discards that queue and ends the connection with a small, unnumbered
+`{ type: 'stream.error', code: 'stream_overflow', lastSequence? }` control frame. `lastSequence` is
+the last event handed to that connection. `@agent-dock/client` validates this frame and throws a
+`DaemonError` with status `429`. A caller tracking its last successfully yielded sequence may
+reconnect from that cursor while it remains in the replay window.
+
 ## Runtime validation and bounds
 
 The shared Zod schemas reject malformed requests before provider dispatch and malformed responses
 before client code sees them. `@agent-dock/client` validates the complete provider-list wrapper,
-provider records, session snapshots, cancellation acknowledgements, and every SSE frame. Invalid
-JSON in a successful v2 response, invalid UTF-8 in a v2 stream, a missing successful response body,
-an unexpected success status, or a schema mismatch becomes the client's typed `ValidationError`.
+provider records, session snapshots, command/cancellation acknowledgements, and every SSE frame.
+Invalid JSON in a successful v2 response, invalid UTF-8 in a v2 stream, a missing successful
+response body, an unexpected success status, or a schema mismatch becomes the client's typed
+`ValidationError`.
 
-Limits enforced by the shared schemas and current compatibility bridge are:
+Limits enforced by the shared schemas, compatibility bridge, and interactive supervisor are:
 
-| Object                              |                                                               Limit |
-| ----------------------------------- | ------------------------------------------------------------------: |
-| Initial prompt                      |                 200,000 JavaScript characters and the request limit |
-| Client request/command JSON         |                         1 MiB, depth 16, 1,024 aggregate keys/items |
-| Normalized event / client SSE frame |                                                               1 MiB |
-| User-visible content block          |                                                             256 KiB |
-| Retained compatibility replay       |                                              5,000 events or 16 MiB |
-| Extension view                      | 64 KiB; depth 16; 1,024 aggregate keys/items; 512-character summary |
+| Object                            |                                                               Limit |
+| --------------------------------- | ------------------------------------------------------------------: |
+| Initial prompt                    |                 200,000 JavaScript characters and the request limit |
+| Client request/command JSON       |                         1 MiB, depth 16, 1,024 aggregate keys/items |
+| Provider frame / normalized event |                                                               1 MiB |
+| Provider event queue              |                                              5,000 events or 16 MiB |
+| Provider stderr diagnostics       |                                                             200 KiB |
+| Per-subscriber SSE queue          |                                                 256 events or 4 MiB |
+| Pending commands                  |                                                64 commands or 1 MiB |
+| Settled command ledger            |                                                       1,024 entries |
+| Pending interactions              |                                   32 requests, at most five minutes |
+| Retained v2 replay                |                                              5,000 events or 16 MiB |
+| Seen turn-ID ledger               |                                                      10,000 entries |
+| Content-block lifecycle ledger    |                                                      10,000 entries |
+| User-visible content block        |                                                             256 KiB |
+| Extension view                    | 64 KiB; depth 16; 1,024 aggregate keys/items; 512-character summary |
+| Startup/command acceptance; close |                                               30 seconds; 5 seconds |
 
-Executable requests are rejected, never truncated. Display-only content may become an explicit
-truncation marker. Issue #7 adds the interactive provider-frame, subscriber-queue, pending-command,
-and aggregate replay byte budgets; issue #9 adds pending-interaction overflow resolution. Those
-future runtime limits are not claimed by the one-shot compatibility bridge.
+Executable requests are rejected, never truncated. Display-only content over the per-block limit,
+including cumulative deltas for one stable block ID, becomes one typed truncation marker carrying
+the observed byte count and SHA-256; later content for that truncated block is suppressed. These
+interactive limits apply only to transports using the v2 session supervisor; the one-shot
+compatibility bridge retains its v1 process-runner limits.
+
+## Current implementation boundary
+
+Issue #7 provides the provider-neutral supervisor, command endpoint, bounded SSE delivery, client
+API, and a narrow Electron bridge. `FakeProvider` exercises the rich path in deterministic tests.
+The production Claude and Codex adapters still select `legacy-one-shot`; native transport work is
+intentionally outside issue #7, gated by
+[issue #8](https://github.com/jortega0033/agentdock/issues/8)'s conformance fixtures, and tracked in
+[issues #10](https://github.com/jortega0033/agentdock/issues/10) and
+[#11](https://github.com/jortega0033/agentdock/issues/11). The existing React renderer still uses
+the v1 flow. A rich interactive timeline and multi-session UI remain separate work in
+[issues #12](https://github.com/jortega0033/agentdock/issues/12) and
+[#14](https://github.com/jortega0033/agentdock/issues/14).
 
 ## Client example
 
@@ -339,6 +391,9 @@ for await (const event of client.v2.sessions.events(session.id)) {
   console.log(event.type, event.sequence);
 }
 ```
+
+For a session whose frozen selection includes an interactive command capability,
+`client.v2.sessions.send(command)` validates the command and its correlated `202` acknowledgement.
 
 The client performs discovery lazily, caches a successful result, retries discovery after transient
 failure, sends bearer authentication only in headers, and never silently falls back after work may

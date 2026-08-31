@@ -38,7 +38,7 @@ beforeEach(() => {
 });
 
 describe('electron/preload.ts — real bridge (AD-07)', () => {
-  it('exposes exactly the seven documented capability functions and nothing else', async () => {
+  it('exposes exactly the documented capability functions and nothing else', async () => {
     const api = await loadPreload();
     expect(Object.keys(api).sort()).toEqual(
       [
@@ -48,6 +48,11 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
         'createSession',
         'cancelSession',
         'onSessionEvent',
+        'createInteractiveSession',
+        'sendSessionCommand',
+        'cancelInteractiveSession',
+        'onInteractiveSessionEvent',
+        'onInteractiveSessionStreamNotice',
         'selectDirectory',
       ].sort(),
     );
@@ -64,7 +69,11 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
   });
 
   it('getDaemonStatus does not let a token or base URL survive, even if the IPC response contained one', async () => {
-    invoke.mockResolvedValue({ state: 'ready', token: 'super-secret-token', baseUrl: 'http://127.0.0.1:54321' });
+    invoke.mockResolvedValue({
+      state: 'ready',
+      token: 'super-secret-token',
+      baseUrl: 'http://127.0.0.1:54321',
+    });
     const api = await loadPreload();
 
     const status = await (api.getDaemonStatus as () => Promise<unknown>)();
@@ -77,13 +86,22 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
   it('onDaemonStatus does not let a token or base URL survive through the push channel either', async () => {
     const api = await loadPreload();
     const received: unknown[] = [];
-    (api.onDaemonStatus as (cb: (s: unknown) => void) => () => void)((status) => received.push(status));
+    (api.onDaemonStatus as (cb: (s: unknown) => void) => () => void)((status) =>
+      received.push(status),
+    );
 
     const listener = on.mock.calls.find((call) => call[0] === 'daemon:status')?.[1] as
-      | ((event: unknown, status: unknown) => void)
-      | undefined;
+      ((event: unknown, status: unknown) => void) | undefined;
     expect(listener).toBeDefined();
-    listener?.({}, { state: 'unavailable', error: 'daemon crashed', token: 'leaked-token', baseUrl: 'http://leak' });
+    listener?.(
+      {},
+      {
+        state: 'unavailable',
+        error: 'daemon crashed',
+        token: 'leaked-token',
+        baseUrl: 'http://leak',
+      },
+    );
 
     expect(received).toEqual([{ state: 'unavailable', error: 'daemon crashed' }]);
   });
@@ -117,5 +135,187 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
     const api = await loadPreload();
     await (api.cancelSession as (id: string) => Promise<unknown>)('session-42');
     expect(invoke).toHaveBeenCalledWith('daemon:cancel-session', 'session-42');
+  });
+
+  it('uses fixed IPC channels for the interactive session lifecycle and command dispatch', async () => {
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const executionId = '123e4567-e89b-42d3-a456-426614174001';
+    const turnId = '123e4567-e89b-42d3-a456-426614174002';
+    const commandId = '123e4567-e89b-42d3-a456-426614174003';
+    const createInput = { provider: 'claude', cwd: '/tmp/project', prompt: 'hello' };
+    const session = {
+      id: sessionId,
+      provider: 'claude',
+      transport: 'fake-interactive',
+      cwd: '/tmp/project',
+      status: 'starting',
+      selection: {
+        transport: 'fake-interactive',
+        enabled: [],
+        unavailableOptional: [],
+        possibleEffects: [],
+        effectsComplete: true,
+      },
+      executionId,
+      currentTurnId: turnId,
+      acceptedWork: 'not_accepted',
+      startedAt: '2026-08-31T00:00:00.000Z',
+      earliestSequence: 0,
+    };
+    const command = { type: 'session.interrupt', commandId, sessionId, turnId };
+    const acknowledgement = { status: 'accepted', commandId, sessionId, turnId };
+    const cancellation = { status: 'cancelling', sessionId };
+    invoke
+      .mockResolvedValueOnce(session)
+      .mockResolvedValueOnce(acknowledgement)
+      .mockResolvedValueOnce(cancellation);
+    const api = await loadPreload();
+
+    await expect(
+      (api.createInteractiveSession as (input: unknown) => Promise<unknown>)(createInput),
+    ).resolves.toEqual(session);
+    await expect(
+      (api.sendSessionCommand as (input: unknown) => Promise<unknown>)(command),
+    ).resolves.toEqual(acknowledgement);
+    await expect(
+      (api.cancelInteractiveSession as (id: string) => Promise<unknown>)(sessionId),
+    ).resolves.toEqual(cancellation);
+
+    expect(invoke.mock.calls).toEqual([
+      ['daemon:create-interactive-session', createInput],
+      ['daemon:send-session-command', command],
+      ['daemon:cancel-interactive-session', sessionId],
+    ]);
+  });
+
+  it('rejects malformed interactive inputs before invoking privileged IPC', async () => {
+    const api = await loadPreload();
+
+    await expect(
+      (api.createInteractiveSession as (input: unknown) => Promise<unknown>)({
+        provider: 'claude',
+        cwd: '',
+        prompt: '',
+      }),
+    ).rejects.toBeDefined();
+    await expect(
+      (api.sendSessionCommand as (input: unknown) => Promise<unknown>)({
+        type: 'session.interrupt',
+        commandId: 'not-a-uuid',
+      }),
+    ).rejects.toBeDefined();
+    await expect(
+      (api.cancelInteractiveSession as (id: string) => Promise<unknown>)('not-a-uuid'),
+    ).rejects.toBeDefined();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('rejects well-shaped interactive acknowledgements that do not match the request', async () => {
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const turnId = '123e4567-e89b-42d3-a456-426614174001';
+    const commandId = '123e4567-e89b-42d3-a456-426614174002';
+    const otherId = '123e4567-e89b-42d3-a456-426614174003';
+    const command = { type: 'session.interrupt', commandId, sessionId, turnId };
+    invoke
+      .mockResolvedValueOnce({ status: 'accepted', commandId: otherId, sessionId, turnId })
+      .mockResolvedValueOnce({ status: 'cancelling', sessionId: otherId });
+    const api = await loadPreload();
+
+    await expect(
+      (api.sendSessionCommand as (input: unknown) => Promise<unknown>)(command),
+    ).rejects.toThrow(/does not match/);
+    await expect(
+      (api.cancelInteractiveSession as (id: string) => Promise<unknown>)(sessionId),
+    ).rejects.toThrow(/does not match/);
+  });
+
+  it('forwards only valid, correlated v2 event envelopes and removes its listener', async () => {
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const event = {
+      type: 'session.completed',
+      sessionId,
+      executionId: '123e4567-e89b-42d3-a456-426614174001',
+      sequence: 2,
+      timestamp: '2026-08-31T00:00:00.000Z',
+    };
+    const api = await loadPreload();
+    const callback = vi.fn();
+    const dispose = (
+      api.onInteractiveSessionEvent as (cb: (id: string, item: unknown) => void) => () => void
+    )(callback);
+    const listener = on.mock.calls.find(
+      (call) => call[0] === 'daemon:interactive-session-event',
+    )?.[1] as ((ipcEvent: unknown, payload: unknown) => void) | undefined;
+
+    listener?.({}, { sessionId, event });
+    listener?.({}, { sessionId: '123e4567-e89b-42d3-a456-426614174009', event });
+    listener?.({}, { sessionId, event: { ...event, token: 'must-not-cross-preload' } });
+    listener?.({}, { sessionId, event: { type: 'session.completed' } });
+
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(callback).toHaveBeenCalledWith(sessionId, event);
+    dispose();
+    expect(removeListener).toHaveBeenCalledWith('daemon:interactive-session-event', listener);
+  });
+
+  it('sanitizes replay resets and terminal stream errors before forwarding them', async () => {
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const session = {
+      id: sessionId,
+      provider: 'claude',
+      transport: 'test-interactive',
+      cwd: 'C:\\repo',
+      status: 'active',
+      selection: {
+        transport: 'test-interactive',
+        enabled: [],
+        unavailableOptional: [],
+        possibleEffects: [],
+        effectsComplete: true,
+      },
+      executionId: '123e4567-e89b-42d3-a456-426614174001',
+      acceptedWork: 'accepted',
+      startedAt: '2026-08-31T00:00:00.000Z',
+      earliestSequence: 5,
+    };
+    const api = await loadPreload();
+    const callback = vi.fn();
+    const dispose = (
+      api.onInteractiveSessionStreamNotice as (
+        cb: (id: string, notice: unknown) => void,
+      ) => () => void
+    )(callback);
+    const listener = on.mock.calls.find(
+      (call) => call[0] === 'daemon:interactive-session-stream-notice',
+    )?.[1] as ((ipcEvent: unknown, payload: unknown) => void) | undefined;
+
+    listener?.({}, { sessionId, notice: { type: 'replay_reset', session } });
+    listener?.(
+      {},
+      {
+        sessionId,
+        notice: { type: 'error', message: 'authorization failed', status: 401, token: 'drop-me' },
+      },
+    );
+    listener?.(
+      {},
+      {
+        sessionId: '123e4567-e89b-42d3-a456-426614174009',
+        notice: { type: 'replay_reset', session },
+      },
+    );
+
+    expect(callback).toHaveBeenCalledTimes(2);
+    expect(callback).toHaveBeenNthCalledWith(1, sessionId, { type: 'replay_reset', session });
+    expect(callback).toHaveBeenNthCalledWith(2, sessionId, {
+      type: 'error',
+      message: 'authorization failed',
+      status: 401,
+    });
+    dispose();
+    expect(removeListener).toHaveBeenCalledWith(
+      'daemon:interactive-session-stream-notice',
+      listener,
+    );
   });
 });

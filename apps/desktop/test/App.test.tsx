@@ -1,6 +1,11 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AgentEvent, AgentSession, ProviderCapabilities, ProviderStatus } from '@agent-dock/shared';
+import type {
+  AgentEvent,
+  AgentSession,
+  ProviderCapabilities,
+  ProviderStatus,
+} from '@agent-dock/shared';
 import { App } from '../src/App.js';
 import type { AgentDockBridge, DaemonStatus } from '../src/window.js';
 
@@ -35,6 +40,11 @@ function installBridge(overrides: Partial<AgentDockBridge> = {}): AgentDockBridg
     createSession: vi.fn(),
     cancelSession: vi.fn().mockResolvedValue(undefined),
     onSessionEvent: vi.fn().mockReturnValue(() => {}),
+    createInteractiveSession: vi.fn(),
+    sendSessionCommand: vi.fn(),
+    cancelInteractiveSession: vi.fn(),
+    onInteractiveSessionEvent: vi.fn().mockReturnValue(() => {}),
+    onInteractiveSessionStreamNotice: vi.fn().mockReturnValue(() => {}),
     selectDirectory: vi.fn().mockResolvedValue('/chosen/dir'),
     ...overrides,
   };
@@ -64,14 +74,19 @@ describe('App', () => {
     render(<App />);
     expect(screen.getByText(/connecting to local daemon/i)).toBeInTheDocument();
 
-    statusCallback?.({ state: 'unavailable', error: 'daemon process exited unexpectedly (code 1, signal null)' });
+    statusCallback?.({
+      state: 'unavailable',
+      error: 'daemon process exited unexpectedly (code 1, signal null)',
+    });
 
     await waitFor(() => expect(screen.getByText(/daemon unavailable/i)).toBeInTheDocument());
     expect(screen.getByText(/exited unexpectedly/)).toBeInTheDocument();
   });
 
   it('lists providers and disables Run until a working directory and prompt are filled in', async () => {
-    installBridge({ listProviders: vi.fn().mockResolvedValue([CLAUDE_INSTALLED, CODEX_NOT_INSTALLED]) });
+    installBridge({
+      listProviders: vi.fn().mockResolvedValue([CLAUDE_INSTALLED, CODEX_NOT_INSTALLED]),
+    });
 
     render(<App />);
 
@@ -80,10 +95,14 @@ describe('App', () => {
     const runButton = screen.getByRole('button', { name: 'Run' });
     expect(runButton).toBeDisabled();
 
-    fireEvent.change(screen.getByPlaceholderText('/path/to/project'), { target: { value: '/tmp/project' } });
+    fireEvent.change(screen.getByPlaceholderText('/path/to/project'), {
+      target: { value: '/tmp/project' },
+    });
     expect(runButton).toBeDisabled(); // prompt still empty
 
-    fireEvent.change(screen.getByRole('textbox', { name: /prompt/i }), { target: { value: 'do something' } });
+    fireEvent.change(screen.getByRole('textbox', { name: /prompt/i }), {
+      target: { value: 'do something' },
+    });
     expect(runButton).toBeEnabled();
   });
 
@@ -114,13 +133,21 @@ describe('App', () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText('Claude Code')).toBeInTheDocument());
 
-    fireEvent.change(screen.getByPlaceholderText('/path/to/project'), { target: { value: '/tmp/project' } });
-    fireEvent.change(screen.getByRole('textbox', { name: /prompt/i }), { target: { value: 'do something' } });
+    fireEvent.change(screen.getByPlaceholderText('/path/to/project'), {
+      target: { value: '/tmp/project' },
+    });
+    fireEvent.change(screen.getByRole('textbox', { name: /prompt/i }), {
+      target: { value: 'do something' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Run' }));
 
     await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled());
 
-    sessionEventCallback?.('sess-1', { type: 'session.started', sessionId: 'sess-1', provider: 'claude' });
+    sessionEventCallback?.('sess-1', {
+      type: 'session.started',
+      sessionId: 'sess-1',
+      provider: 'claude',
+    });
     sessionEventCallback?.('sess-1', { type: 'assistant.message', text: 'hi from the fixture' });
     sessionEventCallback?.('sess-1', { type: 'session.completed' });
 
@@ -149,12 +176,19 @@ describe('App', () => {
 
     render(<App />);
     await waitFor(() => expect(screen.getByText('Claude Code')).toBeInTheDocument());
-    fireEvent.change(screen.getByPlaceholderText('/path/to/project'), { target: { value: '/tmp/project' } });
-    fireEvent.change(screen.getByRole('textbox', { name: /prompt/i }), { target: { value: 'do something' } });
+    fireEvent.change(screen.getByPlaceholderText('/path/to/project'), {
+      target: { value: '/tmp/project' },
+    });
+    fireEvent.change(screen.getByRole('textbox', { name: /prompt/i }), {
+      target: { value: 'do something' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Run' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled());
 
-    sessionEventCallback?.('sess-stale-from-a-previous-run', { type: 'assistant.message', text: 'should not appear' });
+    sessionEventCallback?.('sess-stale-from-a-previous-run', {
+      type: 'assistant.message',
+      text: 'should not appear',
+    });
 
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(screen.queryByText('should not appear')).not.toBeInTheDocument();
@@ -174,8 +208,12 @@ describe('App', () => {
     render(<App />);
     await waitFor(() => expect(screen.getByText('Claude Code')).toBeInTheDocument());
 
-    fireEvent.change(screen.getByPlaceholderText('/path/to/project'), { target: { value: '/tmp/project' } });
-    fireEvent.change(screen.getByRole('textbox', { name: /prompt/i }), { target: { value: 'do something' } });
+    fireEvent.change(screen.getByPlaceholderText('/path/to/project'), {
+      target: { value: '/tmp/project' },
+    });
+    fireEvent.change(screen.getByRole('textbox', { name: /prompt/i }), {
+      target: { value: 'do something' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Run' }));
 
     const cancelButton = await screen.findByRole('button', { name: 'Cancel' });
@@ -186,12 +224,18 @@ describe('App', () => {
   });
 
   it('surfaces a rejected createSession call as a form error instead of crashing', async () => {
-    installBridge({ createSession: vi.fn().mockRejectedValue(new Error('daemon is not ready yet')) });
+    installBridge({
+      createSession: vi.fn().mockRejectedValue(new Error('daemon is not ready yet')),
+    });
 
     render(<App />);
     await waitFor(() => expect(screen.getByText('Claude Code')).toBeInTheDocument());
-    fireEvent.change(screen.getByPlaceholderText('/path/to/project'), { target: { value: '/tmp/project' } });
-    fireEvent.change(screen.getByRole('textbox', { name: /prompt/i }), { target: { value: 'do something' } });
+    fireEvent.change(screen.getByPlaceholderText('/path/to/project'), {
+      target: { value: '/tmp/project' },
+    });
+    fireEvent.change(screen.getByRole('textbox', { name: /prompt/i }), {
+      target: { value: 'do something' },
+    });
     fireEvent.click(screen.getByRole('button', { name: 'Run' }));
 
     await waitFor(() => expect(screen.getByText('daemon is not ready yet')).toBeInTheDocument());

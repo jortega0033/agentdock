@@ -1,7 +1,9 @@
 import { mkdtempSync, rmSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { FastifyInstance } from 'fastify';
 import {
   FAKE_PROVIDER_CAPABILITIES,
   FakeProvider,
@@ -102,8 +104,47 @@ function setup(scenario: 'success' | 'failure' | 'hang-until-cancelled' = 'succe
   return { app, provider, sessionManager };
 }
 
+function setupInteractive(
+  scenario:
+    | 'multi-input'
+    | 'approval'
+    | 'question'
+    | 'disconnect'
+    | 'queue-overflow'
+    | 'malformed-frame'
+    | 'oversized-frame'
+    | 'crash' = 'multi-input',
+) {
+  const registry = new ProviderRegistry();
+  const provider = new FakeProvider('claude', undefined, 'success', scenario);
+  registry.register(provider);
+  const sessionManager = new SessionManager(registry, noopLogger);
+  const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+  return { app, provider, sessionManager };
+}
+
 function auth() {
   return { authorization: `Bearer ${TOKEN}` };
+}
+
+async function createInteractiveSession(app: FastifyInstance, required: string[]) {
+  const response = await app.inject({
+    method: 'POST',
+    url: '/v2/sessions',
+    headers: auth(),
+    payload: {
+      provider: 'claude',
+      cwd,
+      prompt: 'initial interactive turn',
+      capabilities: {
+        required: required.map((id) => ({ id })),
+        optional: [],
+        allowExperimental: false,
+      },
+    },
+  });
+  expect(response.statusCode, response.body).toBe(201);
+  return agentSessionV2Schema.parse(response.json());
 }
 
 function parseSseData(payload: string): unknown[] {
@@ -178,6 +219,24 @@ describe('v2 discovery and authorization', () => {
     ).toBe('unsupported');
   });
 
+  it('uses a provider-owned v2 manifest when the provider exposes one', async () => {
+    const registry = new ProviderRegistry();
+    registry.register(new FakeProvider('claude', undefined, 'success', 'multi-input'));
+    const sessionManager = new SessionManager(registry, noopLogger);
+    const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+
+    const response = await app.inject({ method: 'GET', url: '/v2/providers', headers: auth() });
+    const parsed = providersV2ResponseSchema.parse(response.json());
+
+    expect(response.statusCode).toBe(200);
+    expect(parsed.providers[0]?.transports.map((transport) => transport.id)).toEqual([
+      'fake-interactive',
+    ]);
+    expect(parsed.providers[0]?.capabilities.map((record) => record.id)).toContain(
+      'session.input.follow_up',
+    );
+  });
+
   it('gets one provider and preserves invalid/unregistered status behavior under /v2', async () => {
     const { app } = setup();
     const found = await app.inject({ method: 'GET', url: '/v2/providers/claude', headers: auth() });
@@ -195,6 +254,42 @@ describe('v2 discovery and authorization', () => {
 });
 
 describe('POST /v2/sessions capability negotiation', () => {
+  it('does not start a provider when the client disconnects during detection', async () => {
+    const { app, provider } = setupInteractive();
+    const status = await provider.detect();
+    let enterDetection!: () => void;
+    const detectionEntered = new Promise<void>((resolve) => {
+      enterDetection = resolve;
+    });
+    let releaseDetection!: (value: ProviderStatus) => void;
+    vi.spyOn(provider, 'detect').mockImplementation(
+      () =>
+        new Promise<ProviderStatus>((resolve) => {
+          releaseDetection = resolve;
+          enterDetection();
+        }),
+    );
+    let rawRequest: { emit(event: string): boolean } | undefined;
+    app.addHook('onRequest', (request, _reply, done) => {
+      if (request.url === '/v2/sessions') rawRequest = request.raw;
+      done();
+    });
+    const response = app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: { provider: 'claude', cwd, prompt: 'must not start' },
+    });
+    await detectionEntered;
+
+    expect(rawRequest).toBeDefined();
+    rawRequest?.emit('aborted');
+    await response;
+    releaseDetection(status);
+
+    expect(provider.interactiveStartedOptions).toEqual([]);
+  });
+
   it('uses the default one-shot request and returns an immutable, schema-valid selection', async () => {
     const { app, provider } = setup();
     const created = await app.inject({
@@ -238,6 +333,7 @@ describe('POST /v2/sessions capability negotiation', () => {
         capabilities: { required: [], optional: [], allowExperimental: false },
       },
     });
+    expect(created.statusCode, created.body).toBe(201);
     const session = agentSessionV2Schema.parse(created.json());
     expect(session.selection.enabled).toEqual([]);
 
@@ -357,6 +453,365 @@ describe('POST /v2/sessions capability negotiation', () => {
     expect(limited.json()).toMatchObject({ error: 'rate limit exceeded', code: 'rate_limited' });
     expect(limited.headers['retry-after']).toBeDefined();
     expect(provider.startedOptions).toEqual([]);
+  });
+});
+
+describe('interactive v2 command dispatch', () => {
+  it('enforces the frozen command constraints before provider dispatch', async () => {
+    const { app, provider } = setupInteractive();
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: {
+        provider: 'claude',
+        cwd,
+        prompt: 'initial interactive turn',
+        capabilities: {
+          required: [
+            {
+              id: 'session.input.follow_up',
+              constraints: {
+                kind: 'text_input',
+                maxCharacters: 4,
+                attachmentKinds: [],
+              },
+            },
+            { id: 'session.cancel' },
+          ],
+          optional: [],
+          allowExperimental: false,
+        },
+      },
+    });
+    expect(created.statusCode, created.body).toBe(201);
+    const session = agentSessionV2Schema.parse(created.json());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const response = await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/commands`,
+      headers: auth(),
+      payload: {
+        type: 'input.follow_up',
+        commandId: randomUUID(),
+        sessionId: session.id,
+        turnId: randomUUID(),
+        content: [{ type: 'text', id: randomUUID(), text: '12345' }],
+      },
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.json().code).toBe('command_out_of_bounds');
+    expect(provider.interactiveCommands).toHaveLength(0);
+    await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/cancel`,
+      headers: auth(),
+    });
+  });
+
+  it('starts the rich transport and deduplicates a byte-equivalent command retry', async () => {
+    const { app, provider } = setupInteractive();
+    const session = await createInteractiveSession(app, [
+      'session.input.follow_up',
+      'session.cancel',
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const snapshot = agentSessionV2Schema.parse(
+      (
+        await app.inject({
+          method: 'GET',
+          url: `/v2/sessions/${session.id}`,
+          headers: auth(),
+        })
+      ).json(),
+    );
+    expect(snapshot.transport).toBe('fake-interactive');
+    expect(snapshot.status).toBe('idle');
+    expect(snapshot.acceptedWork).toBe('accepted');
+    expect(provider.interactiveStartedOptions).toHaveLength(1);
+    expect(provider.startedOptions).toHaveLength(0);
+
+    const command = {
+      type: 'input.follow_up' as const,
+      commandId: randomUUID(),
+      sessionId: session.id,
+      turnId: randomUUID(),
+      content: [{ type: 'text' as const, id: randomUUID(), text: 'second turn' }],
+    };
+    const accepted = await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/commands`,
+      headers: auth(),
+      payload: command,
+    });
+    expect(accepted.statusCode).toBe(202);
+    expect(accepted.json()).toEqual({
+      status: 'accepted',
+      commandId: command.commandId,
+      sessionId: session.id,
+      turnId: command.turnId,
+    });
+
+    const retry = await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/commands`,
+      headers: auth(),
+      payload: command,
+    });
+    expect(retry.statusCode).toBe(202);
+    expect(retry.json()).toEqual(accepted.json());
+    expect(provider.interactiveCommands).toHaveLength(1);
+
+    const conflict = await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/commands`,
+      headers: auth(),
+      payload: {
+        ...command,
+        content: [{ type: 'text', id: randomUUID(), text: 'conflicting retry' }],
+      },
+    });
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().code).toBe('command_id_conflict');
+    await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/cancel`,
+      headers: auth(),
+    });
+  });
+
+  it('keeps interrupt distinct from cancellation and resolves pending approval first', async () => {
+    const { app, provider } = setupInteractive('approval');
+    const session = await createInteractiveSession(app, [
+      'session.interrupt',
+      'session.cancel',
+      'interaction.approval',
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const interruptCommand = {
+      type: 'session.interrupt' as const,
+      commandId: randomUUID(),
+      sessionId: session.id,
+      turnId: session.currentTurnId as string,
+    };
+    const interrupted = await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/commands`,
+      headers: auth(),
+      payload: interruptCommand,
+    });
+    expect(interrupted.statusCode).toBe(202);
+    expect(provider.interactiveInterrupts).toBe(1);
+    expect(provider.interactiveCloses).toBe(0);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const retryAfterStateChange = await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/commands`,
+      headers: auth(),
+      payload: interruptCommand,
+    });
+    expect(retryAfterStateChange.statusCode).toBe(202);
+    expect(retryAfterStateChange.json()).toEqual(interrupted.json());
+    expect(provider.interactiveInterrupts).toBe(1);
+
+    await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/cancel`,
+      headers: auth(),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const retryAfterTerminal = await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/commands`,
+      headers: auth(),
+      payload: interruptCommand,
+    });
+    expect(retryAfterTerminal.statusCode).toBe(202);
+    expect(provider.interactiveInterrupts).toBe(1);
+    const stream = await app.inject({
+      method: 'GET',
+      url: `/v2/sessions/${session.id}/events`,
+      headers: auth(),
+    });
+    const events = parseSseData(stream.body) as Array<{ type: string; [key: string]: unknown }>;
+    const resolutionIndex = events.findIndex((event) => event.type === 'approval.resolved');
+    const interruptIndex = events.findIndex((event) => event.type === 'turn.interrupted');
+    expect(resolutionIndex).toBeGreaterThanOrEqual(0);
+    expect(interruptIndex).toBeGreaterThan(resolutionIndex);
+    expect(events[resolutionIndex]).toMatchObject({ decision: 'denied', actor: 'policy' });
+    expect(events.at(-1)?.type).toBe('session.cancelled');
+  });
+
+  it('correlates one approval response and rejects a later stale response', async () => {
+    const { app, provider } = setupInteractive('approval');
+    const session = await createInteractiveSession(app, ['interaction.approval', 'session.cancel']);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(provider.lastInteractionRequestId).toBeDefined();
+    const responseCommand = {
+      type: 'approval.respond' as const,
+      commandId: randomUUID(),
+      sessionId: session.id,
+      turnId: session.currentTurnId as string,
+      requestId: provider.lastInteractionRequestId as string,
+      decision: 'allow_once' as const,
+    };
+
+    const accepted = await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/commands`,
+      headers: auth(),
+      payload: responseCommand,
+    });
+    expect(accepted.statusCode).toBe(202);
+    const retry = await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/commands`,
+      headers: auth(),
+      payload: responseCommand,
+    });
+    expect(retry.statusCode).toBe(202);
+    expect(provider.interactiveCommands).toHaveLength(1);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const stale = await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/commands`,
+      headers: auth(),
+      payload: { ...responseCommand, commandId: randomUUID() },
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().code).toBe('stale_interaction');
+    await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/cancel`,
+      headers: auth(),
+    });
+  });
+
+  it('rejects commands for a legacy or unselected session capability', async () => {
+    const { app } = setup('hang-until-cancelled');
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: { provider: 'claude', cwd, prompt: 'legacy' },
+    });
+    const session = agentSessionV2Schema.parse(created.json());
+    const response = await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/commands`,
+      headers: auth(),
+      payload: {
+        type: 'input.follow_up',
+        commandId: randomUUID(),
+        sessionId: session.id,
+        turnId: randomUUID(),
+        content: [{ type: 'text', id: randomUUID(), text: 'must not dispatch' }],
+      },
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.json().code).toBe('session_not_capable');
+  });
+
+  it.each([
+    ['malformed-frame', 'provider_frame_invalid'],
+    ['oversized-frame', 'provider_frame_too_large'],
+    ['crash', 'provider_crash'],
+  ] as const)('fails %s once with a bounded terminal event', async (scenario, code) => {
+    const { app } = setupInteractive(scenario);
+    const session = await createInteractiveSession(app, ['session.cancel']);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const stream = await app.inject({
+      method: 'GET',
+      url: `/v2/sessions/${session.id}/events`,
+      headers: auth(),
+    });
+    const events = parseSseData(stream.body) as Array<{ type: string; code?: string }>;
+    const terminal = events.filter((event) =>
+      ['session.completed', 'session.failed', 'session.cancelled', 'session.interrupted'].includes(
+        event.type,
+      ),
+    );
+    expect(terminal).toEqual([expect.objectContaining({ type: 'session.failed', code })]);
+  });
+
+  it('fails a corrupted fake-provider queue once and preserves replay-gap semantics', async () => {
+    const { app } = setupInteractive('queue-overflow');
+    const session = await createInteractiveSession(app, ['session.cancel']);
+    let snapshot = session;
+    for (let attempt = 0; attempt < 200 && snapshot.status !== 'failed'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const response = await app.inject({
+        method: 'GET',
+        url: `/v2/sessions/${session.id}`,
+        headers: auth(),
+      });
+      snapshot = agentSessionV2Schema.parse(response.json());
+    }
+    expect(snapshot.status).toBe('failed');
+    expect(snapshot.earliestSequence).toBeGreaterThan(0);
+
+    const stale = await app.inject({
+      method: 'GET',
+      url: `/v2/sessions/${session.id}/events`,
+      headers: auth(),
+    });
+    expect(stale.statusCode).toBe(409);
+    expect(stale.json().code).toBe('replay_gap');
+
+    const replay = await app.inject({
+      method: 'GET',
+      url: `/v2/sessions/${session.id}/events`,
+      headers: {
+        ...auth(),
+        'last-event-id': String(snapshot.earliestSequence - 1),
+      },
+    });
+    const events = parseSseData(replay.body) as Array<{ type: string; code?: string }>;
+    expect(
+      events.filter((event) =>
+        [
+          'session.completed',
+          'session.failed',
+          'session.cancelled',
+          'session.interrupted',
+        ].includes(event.type),
+      ),
+    ).toEqual([
+      expect.objectContaining({ type: 'session.failed', code: 'provider_queue_overflow' }),
+    ]);
+  }, 15_000);
+
+  it('resolves a pending question before failing a disconnected provider', async () => {
+    const { app } = setupInteractive('disconnect');
+    const session = await createInteractiveSession(app, ['interaction.question', 'session.cancel']);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const stream = await app.inject({
+      method: 'GET',
+      url: `/v2/sessions/${session.id}/events`,
+      headers: auth(),
+    });
+    const events = parseSseData(stream.body) as Array<{ type: string; [key: string]: unknown }>;
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'question.cancelled', reason: 'disconnect' }),
+    );
+    expect(events.at(-1)).toMatchObject({ type: 'session.failed', code: 'provider_disconnected' });
+    expect(
+      events.filter((event) =>
+        [
+          'session.completed',
+          'session.failed',
+          'session.cancelled',
+          'session.interrupted',
+        ].includes(event.type),
+      ),
+    ).toHaveLength(1);
   });
 });
 

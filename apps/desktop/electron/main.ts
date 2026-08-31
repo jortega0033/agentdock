@@ -4,11 +4,20 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { createSessionRequestSchema, sessionIdParamSchema } from '@agent-dock/shared';
-import { AgentDockClient } from '@agent-dock/client';
+import {
+  agentCommandV2Schema,
+  createSessionRequestSchema,
+  createSessionV2RequestSchema,
+  sessionIdParamSchema,
+} from '@agent-dock/shared';
+import { AgentDockClient, DaemonError } from '@agent-dock/client';
 import { resolveDaemonEntry } from './resolve-daemon-entry.js';
 import { resolveWindowIcon } from './resolve-window-icon.js';
 import { sendToRenderer } from './send-to-renderer.js';
+import {
+  PendingInteractiveCreates,
+  relayInteractiveSessionEvents,
+} from './interactive-session-lifecycle.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -27,13 +36,20 @@ if (!gotSingleInstanceLock) {
  * `AgentDockClient` instance (which carries the bearer token) never crosses into the renderer
  * process. See SECURITY.md.
  */
-type DaemonStatus = { state: 'connecting' } | { state: 'ready' } | { state: 'unavailable'; error: string };
+type DaemonStatus =
+  { state: 'connecting' } | { state: 'ready' } | { state: 'unavailable'; error: string };
 
 let daemonChild: ChildProcess | undefined;
 let client: AgentDockClient | undefined;
 let mainWindow: BrowserWindow | undefined;
 let activeSessionId: string | undefined;
 let activeStreamAbort: AbortController | undefined;
+const activeInteractiveSessionIds = new Set<string>();
+const interactiveStreamAborts = new Map<string, AbortController>();
+const pendingInteractiveCreates = new PendingInteractiveCreates();
+// Startup may use the 30-second handshake bound plus graceful and hard-stop reap windows.
+const INTERACTIVE_CREATE_SHUTDOWN_TIMEOUT_MS = 41_000;
+const DAEMON_CANCELLATION_TIMEOUT_MS = 20_000;
 
 // Namespaces the daemon rendezvous per application (AD-02); see apps/daemon/src/discovery-file.ts
 // for the daemon side of this. A fork shipping its own product under a different name should set
@@ -77,7 +93,12 @@ function spawnDaemon(): void {
   daemonChild.on('exit', (code, signal) => {
     if (!client) return; // never became ready; startup error already reported
     client = undefined;
-    sendStatus({ state: 'unavailable', error: `daemon process exited unexpectedly (code ${code ?? 'null'}, signal ${signal ?? 'null'})` });
+    for (const controller of interactiveStreamAborts.values()) controller.abort();
+    interactiveStreamAborts.clear();
+    sendStatus({
+      state: 'unavailable',
+      error: `daemon process exited unexpectedly (code ${code ?? 'null'}, signal ${signal ?? 'null'})`,
+    });
   });
 
   waitForDaemonReady(spawnedAt).catch((err: Error) => {
@@ -93,7 +114,10 @@ async function waitForDaemonReady(spawnedAt: number, timeoutMs = 15_000): Promis
     if (existsSync(file) && statSync(file).mtimeMs >= spawnedAt - 1000) {
       try {
         const parsed = JSON.parse(readFileSync(file, 'utf8')) as { port: number; token: string };
-        const candidate = new AgentDockClient({ baseUrl: `http://127.0.0.1:${parsed.port}`, token: parsed.token });
+        const candidate = new AgentDockClient({
+          baseUrl: `http://127.0.0.1:${parsed.port}`,
+          token: parsed.token,
+        });
         // health() also verifies protocol compatibility (see @agent-dock/client); this doubles
         // as both the readiness check and the version-compatibility check in one call.
         await candidate.health();
@@ -119,9 +143,15 @@ function forwardSessionEvents(sessionId: string): void {
 
   void (async () => {
     try {
-      for await (const event of activeClient.sessions.events(sessionId, { signal: controller.signal })) {
+      for await (const event of activeClient.sessions.events(sessionId, {
+        signal: controller.signal,
+      })) {
         sendToRenderer(mainWindow, 'daemon:session-event', { sessionId, event });
-        if (event.type === 'session.completed' || event.type === 'session.failed' || event.type === 'session.cancelled') {
+        if (
+          event.type === 'session.completed' ||
+          event.type === 'session.failed' ||
+          event.type === 'session.cancelled'
+        ) {
           if (activeSessionId === sessionId) activeSessionId = undefined;
         }
       }
@@ -129,27 +159,117 @@ function forwardSessionEvents(sessionId: string): void {
       if (controller.signal.aborted) return;
       sendToRenderer(mainWindow, 'daemon:session-event', {
         sessionId,
-        event: { type: 'error', message: `event stream failed: ${(err as Error).message}`, recoverable: false },
+        event: {
+          type: 'error',
+          message: `event stream failed: ${(err as Error).message}`,
+          recoverable: false,
+        },
       });
     }
   })();
 }
 
-async function killDaemon(): Promise<void> {
-  activeStreamAbort?.abort();
-  if (client) {
-    try {
-      // Cancels every in-flight session over HTTP, not just `activeSessionId`. On Windows,
-      // daemonChild.kill() below maps to TerminateProcess, which never gives the daemon's own
-      // SIGTERM handler (and its cancelAll()) a chance to run, so this HTTP call is the only
-      // reliable way to stop every session's CLI process on that platform. Tracking a single
-      // `activeSessionId` was previously the only thing cancelled here, which orphaned every
-      // other session's process for any fork that runs more than one at a time (AD-12).
-      await client.sessions.cancelAll();
-    } catch {
-      // best effort; the daemon's own shutdown handler is the fallback (SIGTERM on POSIX)
+/** Streams validated protocol-v2 envelopes without changing the existing v1 renderer flow. */
+function forwardInteractiveSessionEvents(sessionId: string): void {
+  if (!client) return;
+  interactiveStreamAborts.get(sessionId)?.abort();
+  const controller = new AbortController();
+  interactiveStreamAborts.set(sessionId, controller);
+  const activeClient = client;
+
+  void relayInteractiveSessionEvents({
+    sessionId,
+    signal: controller.signal,
+    events: (id, options) => activeClient.v2.sessions.events(id, options),
+    snapshot: (id) => activeClient.v2.sessions.get(id),
+    isActive: () => activeInteractiveSessionIds.has(sessionId),
+    onEvent: (event) => {
+      sendToRenderer(mainWindow, 'daemon:interactive-session-event', { sessionId, event });
+      if (
+        event.type === 'session.completed' ||
+        event.type === 'session.failed' ||
+        event.type === 'session.cancelled' ||
+        event.type === 'session.interrupted'
+      ) {
+        activeInteractiveSessionIds.delete(sessionId);
+      }
+    },
+    onRetry: (error, lastEventId) => {
+      console.warn(
+        `interactive event stream ${sessionId} reconnecting${lastEventId === undefined ? '' : ` after ${lastEventId}`}: ${(error as Error).message}`,
+      );
+    },
+    onReplayGap: (session) => {
+      sendToRenderer(mainWindow, 'daemon:interactive-session-stream-notice', {
+        sessionId,
+        notice: { type: 'replay_reset', session },
+      });
+    },
+    onFatal: (error) => {
+      sendToRenderer(mainWindow, 'daemon:interactive-session-stream-notice', {
+        sessionId,
+        notice: {
+          type: 'error',
+          message: boundedErrorMessage(error),
+          ...(error instanceof DaemonError ? { status: error.status } : {}),
+        },
+      });
+    },
+  }).finally(() => {
+    if (interactiveStreamAborts.get(sessionId) === controller) {
+      interactiveStreamAborts.delete(sessionId);
     }
+  });
+}
+
+function boundedErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : 'interactive event stream failed';
+  return message.slice(0, 4 * 1024);
+}
+
+async function waitWithin(work: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const settled = Promise.resolve(work).then(
+    () => true,
+    () => true,
+  );
+  const timedOut = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), timeoutMs);
+  });
+  return Promise.race([settled, timedOut]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
+async function killDaemon(): Promise<void> {
+  pendingInteractiveCreates.beginShutdown();
+  activeStreamAbort?.abort();
+  for (const controller of interactiveStreamAborts.values()) controller.abort();
+  await pendingInteractiveCreates.waitForPending(INTERACTIVE_CREATE_SHUTDOWN_TIMEOUT_MS);
+  const activeClient = client;
+  if (activeClient) {
+    const cancellationController = new AbortController();
+    const cancellationTimer = setTimeout(
+      () => cancellationController.abort(new Error('daemon cancellation deadline exceeded')),
+      DAEMON_CANCELLATION_TIMEOUT_MS,
+    );
+    const cancellations = Promise.allSettled([
+      // Cancels every in-flight session over HTTP, not just `activeSessionId`. On Windows,
+      // daemonChild.kill() below maps to TerminateProcess, so bounded HTTP cancellation is the
+      // reliable opportunity for the daemon to reap each provider tree before the hard stop.
+      activeClient.sessions.cancelAll({ signal: cancellationController.signal }),
+      ...[...activeInteractiveSessionIds].map((sessionId) =>
+        activeClient.v2.sessions.cancel(sessionId, {
+          signal: cancellationController.signal,
+        }),
+      ),
+    ]);
+    await waitWithin(cancellations, DAEMON_CANCELLATION_TIMEOUT_MS);
+    clearTimeout(cancellationTimer);
+    cancellationController.abort(new Error('desktop shutdown completed'));
   }
+  activeInteractiveSessionIds.clear();
+  interactiveStreamAborts.clear();
   daemonChild?.kill();
 }
 
@@ -209,9 +329,11 @@ function createWindow(): void {
   // microphone, geolocation, notifications, etc, so there's no legitimate request to allow.
   // Electron's own per-permission/per-platform defaults are inconsistent; this makes the policy
   // explicit and uniform instead of relying on them.
-  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => {
-    callback(false);
-  });
+  mainWindow.webContents.session.setPermissionRequestHandler(
+    (_webContents, _permission, callback) => {
+      callback(false);
+    },
+  );
 
   if (process.env.VITE_DEV_SERVER_URL) {
     void mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
@@ -224,7 +346,9 @@ function createWindow(): void {
   });
 }
 
-ipcMain.handle('daemon:get-status', (): DaemonStatus => (client ? { state: 'ready' } : { state: 'connecting' }));
+ipcMain.handle('daemon:get-status', (): DaemonStatus =>
+  client ? { state: 'ready' } : { state: 'connecting' },
+);
 
 ipcMain.handle('daemon:list-providers', async () => {
   if (!client) throw new Error('daemon is not ready yet');
@@ -248,6 +372,42 @@ ipcMain.handle('daemon:cancel-session', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   const { sessionId } = sessionIdParamSchema.parse({ sessionId: input });
   await client.sessions.cancel(sessionId);
+});
+
+ipcMain.handle('daemon:create-interactive-session', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  const parsed = createSessionV2RequestSchema.parse(input);
+  const activeClient = client;
+  return pendingInteractiveCreates.run(
+    (signal) => activeClient.v2.sessions.create(parsed, { signal }),
+    (session) => {
+      activeInteractiveSessionIds.add(session.id);
+      forwardInteractiveSessionEvents(session.id);
+    },
+    async (session) => {
+      const controller = new AbortController();
+      const timer = setTimeout(
+        () => controller.abort(new Error('late interactive session cancellation timed out')),
+        DAEMON_CANCELLATION_TIMEOUT_MS,
+      );
+      await waitWithin(
+        activeClient.v2.sessions.cancel(session.id, { signal: controller.signal }),
+        DAEMON_CANCELLATION_TIMEOUT_MS,
+      );
+      clearTimeout(timer);
+    },
+  );
+});
+
+ipcMain.handle('daemon:send-session-command', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.sessions.send(agentCommandV2Schema.parse(input));
+});
+
+ipcMain.handle('daemon:cancel-interactive-session', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  const { sessionId } = sessionIdParamSchema.parse({ sessionId: input });
+  return client.v2.sessions.cancel(sessionId);
 });
 
 ipcMain.handle('dialog:select-directory', async () => {
@@ -277,10 +437,9 @@ if (gotSingleInstanceLock) {
     if (process.platform !== 'darwin') app.quit();
   });
 
-  let shuttingDown = false;
   app.on('before-quit', (event) => {
-    if (shuttingDown || !daemonChild) return;
-    shuttingDown = true;
+    if (pendingInteractiveCreates.isClosing || !daemonChild) return;
+    pendingInteractiveCreates.beginShutdown();
     event.preventDefault();
     void killDaemon().finally(() => app.quit());
   });

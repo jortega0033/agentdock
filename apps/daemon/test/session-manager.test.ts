@@ -1,17 +1,25 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
+  AgentCommandV2,
   AgentEvent,
   AgentEventEnvelope,
+  AgentEventV2,
+  CapabilitySelection,
   ProviderId,
   ProviderStatus,
+  ProviderTransportV2,
 } from '@agent-dock/shared';
 import { ProviderRegistry, noopLogger } from '@agent-dock/agent-runtime';
 import type {
+  AcceptedWorkState,
   AgentProvider,
+  InteractiveProviderSessionHandle,
   ProviderSessionHandle,
+  StartInteractiveSessionOptions,
   StartSessionOptions,
 } from '@agent-dock/agent-runtime';
 import { SessionManager } from '../src/session-manager.js';
+import { V2SessionFacade } from '../src/v2-session-facade.js';
 
 const TERMINAL_TYPES = new Set(['session.completed', 'session.failed', 'session.cancelled']);
 
@@ -446,4 +454,673 @@ describe('SessionManager — bounded retention of completed sessions (AD-11)', (
     expect(runningSession.isCancelled()).toBe(true);
     expect(completedSession.isCancelled()).toBe(false); // never touched — it was already terminal
   }, 10_000);
+
+  it('bounds cancelAll even when a provider close never resolves', async () => {
+    const { provider, sessionManager } = setup();
+    const running = sessionManager.create('claude', '/tmp', 'hi');
+    const runningSession = provider.sessions.get(running.id)!;
+    runningSession.handle.cancel = () => new Promise<void>(() => undefined);
+    const startedAt = Date.now();
+
+    await sessionManager.cancelAll(20);
+
+    expect(Date.now() - startedAt).toBeLessThan(500);
+    runningSession.finish();
+  });
+
+  it('keeps the default shutdown window open for the full interactive reap bound', async () => {
+    vi.useFakeTimers();
+    try {
+      const closeGate = deferred<void>();
+      const { interactive, sessionManager } = await setupInteractive({
+        close: () => closeGate.promise,
+      });
+      let settled = false;
+      const cancelling = sessionManager.cancelAll().then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(15_500);
+
+      expect(interactive.closeCalls()).toBe(1);
+      expect(settled).toBe(false);
+
+      interactive.push({ type: 'session.cancelled', reason: 'reaped' });
+      interactive.finish();
+      closeGate.resolve();
+      await cancelling;
+
+      expect(settled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve(value: T | PromiseLike<T>): void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: Deferred<T>['resolve'];
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+interface InteractiveSessionOptions {
+  accepted?: Promise<AcceptedWorkState>;
+  send?: (command: AgentCommandV2, index: number) => Promise<void>;
+  interrupt?: () => Promise<void>;
+  close?: () => Promise<void>;
+}
+
+function makeControllableInteractiveSession(options: InteractiveSessionOptions = {}) {
+  const queue: AgentEventV2[] = [];
+  const waiters: Array<(result: IteratorResult<AgentEventV2>) => void> = [];
+  const sent: AgentCommandV2[] = [];
+  let closed = false;
+  let interruptCalls = 0;
+  let closeCalls = 0;
+
+  function push(event: AgentEventV2): void {
+    if (closed) throw new Error('interactive test session is closed');
+    const waiter = waiters.shift();
+    if (waiter) waiter({ value: event, done: false });
+    else queue.push(event);
+  }
+
+  function finish(): void {
+    if (closed) return;
+    closed = true;
+    for (const waiter of waiters.splice(0)) waiter({ value: undefined, done: true });
+  }
+
+  async function* events(): AsyncGenerator<AgentEventV2, void, void> {
+    while (true) {
+      if (queue.length > 0) {
+        yield queue.shift() as AgentEventV2;
+        continue;
+      }
+      if (closed) return;
+      const result = await new Promise<IteratorResult<AgentEventV2>>((resolve) =>
+        waiters.push(resolve),
+      );
+      if (result.done) return;
+      yield result.value;
+    }
+  }
+
+  const handle: InteractiveProviderSessionHandle = {
+    events: events(),
+    accepted: options.accepted ?? Promise.resolve('accepted'),
+    send: async (command) => {
+      const index = sent.length;
+      sent.push(command);
+      await options.send?.(command, index);
+    },
+    interrupt: async () => {
+      interruptCalls += 1;
+      await options.interrupt?.();
+    },
+    close: async () => {
+      closeCalls += 1;
+      if (options.close) {
+        await options.close();
+        return;
+      }
+      push({ type: 'session.cancelled', reason: 'test close' });
+      finish();
+    },
+  };
+
+  return {
+    handle,
+    push,
+    finish,
+    sent,
+    interruptCalls: () => interruptCalls,
+    closeCalls: () => closeCalls,
+  };
+}
+
+type ControllableInteractiveSession = ReturnType<typeof makeControllableInteractiveSession>;
+
+class InteractiveTestProvider implements AgentProvider {
+  readonly id: ProviderId = 'claude';
+  readonly name = 'Interactive Test Provider';
+  readonly interactiveOptions: StartInteractiveSessionOptions[] = [];
+
+  constructor(private readonly interactive: ControllableInteractiveSession) {}
+
+  async detect(): Promise<ProviderStatus> {
+    return {
+      id: this.id,
+      name: this.name,
+      installed: true,
+      authenticated: 'authenticated',
+      capabilities: {
+        resume: false,
+        cancellation: true,
+        tools: false,
+        usage: false,
+        thinking: false,
+      },
+    };
+  }
+
+  startSession(_options: StartSessionOptions): ProviderSessionHandle {
+    return makeControllableSession().handle;
+  }
+
+  async startInteractiveSession(
+    options: StartInteractiveSessionOptions,
+  ): Promise<InteractiveProviderSessionHandle> {
+    this.interactiveOptions.push(options);
+    return this.interactive.handle;
+  }
+}
+
+class PendingInteractiveProvider implements AgentProvider {
+  readonly id: ProviderId = 'claude';
+  readonly name = 'Pending Interactive Test Provider';
+  readonly interactiveOptions: StartInteractiveSessionOptions[] = [];
+  aborts = 0;
+
+  async detect(): Promise<ProviderStatus> {
+    return {
+      id: this.id,
+      name: this.name,
+      installed: true,
+      authenticated: 'authenticated',
+      capabilities: {
+        resume: false,
+        cancellation: true,
+        tools: false,
+        usage: false,
+        thinking: false,
+      },
+    };
+  }
+
+  startSession(_options: StartSessionOptions): ProviderSessionHandle {
+    return makeControllableSession().handle;
+  }
+
+  startInteractiveSession(
+    options: StartInteractiveSessionOptions,
+  ): Promise<InteractiveProviderSessionHandle> {
+    this.interactiveOptions.push(options);
+    return new Promise((_resolve, reject) => {
+      const rejectAborted = () => {
+        this.aborts += 1;
+        reject(new Error('interactive startup aborted'));
+      };
+      if (options.signal?.aborted) rejectAborted();
+      else options.signal?.addEventListener('abort', rejectAborted, { once: true });
+    });
+  }
+}
+
+const INTERACTIVE_TRANSPORT: ProviderTransportV2 = {
+  id: 'memory',
+  priority: 1,
+  stability: 'stable',
+  possibleEffects: [],
+  effectsComplete: true,
+};
+
+const INTERACTIVE_SELECTION: CapabilitySelection = {
+  transport: INTERACTIVE_TRANSPORT.id,
+  enabled: [],
+  unavailableOptional: [],
+  possibleEffects: [],
+  effectsComplete: true,
+};
+
+const INTERACTIVE_TURN_ID = '123e4567-e89b-42d3-a456-426614174201';
+const INTERACTIVE_EXECUTION_ID = '123e4567-e89b-42d3-a456-426614174202';
+
+async function setupInteractive(options: InteractiveSessionOptions = {}) {
+  const interactive = makeControllableInteractiveSession(options);
+  const provider = new InteractiveTestProvider(interactive);
+  const registry = new ProviderRegistry();
+  registry.register(provider);
+  const sessionManager = new SessionManager(registry, noopLogger);
+  const session = await sessionManager.createInteractive(
+    provider.id,
+    '/tmp',
+    'hello',
+    INTERACTIVE_SELECTION,
+    INTERACTIVE_TRANSPORT,
+    INTERACTIVE_EXECUTION_ID,
+    INTERACTIVE_TURN_ID,
+  );
+  return { interactive, provider, sessionManager, session };
+}
+
+function uuid(index: number): string {
+  return `00000000-0000-4000-8000-${index.toString(16).padStart(12, '0')}`;
+}
+
+function followUpCommand(
+  sessionId: string,
+  index: number,
+  text = `command ${index}`,
+): Extract<AgentCommandV2, { type: 'input.follow_up' }> {
+  return {
+    type: 'input.follow_up',
+    commandId: uuid(index),
+    sessionId,
+    turnId: INTERACTIVE_TURN_ID,
+    content: [{ type: 'text', id: uuid(10_000 + index), text }],
+  };
+}
+
+async function finishInteractive(
+  interactive: ControllableInteractiveSession,
+  status: 'completed' | 'cancelled' = 'completed',
+): Promise<void> {
+  interactive.push(
+    status === 'completed' ? { type: 'session.completed' } : { type: 'session.cancelled' },
+  );
+  interactive.finish();
+  await tick();
+}
+
+function createPendingInteractive(sessionManager: SessionManager, signal?: AbortSignal) {
+  return sessionManager.createInteractive(
+    'claude',
+    '/tmp',
+    'pending',
+    INTERACTIVE_SELECTION,
+    INTERACTIVE_TRANSPORT,
+    INTERACTIVE_EXECUTION_ID,
+    INTERACTIVE_TURN_ID,
+    signal,
+  );
+}
+
+describe('SessionManager — pending interactive startup', () => {
+  function setupPending() {
+    const provider = new PendingInteractiveProvider();
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    return { provider, sessionManager: new SessionManager(registry, noopLogger) };
+  }
+
+  it('aborts and awaits startup handshakes during cancelAll', async () => {
+    const { provider, sessionManager } = setupPending();
+    const start = createPendingInteractive(sessionManager);
+    const rejected = expect(start).rejects.toThrow('interactive startup aborted');
+    await tick();
+
+    await sessionManager.cancelAll(1_000, 2);
+
+    await rejected;
+    expect(provider.aborts).toBe(1);
+    expect(sessionManager.list(2)).toEqual([]);
+  });
+
+  it('relays request abort while startup is pending', async () => {
+    const { provider, sessionManager } = setupPending();
+    const controller = new AbortController();
+    const start = createPendingInteractive(sessionManager, controller.signal);
+    const rejected = expect(start).rejects.toThrow('interactive startup aborted');
+    await tick();
+
+    controller.abort();
+
+    await rejected;
+    expect(provider.aborts).toBe(1);
+    expect(sessionManager.list(2)).toEqual([]);
+  });
+
+  it('cancels a pending startup by its registered session id', async () => {
+    const { provider, sessionManager } = setupPending();
+    const start = createPendingInteractive(sessionManager);
+    const rejected = expect(start).rejects.toThrow('interactive startup aborted');
+    await tick();
+    const sessionId = provider.interactiveOptions[0]?.sessionId;
+    expect(sessionId).toBeDefined();
+
+    await expect(sessionManager.cancel(sessionId as string, 2)).resolves.toBe(true);
+
+    await rejected;
+    expect(provider.aborts).toBe(1);
+    expect(sessionManager.list(2)).toEqual([]);
+  });
+
+  it('aborts pending starts and rejects new work after shutdown begins', async () => {
+    const { provider, sessionManager } = setupPending();
+    const start = createPendingInteractive(sessionManager);
+    const rejected = expect(start).rejects.toThrow('interactive startup aborted');
+    await tick();
+
+    sessionManager.beginShutdown();
+
+    await rejected;
+    await expect(createPendingInteractive(sessionManager)).rejects.toMatchObject({
+      code: 'session_terminal',
+    });
+    expect(provider.aborts).toBe(1);
+  });
+});
+
+describe('SessionManager — interactive command dispatch', () => {
+  it('dispatches concurrent commands exactly once and in submission order', async () => {
+    const gates = [deferred<void>(), deferred<void>(), deferred<void>()];
+    const { interactive, sessionManager, session } = await setupInteractive({
+      send: async (_command, index) => gates[index]?.promise,
+    });
+    const commands = [1, 2, 3].map((index) => followUpCommand(session.id, index));
+
+    const results = commands.map((command) => sessionManager.dispatch(session.id, command));
+    await tick();
+    expect(interactive.sent).toEqual([commands[0]]);
+
+    gates[0]?.resolve();
+    await tick();
+    expect(interactive.sent).toEqual(commands.slice(0, 2));
+
+    gates[1]?.resolve();
+    await tick();
+    expect(interactive.sent).toEqual(commands);
+
+    gates[2]?.resolve();
+    await expect(Promise.all(results)).resolves.toEqual(
+      commands.map((command) => ({
+        ok: true,
+        acknowledgement: {
+          status: 'accepted',
+          commandId: command.commandId,
+          sessionId: command.sessionId,
+          turnId: command.turnId,
+        },
+      })),
+    );
+    await finishInteractive(interactive);
+  });
+
+  it('returns the same pending acknowledgement for an identical command-id retry without redispatch', async () => {
+    const gate = deferred<void>();
+    const { interactive, sessionManager, session } = await setupInteractive({
+      send: () => gate.promise,
+    });
+    const first = followUpCommand(session.id, 10, 'same payload');
+    const reordered: AgentCommandV2 = {
+      content: first.content,
+      turnId: first.turnId,
+      sessionId: first.sessionId,
+      commandId: first.commandId,
+      type: first.type,
+    };
+
+    const initial = sessionManager.dispatch(session.id, first);
+    const retry = sessionManager.dispatch(session.id, reordered);
+    expect(retry).toBe(initial);
+    await tick();
+    expect(interactive.sent).toEqual([first]);
+
+    gate.resolve();
+    const [initialResult, retryResult] = await Promise.all([initial, retry]);
+    expect(retryResult).toBe(initialResult);
+    expect(interactive.sent).toHaveLength(1);
+    await finishInteractive(interactive);
+  });
+
+  it('rejects conflicting reuse of a command id without dispatching the conflicting payload', async () => {
+    const gate = deferred<void>();
+    const { interactive, sessionManager, session } = await setupInteractive({
+      send: () => gate.promise,
+    });
+    const first = followUpCommand(session.id, 20, 'first payload');
+    const conflicting = followUpCommand(session.id, 20, 'different payload');
+
+    const pending = sessionManager.dispatch(session.id, first);
+    await expect(sessionManager.dispatch(session.id, conflicting)).resolves.toMatchObject({
+      ok: false,
+      code: 'command_id_conflict',
+    });
+    expect(interactive.sent).toEqual([first]);
+
+    gate.resolve();
+    await pending;
+    await finishInteractive(interactive);
+  });
+
+  it('rejects terminal interactive and noninteractive sessions deterministically', async () => {
+    const interactiveSetup = await setupInteractive();
+    await finishInteractive(interactiveSetup.interactive);
+    await expect(
+      interactiveSetup.sessionManager.dispatch(
+        interactiveSetup.session.id,
+        followUpCommand(interactiveSetup.session.id, 30),
+      ),
+    ).resolves.toMatchObject({ ok: false, code: 'session_terminal' });
+
+    const legacySetup = setup();
+    const legacy = legacySetup.sessionManager.create('claude', '/tmp', 'legacy');
+    await expect(
+      legacySetup.sessionManager.dispatch(legacy.id, followUpCommand(legacy.id, 31)),
+    ).resolves.toMatchObject({ ok: false, code: 'session_not_capable' });
+    const legacyControl = legacySetup.provider.sessions.get(legacy.id)!;
+    legacyControl.push({ type: 'session.completed' });
+    legacyControl.finish();
+  });
+
+  it('rejects the 65th pending command with session_backpressure', async () => {
+    const gate = deferred<void>();
+    const { interactive, sessionManager, session } = await setupInteractive({
+      send: () => gate.promise,
+    });
+    const pending = Array.from({ length: 64 }, (_value, index) =>
+      sessionManager.dispatch(session.id, followUpCommand(session.id, 100 + index)),
+    );
+
+    await expect(
+      sessionManager.dispatch(session.id, followUpCommand(session.id, 164)),
+    ).resolves.toMatchObject({ ok: false, code: 'session_backpressure' });
+    await tick();
+    expect(interactive.sent).toHaveLength(1);
+
+    gate.resolve();
+    await Promise.all(pending);
+    expect(interactive.sent).toHaveLength(64);
+    await finishInteractive(interactive);
+  });
+
+  it('rejects aggregate pending command bytes above 1 MiB before the count cap', async () => {
+    const gate = deferred<void>();
+    const { interactive, sessionManager, session } = await setupInteractive({
+      send: () => gate.promise,
+    });
+    const largeText = 'x'.repeat(240_000);
+    const pending = Array.from({ length: 4 }, (_value, index) =>
+      sessionManager.dispatch(session.id, followUpCommand(session.id, 300 + index, largeText)),
+    );
+
+    await expect(
+      sessionManager.dispatch(session.id, followUpCommand(session.id, 304, largeText)),
+    ).resolves.toMatchObject({ ok: false, code: 'session_backpressure' });
+
+    gate.resolve();
+    await Promise.all(pending);
+    expect(interactive.sent).toHaveLength(4);
+    await finishInteractive(interactive);
+  });
+
+  it('routes session.interrupt to interrupt(), never send() or close()', async () => {
+    const { interactive, sessionManager, session } = await setupInteractive();
+    const interrupt: AgentCommandV2 = {
+      type: 'session.interrupt',
+      commandId: uuid(500),
+      sessionId: session.id,
+      turnId: INTERACTIVE_TURN_ID,
+    };
+
+    await expect(sessionManager.dispatch(session.id, interrupt)).resolves.toMatchObject({
+      ok: true,
+      acknowledgement: { commandId: interrupt.commandId },
+    });
+    expect(interactive.interruptCalls()).toBe(1);
+    expect(interactive.sent).toHaveLength(0);
+    expect(interactive.closeCalls()).toBe(0);
+    await finishInteractive(interactive);
+  });
+
+  it('never lets a late accepted-work result downgrade an accepted dispatched session', async () => {
+    const accepted = deferred<AcceptedWorkState>();
+    const { interactive, sessionManager, session } = await setupInteractive({
+      accepted: accepted.promise,
+    });
+    expect(sessionManager.acceptedWork(session.id)).toBe('not_accepted');
+
+    await expect(
+      sessionManager.dispatch(session.id, followUpCommand(session.id, 600)),
+    ).resolves.toMatchObject({ ok: true });
+    expect(sessionManager.acceptedWork(session.id)).toBe('accepted');
+
+    accepted.resolve('not_accepted');
+    await tick();
+    expect(sessionManager.acceptedWork(session.id)).toBe('accepted');
+    await finishInteractive(interactive);
+  });
+});
+
+describe('SessionManager — interactive replay bounds', () => {
+  it('keeps the newest 5,000 events and replays their absolute indices', async () => {
+    const { interactive, sessionManager, session } = await setupInteractive();
+    const consumed = deferred<void>();
+    const releaseLive = sessionManager.subscribeInteractive(session.id, 0, (index) => {
+      if (index === 5_000) consumed.resolve();
+    });
+
+    for (let index = 0; index <= 5_000; index += 1) {
+      interactive.push({ type: 'session.status', status: index % 2 === 0 ? 'idle' : 'active' });
+    }
+    await consumed.promise;
+    releaseLive?.();
+
+    const replayed: Array<{ index: number; event: AgentEventV2 }> = [];
+    const releaseReplay = sessionManager.subscribeInteractive(session.id, 0, (index, event) => {
+      replayed.push({ index, event });
+    });
+
+    expect(replayed).toHaveLength(5_000);
+    expect(replayed[0]).toEqual({
+      index: 1,
+      event: { type: 'session.status', status: 'active' },
+    });
+    expect(replayed.at(-1)).toEqual({
+      index: 5_000,
+      event: { type: 'session.status', status: 'idle' },
+    });
+    releaseReplay?.();
+    await finishInteractive(interactive);
+  });
+
+  it('evicts by the 16 MiB byte cap while preserving absolute replay indices', async () => {
+    const { interactive, sessionManager, session } = await setupInteractive();
+    const event: AgentEventV2 = {
+      type: 'content.completed',
+      turnId: INTERACTIVE_TURN_ID,
+      block: {
+        type: 'text',
+        id: uuid(20_000),
+        text: 'x'.repeat(250 * 1024),
+      },
+    };
+    const retainedCount = Math.floor(
+      (16 * 1024 * 1024) / Buffer.byteLength(JSON.stringify(event), 'utf8'),
+    );
+    const totalEvents = retainedCount + 1;
+    const consumed = deferred<void>();
+    const releaseLive = sessionManager.subscribeInteractive(session.id, 0, (index) => {
+      if (index === totalEvents - 1) consumed.resolve();
+    });
+
+    for (let index = 0; index < totalEvents; index += 1) interactive.push(event);
+    await consumed.promise;
+    releaseLive?.();
+
+    const replayedIndices: number[] = [];
+    const releaseReplay = sessionManager.subscribeInteractive(session.id, 0, (index) => {
+      replayedIndices.push(index);
+    });
+
+    expect(replayedIndices).toHaveLength(retainedCount);
+    expect(replayedIndices[0]).toBe(totalEvents - retainedCount);
+    expect(replayedIndices.at(-1)).toBe(totalEvents - 1);
+    releaseReplay?.();
+    await finishInteractive(interactive);
+  });
+});
+
+describe('V2SessionFacade — interactive turn state', () => {
+  it('returns a failed turn to idle so a follow-up can be dispatched', async () => {
+    const interactive = makeControllableInteractiveSession();
+    const provider = new InteractiveTestProvider(interactive);
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger);
+    const sessions = new V2SessionFacade(sessionManager);
+    const selection: CapabilitySelection = {
+      ...INTERACTIVE_SELECTION,
+      enabled: [
+        {
+          id: 'session.input.follow_up',
+          constraints: { kind: 'text_input', maxCharacters: 200_000, attachmentKinds: [] },
+        },
+      ],
+    };
+    const session = await sessions.create(
+      { provider: provider.id, cwd: '/tmp', prompt: 'hello' },
+      selection,
+      INTERACTIVE_TRANSPORT,
+      true,
+    );
+    interactive.push({
+      type: 'turn.failed',
+      turnId: INTERACTIVE_TURN_ID,
+      code: 'test_failure',
+      message: 'turn failed',
+    });
+    await tick();
+
+    expect(sessions.get(session.id)?.status).toBe('idle');
+    const command = followUpCommand(session.id, 700);
+    await expect(sessions.dispatch(command)).resolves.toMatchObject({ ok: true });
+    expect(interactive.sent).toEqual([command]);
+    await finishInteractive(interactive);
+  });
+});
+
+describe('SessionManager — interactive removal', () => {
+  it('waits for close and the provider event stream before deleting the session', async () => {
+    const closeGate = deferred<void>();
+    const { interactive, sessionManager, session } = await setupInteractive({
+      close: () => closeGate.promise,
+    });
+    let removed = false;
+    const removing = sessionManager.remove(session.id).then((result) => {
+      removed = true;
+      return result;
+    });
+
+    await tick();
+    expect(interactive.closeCalls()).toBe(1);
+    expect(removed).toBe(false);
+    expect(sessionManager.get(session.id)).toBeDefined();
+
+    closeGate.resolve();
+    await tick();
+    expect(removed).toBe(false);
+
+    interactive.push({ type: 'session.cancelled', reason: 'closed' });
+    interactive.finish();
+    await expect(removing).resolves.toBe(true);
+    expect(sessionManager.get(session.id)).toBeUndefined();
+  });
 });

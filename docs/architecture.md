@@ -179,7 +179,9 @@ silently ignoring it.
 Protocol v2 replaces booleans with scoped, evidence-backed support records while preserving opaque
 unknown IDs and provider-neutral negotiation. The canonical IDs, evidence rules, and safe defaults
 are fixed in [capability-security-v2.md](capability-security-v2.md#canonical-capability-catalog).
-They are not implemented by the current `ProviderStatus` schema.
+The v1 `ProviderStatus` schema intentionally remains unchanged. `/v2/providers` returns the
+separate `ProviderStatusV2`: it uses a provider's optional rich v2 manifest when present and derives
+a conservative `legacy-one-shot` manifest from v1 capabilities otherwise.
 
 ## Process management
 
@@ -202,9 +204,14 @@ spawn/parse/normalize lifecycle happens. It:
 - always terminates the event stream with exactly one of `session.completed` / `session.failed` /
   `session.cancelled`, so callers never have to guess whether more events might still arrive
 
-Rich SDK/app-server transports will use the same provider-neutral contract but require a separate
-bidirectional supervisor. They must preserve the terminal-event invariant and the v2
-[accepted-work fallback boundary](capability-security-v2.md#transport-fallback-and-accepted-work-boundary).
+Rich SDK/app-server transports use a separate provider-neutral bidirectional supervisor. It now
+owns startup and command-acceptance timeouts, frame/event/stderr/queue bounds, interaction
+correlation and provider-native fail-closed resolution, interrupt versus close semantics,
+accepted-work state, mandatory process-tree reap fallback, and the terminal-event invariant.
+`FakeProvider` verifies this runtime path. Production Claude and Codex still use the
+one-shot runner: issue #8's conformance fixtures gate their native transports, tracked in issues
+#10 and #11. Issue #7 also stops at a narrow client/Electron bridge; rich renderer UI remains
+separate work.
 
 ## Daemon discovery and lifecycle
 

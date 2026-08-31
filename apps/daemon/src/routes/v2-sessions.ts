@@ -1,19 +1,17 @@
 import { existsSync, statSync } from 'node:fs';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import {
+  agentCommandV2Schema,
+  commandAcknowledgementV2Schema,
   createSessionV2RequestSchema,
   cancelSessionV2ResponseSchema,
   negotiateCapabilities,
   sessionIdParamSchema,
-  type AgentEventV2Envelope,
 } from '@agent-dock/shared';
 import type { ProviderRegistry } from '@agent-dock/agent-runtime';
 import type { SessionManager } from '../session-manager.js';
-import {
-  legacyCapabilityRecords,
-  legacyRuntimeScope,
-  legacyTransports,
-} from '../v2-legacy-provider.js';
+import { resolveProviderV2Manifest } from '../provider-v2.js';
+import { BoundedV2SseWriter } from '../v2-sse-writer.js';
 import { V2SessionFacade } from '../v2-session-facade.js';
 
 function invalidRequest(reply: FastifyReply, details: unknown): void {
@@ -28,13 +26,29 @@ function parseLastEventId(header: string | string[] | undefined): number | undef
   return Number.isSafeInteger(parsed) && parsed < Number.MAX_SAFE_INTEGER ? parsed + 1 : undefined;
 }
 
-function isTerminal(event: AgentEventV2Envelope): boolean {
-  return (
-    event.type === 'session.completed' ||
-    event.type === 'session.failed' ||
-    event.type === 'session.cancelled' ||
-    event.type === 'session.interrupted'
-  );
+function raceAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+): Promise<{ aborted: true } | { aborted: false; value: T }> {
+  if (signal.aborted) return Promise.resolve({ aborted: true });
+  return new Promise((resolve, reject) => {
+    const aborted = (): void => {
+      cleanup();
+      resolve({ aborted: true });
+    };
+    const cleanup = (): void => signal.removeEventListener('abort', aborted);
+    signal.addEventListener('abort', aborted, { once: true });
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve({ aborted: false, value });
+      },
+      (error: unknown) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
 }
 
 export function registerV2SessionRoutes(
@@ -80,26 +94,62 @@ export function registerV2SessionRoutes(
         return;
       }
 
-      const status = await provider.detect();
-      const negotiation = negotiateCapabilities({
-        request: parsed.data.capabilities,
-        runtimeScope: legacyRuntimeScope(status),
-        supportRecords: legacyCapabilityRecords(status),
-        transports: legacyTransports(),
-      });
-      if (!negotiation.success) {
-        if (negotiation.code === 'required_capability_unavailable') {
-          reply.code(422).send({
-            error: 'required capabilities unavailable',
-            code: negotiation.code,
-            details: { unavailableRequired: negotiation.unavailableRequired },
-          });
+      const controller = new AbortController();
+      const abortStart = () => controller.abort();
+      const abortDisconnectedStart = () => {
+        if (!reply.raw.writableEnded) controller.abort();
+      };
+      const abortShutdownStart = () => controller.abort();
+      req.raw.once('aborted', abortStart);
+      reply.raw.once('close', abortDisconnectedStart);
+      sessionManager.shutdownSignal.addEventListener('abort', abortShutdownStart, { once: true });
+      if (req.raw.aborted || reply.raw.destroyed || sessionManager.shutdownSignal.aborted) {
+        controller.abort();
+      }
+      try {
+        if (controller.signal.aborted) return;
+        const detected = await raceAbort(provider.detect(), controller.signal);
+        if (detected.aborted) return;
+        const manifest = resolveProviderV2Manifest(provider, detected.value);
+        const negotiation = negotiateCapabilities({
+          request: parsed.data.capabilities,
+          runtimeScope: manifest.runtimeScope,
+          supportRecords: manifest.supportRecords,
+          transports: manifest.transports,
+        });
+        if (!negotiation.success) {
+          if (negotiation.code === 'required_capability_unavailable') {
+            reply.code(422).send({
+              error: 'required capabilities unavailable',
+              code: negotiation.code,
+              details: { unavailableRequired: negotiation.unavailableRequired },
+            });
+            return;
+          }
+          throw new Error('invalid legacy v2 capability manifest');
+        }
+
+        const transport = manifest.transports.find(
+          (candidate) => candidate.id === negotiation.selection.transport,
+        );
+        if (!transport) throw new Error('negotiation selected an unknown provider transport');
+        const session = await sessions.create(
+          parsed.data,
+          negotiation.selection,
+          transport,
+          manifest.interactive,
+          controller.signal,
+        );
+        if (controller.signal.aborted || req.raw.aborted || reply.raw.destroyed) {
+          await sessions.cancel(session.id);
           return;
         }
-        throw new Error('invalid legacy v2 capability manifest');
+        reply.code(201).send(session);
+      } finally {
+        req.raw.off('aborted', abortStart);
+        reply.raw.off('close', abortDisconnectedStart);
+        sessionManager.shutdownSignal.removeEventListener('abort', abortShutdownStart);
       }
-
-      reply.code(201).send(sessions.create(parsed.data, negotiation.selection));
     },
   );
 
@@ -155,32 +205,71 @@ export function registerV2SessionRoutes(
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
     });
-    reply.raw.write(':ok\n\n');
-
-    let ended = false;
     let unsubscribe: (() => void) | undefined;
-    // As in the v1 route, replay can invoke this listener synchronously before subscribe returns.
-    // eslint-disable-next-line prefer-const
-    unsubscribe = sessions.subscribe(params.data.sessionId, sinceSequence, (sequence, event) => {
-      reply.raw.write(`id: ${sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
-      if (isTerminal(event)) {
-        ended = true;
-        unsubscribe?.();
-        reply.raw.end();
+    let cleanupRequested = false;
+    const cleanup = (): void => {
+      if (!unsubscribe) {
+        cleanupRequested = true;
+        return;
       }
+      const release = unsubscribe;
+      unsubscribe = undefined;
+      release();
+    };
+    const writer = new BoundedV2SseWriter(reply.raw, cleanup);
+    reply.raw.once('close', () => writer.close());
+    writer.start();
+
+    // Replay can synchronously close the writer before subscribe returns its disposer.
+    unsubscribe = sessions.subscribe(params.data.sessionId, sinceSequence, (_sequence, event) => {
+      writer.write(event);
     });
 
     if (!unsubscribe) {
-      reply.raw.end();
+      writer.close();
+      return;
+    }
+    if (cleanupRequested) {
+      cleanup();
       return;
     }
     const current = sessions.get(params.data.sessionId);
     const currentIsTerminal =
       !current || ['completed', 'failed', 'cancelled', 'interrupted'].includes(current.status);
-    if (ended || currentIsTerminal) {
-      unsubscribe();
-      if (!ended) reply.raw.end();
-    } else req.raw.on('close', () => unsubscribe?.());
+    if (currentIsTerminal) writer.finishReplay();
+  });
+
+  app.post('/v2/sessions/:sessionId/commands', async (req, reply) => {
+    const params = sessionIdParamSchema.safeParse(req.params);
+    if (!params.success) {
+      reply.code(400).send({ error: 'invalid session id', code: 'invalid_session_id' });
+      return;
+    }
+    const parsed = agentCommandV2Schema.safeParse(req.body);
+    if (!parsed.success) {
+      invalidRequest(reply, parsed.error.flatten());
+      return;
+    }
+    if (parsed.data.sessionId !== params.data.sessionId) {
+      reply.code(400).send({
+        error: 'command session id does not match the route',
+        code: 'session_id_mismatch',
+      });
+      return;
+    }
+
+    const result = await sessions.dispatch(parsed.data);
+    if (result.ok) {
+      reply.code(202).send(commandAcknowledgementV2Schema.parse(result.acknowledgement));
+      return;
+    }
+    const status =
+      result.code === 'session_not_found'
+        ? 404
+        : result.code === 'session_backpressure'
+          ? 429
+          : 409;
+    reply.code(status).send({ error: result.message, code: result.code });
   });
 
   app.post('/v2/sessions/:sessionId/cancel', async (req, reply) => {

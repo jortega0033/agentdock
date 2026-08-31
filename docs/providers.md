@@ -48,7 +48,7 @@ hardcode, which is exactly why discovery works this way instead.
 Re-verified after packaging: launched from the Start Menu shortcut of a real NSIS-installed build
 (not a dev terminal, so not inheriting whatever `PATH` a shell session happens to have), the daemon
 still found and correctly reported both CLIs. Discovery logic itself is unchanged by
-packaging: it's the same `findExecutable()` call either way, but the *inherited environment* a
+packaging: it's the same `findExecutable()` call either way, but the _inherited environment_ a
 packaged app launches with genuinely can differ from a terminal's, which is exactly the scenario
 this was built to handle, so it was worth confirming rather than assuming.
 
@@ -111,16 +111,16 @@ Both current adapters (`providers/claude/capabilities.ts`, `providers/codex/capa
 declare every field `true`, and each is true for a specific, checkable reason, not because the two
 CLIs happen to be similar:
 
-| Capability | Claude | Codex | Why |
-|---|---|---|---|
-| `resume` | ✅ | ✅ | `--resume <id>` / `exec resume <id>`, argv construction unit-tested (`build-args.ts`); wired end to end through `POST /sessions`'s `resumeProviderSessionId`, which the daemon rejects with `400` for a provider whose `capabilities.resume` is `false` |
-| `cancellation` | ✅ | ✅ | Both go through the shared `runProviderSession()` process-tree kill, see [Process management](architecture.md#process-management) |
-| `tools` | ✅ | ✅ | Claude's `tool_use`/`tool_result` blocks and Codex's `command_execution`/`file_change`/`mcp_tool_call` items both normalize to `tool.started`/`tool.completed` |
-| `usage` | ✅ | ✅ | Claude's `message.usage`/`result.usage` and Codex's `turn.completed.usage` both normalize to `usage` events |
-| `thinking` | ✅ | ✅ | Claude's `thinking` content blocks and Codex's `reasoning` items both normalize to `thinking.delta` (**only surfaced when the CLI's own extended-thinking/reasoning-effort configuration produces one**); a `true` here means "the adapter passes it through when present," not "always present" |
+| Capability     | Claude | Codex | Why                                                                                                                                                                                                                                                                                              |
+| -------------- | ------ | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `resume`       | ✅     | ✅    | `--resume <id>` / `exec resume <id>`, argv construction unit-tested (`build-args.ts`); wired end to end through `POST /sessions`'s `resumeProviderSessionId`, which the daemon rejects with `400` for a provider whose `capabilities.resume` is `false`                                          |
+| `cancellation` | ✅     | ✅    | Both go through the shared `runProviderSession()` process-tree kill, see [Process management](architecture.md#process-management)                                                                                                                                                                |
+| `tools`        | ✅     | ✅    | Claude's `tool_use`/`tool_result` blocks and Codex's `command_execution`/`file_change`/`mcp_tool_call` items both normalize to `tool.started`/`tool.completed`                                                                                                                                   |
+| `usage`        | ✅     | ✅    | Claude's `message.usage`/`result.usage` and Codex's `turn.completed.usage` both normalize to `usage` events                                                                                                                                                                                      |
+| `thinking`     | ✅     | ✅    | Claude's `thinking` content blocks and Codex's `reasoning` items both normalize to `thinking.delta` (**only surfaced when the CLI's own extended-thinking/reasoning-effort configuration produces one**); a `true` here means "the adapter passes it through when present," not "always present" |
 
 `FakeProvider` (used across the test suite) deliberately declares `resume: false`, `tools: false`,
-`thinking: false` even though it *could* trivially fake any of them: the contrast is what lets
+`thinking: false` even though it _could_ trivially fake any of them: the contrast is what lets
 tests assert that capability-gated behavior actually gates on the flag instead of always running
 (see [Provider contract tests](#provider-contract-tests) below).
 
@@ -164,7 +164,7 @@ the current adapters yet.
   message content blocks (`text`, `thinking`, `tool_use`, `tool_result`) → `assistant.message` /
   `thinking.delta` / `tool.started` / `tool.completed`; `result` → a `usage` event (with
   `total_cost_usd` as `cost`) and, if `is_error` is set, an `error` event. Claude emits a `usage`
-  event on every `assistant`/`user` line *and* again on the final `result` line: one session
+  event on every `assistant`/`user` line _and_ again on the final `result` line: one session
   produces several `usage` events, not one; see [Protocol v1](protocol-v1.md) for why a consumer
   should never treat a single `usage` event as a session total.
 - This project intentionally does **not** pass `--include-partial-messages`: without it, Claude
@@ -221,9 +221,11 @@ Revisit it if any of these four triggers becomes true:
 
 Triggers 1 and 2 are now planned under the v2 integration epic, and OpenAI now documents
 app-server as its rich-client interface. The current adapter still stays on `codex exec --json`
-until the v2 protocol, supervisor, trust policy, and fixture gates land. The target migration is
-tracked in [issue #10](https://github.com/jortega0033/agentdock/issues/10), and its security
-constraints are fixed in [capability-security-v2.md](capability-security-v2.md).
+even though the provider-neutral v2 protocol and supervisor now exist. Native migration remains
+gated by [issue #8](https://github.com/jortega0033/agentdock/issues/8)'s provider conformance
+fixtures and the trust policy, then is tracked in
+[issue #10](https://github.com/jortega0033/agentdock/issues/10). Its security constraints are fixed
+in [capability-security-v2.md](capability-security-v2.md).
 
 Migrating before those dependencies would cost real things this project depends on:
 per-session process isolation and the structurally-derived "exactly one terminal event, always
@@ -242,17 +244,22 @@ bidirectional, long-lived, and multiplexes sessions rather than one-process-per-
 migration would need new process-lifecycle plumbing in the shared runner, not just two swapped-out
 functions.
 
-`ProviderSessionHandle` and `AgentEvent` were sufficient for the deferred v0.2 transport swap. They
-do need provider-neutral additions for v2 commands, approvals, questions, content blocks, and
-accepted-work state; those changes belong in the shared protocol/supervisor rather than a
-Codex-only branch.
+The runtime now has those provider-neutral additions: an optional `ProviderV2Support` manifest,
+an optional `startInteractiveSession()` factory, a bidirectional transport contract, and a common
+session supervisor for commands, interactions, bounds, accepted-work state, teardown, and terminal
+events. `FakeProvider` exercises this path. `ClaudeProvider` and `CodexProvider` intentionally do
+not implement either optional hook yet, so discovery and session negotiation keep both production
+adapters on `legacy-one-shot`. Issue #8 remains the conformance gate; native Codex and Claude work
+is tracked separately in [issue #10](https://github.com/jortega0033/agentdock/issues/10) and
+[#11](https://github.com/jortega0033/agentdock/issues/11). Rich renderer UI is not part of the
+provider contract or issue #7.
 
 ## Provider contract tests
 
 This suite verifies the current protocol v1 adapter contract.
 
 `packages/agent-runtime/test/support/provider-contract.ts` exports `describeProviderContract()`,
-a reusable vitest suite asserting the guarantees *every* adapter must uphold, run against each
+a reusable vitest suite asserting the guarantees _every_ adapter must uphold, run against each
 adapter's real `parseLine`/`buildArgs` (not a re-implementation of them), with a small `node`
 fixture script standing in for the real CLI binary. `test/claude-contract.test.ts` and
 `test/codex-contract.test.ts` are ~15-line call sites that just supply each provider's fixtures and
@@ -261,8 +268,8 @@ declared capabilities, see either for the pattern to copy for a new provider.
 What it checks: `session.started` is emitted first and tagged with the right provider; a
 nonexistent working directory is rejected before the CLI is ever touched; no raw/unrecognized
 provider-native event type ever reaches the normalized stream; an unrecognized event kind doesn't
-crash the session; assistant output normalizes; tool events normalize *only when
-`capabilities.tools` says they should*, same for `usage`; exactly one terminal event occurs, always
+crash the session; assistant output normalizes; tool events normalize _only when
+`capabilities.tools` says they should_, same for `usage`; exactly one terminal event occurs, always
 last, carrying the provider session id on success; cancellation (gated on `capabilities.cancellation`)
 terminates the process and never lets `session.completed` follow `session.cancelled`; resume (gated
 on `capabilities.resume`) produces an argv that references the prior provider session id and

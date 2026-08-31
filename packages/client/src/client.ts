@@ -1,11 +1,13 @@
 import {
   AGENT_DOCK_PROTOCOL_VERSION,
   AGENT_DOCK_SUPPORTED_PROTOCOL_VERSIONS,
+  agentCommandV2Schema,
   agentEventEnvelopeSchema,
-  agentEventV2EnvelopeSchema,
+  agentEventOrStreamErrorV2Schema,
   agentSessionSchema,
   agentSessionV2Schema,
   cancelSessionV2ResponseSchema,
+  commandAcknowledgementV2Schema,
   createSessionRequestSchema,
   createSessionV2RequestSchema,
   healthResponseSchema,
@@ -16,9 +18,11 @@ import {
   sessionIdParamSchema,
   type AgentEventEnvelope,
   type AgentEventV2Envelope,
+  type AgentCommandV2,
   type AgentSession,
   type AgentSessionV2,
   type CancelSessionV2Response,
+  type CommandAcknowledgementV2,
   type CreateSessionRequest,
   type CreateSessionV2Request,
   type ProviderId,
@@ -57,6 +61,10 @@ export interface SessionEventsOptions {
   signal?: AbortSignal;
   /** Resume from the SSE `id:` after this value, instead of a full replay from the start. */
   lastEventId?: string;
+}
+
+export interface SessionRequestOptions {
+  signal?: AbortSignal;
 }
 
 interface CompatibilityResult {
@@ -106,7 +114,7 @@ export class AgentDockClient {
     /** Cancels every in-flight protocol-v1 session on the daemon. Used by the desktop shutdown path so
      * quitting the app doesn't orphan any session besides the one it happens to be tracking,
      * see electron/main.ts#killDaemon. */
-    cancelAll: (): Promise<void> => this.cancelAllSessions(),
+    cancelAll: (options?: SessionRequestOptions): Promise<void> => this.cancelAllSessions(options),
   };
 
   /** Protocol-v2 routes. The existing top-level namespaces remain protocol v1. */
@@ -116,15 +124,20 @@ export class AgentDockClient {
       get: (id: ProviderId): Promise<ProviderStatusV2> => this.getProviderV2(id),
     },
     sessions: {
-      create: (input: CreateSessionV2Request): Promise<AgentSessionV2> =>
-        this.createSessionV2(input),
+      create: (
+        input: CreateSessionV2Request,
+        options?: SessionRequestOptions,
+      ): Promise<AgentSessionV2> => this.createSessionV2(input, options),
       get: (id: string): Promise<AgentSessionV2> => this.getSessionV2(id),
       events: (
         id: string,
         options?: SessionEventsOptions,
       ): AsyncGenerator<AgentEventV2Envelope, void, void> =>
         this.streamSessionEventsV2(id, options),
-      cancel: (id: string): Promise<CancelSessionV2Response> => this.cancelSessionV2(id),
+      send: (command: AgentCommandV2): Promise<CommandAcknowledgementV2> =>
+        this.sendSessionCommandV2(command),
+      cancel: (id: string, options?: SessionRequestOptions): Promise<CancelSessionV2Response> =>
+        this.cancelSessionV2(id, options),
       delete: (id: string): Promise<void> => this.deleteSessionV2(id),
     },
   };
@@ -336,8 +349,11 @@ export class AgentDockClient {
     );
   }
 
-  private async cancelAllSessions(): Promise<void> {
-    await this.request<unknown>('/sessions/cancel-all', { method: 'POST' });
+  private async cancelAllSessions(options: SessionRequestOptions = {}): Promise<void> {
+    await this.request<unknown>('/sessions/cancel-all', {
+      method: 'POST',
+      signal: options.signal,
+    });
   }
 
   private async requestV2<T>(
@@ -403,7 +419,10 @@ export class AgentDockClient {
     );
   }
 
-  private async createSessionV2(input: CreateSessionV2Request): Promise<AgentSessionV2> {
+  private async createSessionV2(
+    input: CreateSessionV2Request,
+    options: SessionRequestOptions = {},
+  ): Promise<AgentSessionV2> {
     const parsedInput = validateInput(
       createSessionV2RequestSchema,
       input,
@@ -417,6 +436,7 @@ export class AgentDockClient {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(parsedInput),
+        signal: options.signal,
       },
       { expectedStatus: 201 },
     );
@@ -485,14 +505,15 @@ export class AgentDockClient {
       );
     }
 
-    yield* parseSseStream(res.body, {
-      schema: agentEventV2EnvelopeSchema,
+    for await (const event of parseSseStream(res.body, {
+      schema: agentEventOrStreamErrorV2Schema,
       label: 'AgentEvent v2',
       signal: options.signal,
       maxFrameBytes: MAX_V2_SSE_FRAME_BYTES,
       fatalUtf8: true,
       rejectUnterminatedFrame: true,
       validateEvent: (event, frame) => {
+        if (event.type === 'stream.error') return;
         if (event.sessionId !== sessionId) {
           throw new ValidationError(
             `received an AgentEvent v2 for session ${event.sessionId} on the ${sessionId} stream`,
@@ -513,16 +534,55 @@ export class AgentDockClient {
         }
         previousSequence = event.sequence;
       },
-    });
+    })) {
+      if (event.type === 'stream.error') {
+        const cursor =
+          event.lastSequence === undefined ? '' : ` after sequence ${event.lastSequence}`;
+        throw new DaemonError(`protocol-v2 event stream overflowed${cursor}`, 429);
+      }
+      yield event;
+    }
   }
 
-  private async cancelSessionV2(id: string): Promise<CancelSessionV2Response> {
+  private async sendSessionCommandV2(command: AgentCommandV2): Promise<CommandAcknowledgementV2> {
+    const parsedCommand = validateInput(agentCommandV2Schema, command, 'protocol-v2 agent command');
+    const acknowledgement = await this.requestV2(
+      `/v2/sessions/${encodeURIComponent(parsedCommand.sessionId)}/commands`,
+      commandAcknowledgementV2Schema,
+      'protocol-v2 command acknowledgement',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsedCommand),
+      },
+      {
+        expectedStatus: 202,
+        notFound: () => new SessionNotFoundError(parsedCommand.sessionId),
+      },
+    );
+
+    if (
+      acknowledgement.commandId !== parsedCommand.commandId ||
+      acknowledgement.sessionId !== parsedCommand.sessionId ||
+      acknowledgement.turnId !== parsedCommand.turnId
+    ) {
+      throw new ValidationError(
+        'daemon returned a protocol-v2 command acknowledgement that does not match the command',
+      );
+    }
+    return acknowledgement;
+  }
+
+  private async cancelSessionV2(
+    id: string,
+    options: SessionRequestOptions = {},
+  ): Promise<CancelSessionV2Response> {
     const sessionId = validateSessionIdV2(id);
     return this.requestV2(
       `/v2/sessions/${encodeURIComponent(sessionId)}/cancel`,
       cancelSessionV2ResponseSchema,
       'protocol-v2 cancellation acknowledgement',
-      { method: 'POST' },
+      { method: 'POST', signal: options.signal },
       { expectedStatus: 202, notFound: () => new SessionNotFoundError(sessionId) },
     );
   }

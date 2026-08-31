@@ -3,6 +3,7 @@ import { AGENT_DOCK_SUPPORTED_PROTOCOL_VERSIONS } from '@agent-dock/shared';
 import { AgentDockClient } from '../src/client.js';
 import {
   DaemonError,
+  DaemonUnavailableError,
   ProtocolMismatchError,
   ProviderUnavailableError,
   SessionNotFoundError,
@@ -15,6 +16,22 @@ const TOKEN = 'test-token';
 const SESSION_ID = '123e4567-e89b-42d3-a456-426614174000';
 const EXECUTION_ID = '123e4567-e89b-42d3-a456-426614174001';
 const OTHER_SESSION_ID = '123e4567-e89b-42d3-a456-426614174002';
+const TURN_ID = '123e4567-e89b-42d3-a456-426614174003';
+const COMMAND_ID = '123e4567-e89b-42d3-a456-426614174004';
+
+const COMMAND_V2 = {
+  type: 'session.interrupt',
+  commandId: COMMAND_ID,
+  sessionId: SESSION_ID,
+  turnId: TURN_ID,
+} as const;
+
+const COMMAND_ACKNOWLEDGEMENT_V2 = {
+  status: 'accepted',
+  commandId: COMMAND_ID,
+  sessionId: SESSION_ID,
+  turnId: TURN_ID,
+} as const;
 
 function extensionSummaryEvent(sequence: number, sessionId = SESSION_ID) {
   return {
@@ -187,16 +204,22 @@ describe('AgentDockClient.v2 response validation', () => {
       throw new Error(`unexpected URL: ${url}`);
     });
     const client = makeClient(fetchImpl);
+    const requestController = new AbortController();
 
     await expect(
-      client.v2.sessions.create({
-        provider: 'claude',
-        cwd: 'C:\\repo',
-        prompt: 'Inspect this repository',
-      }),
+      client.v2.sessions.create(
+        {
+          provider: 'claude',
+          cwd: 'C:\\repo',
+          prompt: 'Inspect this repository',
+        },
+        { signal: requestController.signal },
+      ),
     ).resolves.toEqual(SESSION_V2);
     await expect(client.v2.sessions.get(SESSION_ID)).resolves.toEqual(SESSION_V2);
-    await expect(client.v2.sessions.cancel(SESSION_ID)).resolves.toEqual({
+    await expect(
+      client.v2.sessions.cancel(SESSION_ID, { signal: requestController.signal }),
+    ).resolves.toEqual({
       status: 'cancelling',
       sessionId: SESSION_ID,
     });
@@ -210,7 +233,81 @@ describe('AgentDockClient.v2 response validation', () => {
     expect(createCall?.[1]).toMatchObject({
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+      signal: requestController.signal,
     });
+    const cancelCall = fetchImpl.mock.calls.find(([url]) =>
+      String(url).endsWith(`/v2/sessions/${SESSION_ID}/cancel`),
+    );
+    expect(cancelCall?.[1]).toMatchObject({ signal: requestController.signal });
+  });
+
+  it('sends a validated command on the authenticated versioned route', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      if (url.endsWith(`/v2/sessions/${SESSION_ID}/commands`)) {
+        return jsonResponse(202, COMMAND_ACKNOWLEDGEMENT_V2);
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    await expect(makeClient(fetchImpl).v2.sessions.send(COMMAND_V2)).resolves.toEqual(
+      COMMAND_ACKNOWLEDGEMENT_V2,
+    );
+
+    const commandCall = fetchImpl.mock.calls.find(([url]) =>
+      String(url).endsWith(`/v2/sessions/${SESSION_ID}/commands`),
+    );
+    expect(commandCall?.[1]).toMatchObject({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(JSON.parse(String((commandCall?.[1] as RequestInit).body))).toEqual(COMMAND_V2);
+  });
+
+  it('rejects an invalid command locally before compatibility or command requests', async () => {
+    const fetchImpl = vi.fn();
+
+    await expect(
+      makeClient(fetchImpl as unknown as typeof fetch).v2.sessions.send({
+        ...COMMAND_V2,
+        commandId: 'not-a-uuid',
+      } as never),
+    ).rejects.toBeInstanceOf(ValidationError);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      name: 'malformed',
+      acknowledgement: { status: 'accepted', commandId: COMMAND_ID },
+    },
+    {
+      name: 'wrong command id',
+      acknowledgement: {
+        ...COMMAND_ACKNOWLEDGEMENT_V2,
+        commandId: '123e4567-e89b-42d3-a456-426614174005',
+      },
+    },
+    {
+      name: 'wrong session id',
+      acknowledgement: { ...COMMAND_ACKNOWLEDGEMENT_V2, sessionId: OTHER_SESSION_ID },
+    },
+    {
+      name: 'wrong turn id',
+      acknowledgement: {
+        ...COMMAND_ACKNOWLEDGEMENT_V2,
+        turnId: '123e4567-e89b-42d3-a456-426614174006',
+      },
+    },
+  ])('rejects a $name command acknowledgement', async ({ acknowledgement }) => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      return jsonResponse(202, acknowledgement);
+    });
+
+    await expect(makeClient(fetchImpl).v2.sessions.send(COMMAND_V2)).rejects.toBeInstanceOf(
+      ValidationError,
+    );
   });
 
   it('rejects a malformed provider-list wrapper with ValidationError', async () => {
@@ -413,6 +510,41 @@ describe('AgentDockClient.v2 response validation', () => {
     }).rejects.toMatchObject({ message: expect.stringContaining('unfinished') });
   });
 
+  it('ends cleanly when abort resolves a read with a partial frame buffered', async () => {
+    const controller = new AbortController();
+    let reads = 0;
+    const body = {
+      getReader: () => ({
+        read: async () => {
+          reads += 1;
+          if (reads === 1) {
+            return {
+              done: false,
+              value: new TextEncoder().encode('id: 0\ndata: {"type":"extension.summary"}'),
+            };
+          }
+          controller.abort();
+          return { done: true, value: undefined };
+        },
+        cancel: async () => undefined,
+      }),
+    } as unknown as ReadableStream<Uint8Array>;
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      return { ok: true, status: 200, headers: new Headers(), body } as Response;
+    });
+
+    await expect(
+      (async () => {
+        for await (const _event of makeClient(fetchImpl).v2.sessions.events(SESSION_ID, {
+          signal: controller.signal,
+        })) {
+          // no-op
+        }
+      })(),
+    ).resolves.toBeUndefined();
+  });
+
   it('rejects invalid and truncated UTF-8 in v2 streams', async () => {
     const responses = [
       byteSseResponse([
@@ -479,6 +611,59 @@ describe('AgentDockClient.v2 response validation', () => {
     );
     expect((streamCall?.[1] as RequestInit).headers).toMatchObject({ 'Last-Event-ID': '3' });
   });
+
+  it('surfaces a bounded subscriber overflow control frame', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      return sseResponse([
+        'event: stream.error\ndata: {"type":"stream.error","code":"stream_overflow","lastSequence":7}\n\n',
+      ]);
+    });
+
+    const failure = await (async () => {
+      for await (const _event of makeClient(fetchImpl).v2.sessions.events(SESSION_ID)) {
+        // no-op
+      }
+    })().catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(DaemonError);
+    expect(failure).toMatchObject({ status: 429 });
+    expect(failure).toHaveProperty('message', expect.stringContaining('after sequence 7'));
+  });
+
+  it('maps a mid-stream reader failure to a retryable transport error', async () => {
+    const event = extensionSummaryEvent(0);
+    let reads = 0;
+    const body = {
+      getReader: () => ({
+        read: async () => {
+          reads += 1;
+          if (reads === 1) {
+            return {
+              done: false,
+              value: new TextEncoder().encode(v2EventFrame(event)),
+            };
+          }
+          throw new TypeError('network connection reset');
+        },
+        cancel: async () => undefined,
+      }),
+    } as unknown as ReadableStream<Uint8Array>;
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      return { ok: true, status: 200, headers: new Headers(), body } as Response;
+    });
+    const received: unknown[] = [];
+
+    const failure = await (async () => {
+      for await (const item of makeClient(fetchImpl).v2.sessions.events(SESSION_ID)) {
+        received.push(item);
+      }
+    })().catch((error: unknown) => error);
+
+    expect(received).toEqual([event]);
+    expect(failure).toBeInstanceOf(DaemonUnavailableError);
+  });
 });
 
 describe('AgentDockClient.v2 error mapping', () => {
@@ -512,6 +697,30 @@ describe('AgentDockClient.v2 error mapping', () => {
 
     const failure = await makeClient(fetchImpl)
       .v2.providers.list()
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(DaemonError);
+    expect(failure).toMatchObject({ status });
+  });
+
+  it('maps a missing command session to SessionNotFoundError', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      return jsonResponse(404, { error: 'session not found' });
+    });
+
+    await expect(makeClient(fetchImpl).v2.sessions.send(COMMAND_V2)).rejects.toBeInstanceOf(
+      SessionNotFoundError,
+    );
+  });
+
+  it.each([409, 413, 429])('preserves command dispatch status %i', async (status) => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      return jsonResponse(status, { error: 'command rejected', code: 'command_rejected' });
+    });
+
+    const failure = await makeClient(fetchImpl)
+      .v2.sessions.send(COMMAND_V2)
       .catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(DaemonError);
     expect(failure).toMatchObject({ status });

@@ -375,6 +375,36 @@ export const cancelSessionV2ResponseSchema = z
   })
   .strict();
 
+export interface CommandAcknowledgementV2 {
+  status: 'accepted';
+  commandId: CommandId;
+  sessionId: SessionId;
+  turnId: TurnId;
+}
+
+export const commandAcknowledgementV2Schema = z
+  .object({
+    status: z.literal('accepted'),
+    commandId: commandIdSchema,
+    sessionId: sessionIdSchema,
+    turnId: turnIdSchema,
+  })
+  .strict();
+
+export interface StreamErrorV2 {
+  type: 'stream.error';
+  code: 'stream_overflow';
+  lastSequence?: number;
+}
+
+export const streamErrorV2Schema = z
+  .object({
+    type: z.literal('stream.error'),
+    code: z.literal('stream_overflow'),
+    lastSequence: z.number().int().finite().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  })
+  .strict();
+
 export const questionOptionV2Schema = z
   .object({
     id: z.string().uuid(),
@@ -638,6 +668,12 @@ export const agentEventV2EnvelopeSchema = agentEventV2EnvelopeUnionSchema.superR
   },
 );
 
+/** Wire items accepted on a v2 SSE stream. Stream errors are connection-local control frames. */
+export const agentEventOrStreamErrorV2Schema = z.union([
+  agentEventV2EnvelopeSchema,
+  streamErrorV2Schema,
+]);
+
 export interface AgentEventV2Meta {
   sessionId: SessionId;
   executionId: ExecutionId;
@@ -647,6 +683,7 @@ export interface AgentEventV2Meta {
 }
 
 export type AgentEventV2Envelope = z.infer<typeof agentEventV2EnvelopeSchema>;
+export type AgentEventOrStreamErrorV2 = z.infer<typeof agentEventOrStreamErrorV2Schema>;
 type WithoutEventMeta<T> = T extends AgentEventV2Meta ? Omit<T, keyof AgentEventV2Meta> : never;
 export type AgentEventV2 = WithoutEventMeta<AgentEventV2Envelope>;
 

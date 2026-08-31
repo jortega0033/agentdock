@@ -81,12 +81,24 @@ const sessionV2 = await client.v2.sessions.create({
 
 for await (const event of client.v2.sessions.events(sessionV2.id)) {
   console.log(event); // validated AgentEventV2Envelope
+
+  if (event.type === 'approval.requested') {
+    await client.v2.sessions.send({
+      type: 'approval.respond',
+      commandId: crypto.randomUUID(),
+      sessionId: event.sessionId,
+      turnId: event.turnId,
+      requestId: event.requestId,
+      decision: 'deny',
+    });
+  }
 }
 ```
 
-`client.v2.sessions` also exposes `get`, `cancel`, and `delete`. Command dispatch intentionally
-isn't exposed until the bidirectional supervisor implements it. See
-[protocol-v2.md](protocol-v2.md) for the complete contract.
+`client.v2.sessions` also exposes `get`, `send`, `cancel`, and `delete`. `send` validates the
+`AgentCommandV2` input, requires a `202` response, validates the strict
+`CommandAcknowledgementV2`, and rejects an acknowledgement whose command, session, or turn ID does
+not match the request. See [protocol-v2.md](protocol-v2.md) for the complete contract.
 
 Errors are typed, so a caller can branch on `instanceof` instead of parsing strings:
 
@@ -106,16 +118,18 @@ try {
 
 Full API: `providers.list()`, `providers.get(id)`, `sessions.create(input)`, `sessions.get(id)`,
 `sessions.events(id, options?)`, `sessions.cancel(id)`, `sessions.delete(id)`,
-`sessions.cancelAll()`, and `health()`. `SessionEventsOptions` accepts an `AbortSignal` (to stop
+`sessions.cancelAll(options?)`, and `health()`. `SessionEventsOptions` accepts an `AbortSignal` (to stop
 consuming early) and a `lastEventId` (to resume a stream instead of replaying from the start; see
-[protocol-v1.md](protocol-v1.md#ordering-guarantees)). `sessions.cancelAll()` exists specifically
+[protocol-v1.md](protocol-v1.md#ordering-guarantees)). `SessionRequestOptions` accepts an
+`AbortSignal`; v1 `cancelAll` and v2 `create`/`cancel` accept it so shutdown callers can bound HTTP
+work. `sessions.cancelAll()` exists specifically
 for a desktop shutdown path (Electron calls it before force-killing the daemon on Windows, where a
 process signal alone can't reach the daemon's own graceful-shutdown handler; see
 [daemon.md#shutdown](daemon.md#shutdown)); most callers only ever need `sessions.cancel(id)`.
 
-The v2 API is `v2.providers.list()`, `v2.providers.get(id)`, `v2.sessions.create(input)`,
-`v2.sessions.get(id)`, `v2.sessions.events(id, options?)`, `v2.sessions.cancel(id)`, and
-`v2.sessions.delete(id)`.
+The v2 API is `v2.providers.list()`, `v2.providers.get(id)`, `v2.sessions.create(input, options?)`,
+`v2.sessions.get(id)`, `v2.sessions.events(id, options?)`, `v2.sessions.send(command)`,
+`v2.sessions.cancel(id, options?)`, and `v2.sessions.delete(id)`.
 
 ## Design decisions
 
@@ -142,14 +156,19 @@ Worth knowing if you're extending this package:
 - **Every response is validated against the shared Zod schemas** (`@agent-dock/shared`) before it
   reaches the caller: a daemon-side bug that produces a malformed response surfaces as
   `ValidationError`, not a runtime crash somewhere downstream in application code.
+- **A bounded v2 SSE overflow is explicit.** The daemon ends that subscriber with a validated
+  `stream.error` control frame. The generator throws `DaemonError` with status `429` and includes
+  the last handed-off sequence in its message when available; the caller decides whether to resume.
 
 ## Where it's used in this repo
 
 Electron's main process (`apps/desktop/electron/main.ts`) owns exactly one `AgentDockClient`
 instance, constructed once the daemon's discovery file is readable. It's the only thing in the
-desktop app that imports `@agent-dock/client`; the renderer only ever reaches it through seven IPC
-handlers in `main.ts`, and the preload bridge (`electron/preload.ts`) exposes those seven functions
-and nothing shaped like a generic request passthrough. See
+desktop app that imports `@agent-dock/client`; the renderer only ever reaches it through eleven
+narrow preload functions backed by fixed IPC channels/handlers, with nothing shaped like a generic
+request passthrough. Four of those functions provide the v2 interactive create, command, cancel,
+and validated event-stream bridge. The current React UI does not use that bridge yet; rich timeline
+and multi-session UI work remains outside issue #7. See
 [SECURITY.md](../SECURITY.md#renderer-never-talks-to-the-daemon-directly) for the full boundary,
 and [electron.md](electron.md) for how the main process wires this client to IPC.
 

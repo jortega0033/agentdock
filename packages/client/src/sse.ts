@@ -1,4 +1,4 @@
-import { ValidationError } from './errors.js';
+import { DaemonUnavailableError, ValidationError } from './errors.js';
 
 export interface RuntimeSchema<T> {
   safeParse(
@@ -54,7 +54,19 @@ export async function* parseSseStream<T>(
     while (true) {
       if (options.signal?.aborted) return;
 
-      const { done, value } = await reader.read();
+      const read = await (async () => {
+        try {
+          return await reader.read();
+        } catch (error) {
+          if (options.signal?.aborted) return { done: true, value: undefined } as const;
+          throw new DaemonUnavailableError(
+            `${options.label} event stream disconnected while reading: ${errorMessage(error).slice(0, 4 * 1024)}`,
+            { cause: error },
+          );
+        }
+      })();
+      if (options.signal?.aborted) return;
+      const { done, value } = read;
       if (done) {
         if (buffer.byteLength > 0) {
           if (options.fatalUtf8) decodeFrame(buffer);

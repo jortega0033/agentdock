@@ -3,14 +3,16 @@ import {
   agentEventV2EnvelopeSchema,
   agentSessionV2Schema,
   utf8ByteLength,
+  type AgentCommandV2,
   type AgentEventEnvelope,
   type AgentEventV2Envelope,
   type AgentSession,
   type AgentSessionV2,
   type CapabilitySelection,
   type CreateSessionV2Request,
+  type ProviderTransportV2,
 } from '@agent-dock/shared';
-import type { SessionManager } from './session-manager.js';
+import type { DispatchResult, SessionManager } from './session-manager.js';
 
 interface ToolCorrelation {
   toolCallId: string;
@@ -33,6 +35,9 @@ interface V2SessionMetadata {
   nextSequence: number;
   sourceUnsubscribe?: () => void;
   nativeTools: Map<string, ToolCorrelation>;
+  interactive: boolean;
+  status: AgentSessionV2['status'];
+  pendingInteractions: Map<string, { kind: 'approval' | 'question'; turnId: string }>;
 }
 
 const ALL_EFFECTS = [
@@ -87,21 +92,44 @@ export class V2SessionFacade {
 
   constructor(private readonly sessions: SessionManager) {}
 
-  create(input: CreateSessionV2Request, selection: CapabilitySelection): AgentSessionV2 {
+  async create(
+    input: CreateSessionV2Request,
+    selection: CapabilitySelection,
+    transport: ProviderTransportV2,
+    interactive: boolean,
+    signal?: AbortSignal,
+  ): Promise<AgentSessionV2> {
     this.prune();
-    const session = this.sessions.create(input.provider, input.cwd, input.prompt, undefined, 2);
+    const executionId = randomUUID();
+    const turnId = randomUUID();
+    const session = interactive
+      ? await this.sessions.createInteractive(
+          input.provider,
+          input.cwd,
+          input.prompt,
+          selection,
+          transport,
+          executionId,
+          turnId,
+          signal,
+        )
+      : this.sessions.create(input.provider, input.cwd, input.prompt, undefined, 2);
     const metadata: V2SessionMetadata = {
       selection,
-      executionId: randomUUID(),
-      turnId: randomUUID(),
+      executionId,
+      turnId,
       events: new Map(),
       listeners: new Set(),
       replayBytes: 0,
       nextSequence: 0,
       nativeTools: new Map(),
+      interactive,
+      status: v2Status(session.status),
+      pendingInteractions: new Map(),
     };
     this.metadata.set(session.id, metadata);
-    this.attachSource(session.id, metadata);
+    if (interactive) this.attachInteractiveSource(session.id, metadata);
+    else this.attachSource(session.id, metadata);
     return this.project(session) as AgentSessionV2;
   }
 
@@ -117,8 +145,36 @@ export class V2SessionFacade {
   }
 
   isActive(id: string): boolean {
-    const session = this.sessions.get(id, 2);
-    return session?.status === 'starting' || session?.status === 'running';
+    const status = this.metadata.get(id)?.status;
+    return status === 'starting' || status === 'active' || status === 'idle';
+  }
+
+  dispatch(command: AgentCommandV2): Promise<DispatchResult> {
+    const metadata = this.metadata.get(command.sessionId);
+    if (!metadata) {
+      return Promise.resolve({
+        ok: false,
+        code: 'session_not_found',
+        message: 'session not found',
+      });
+    }
+    const capability = this.commandCapability(command);
+    if (!this.hasCapability(command.sessionId, capability)) {
+      return this.sessions.dispatch(command.sessionId, command, 'session_not_capable');
+    }
+    if (!this.commandMatchesSelection(metadata, capability, command)) {
+      return this.sessions.dispatch(command.sessionId, command, 'command_out_of_bounds');
+    }
+    if (!this.commandMatchesState(metadata, command)) {
+      return this.sessions.dispatch(
+        command.sessionId,
+        command,
+        command.type === 'approval.respond' || command.type === 'question.respond'
+          ? 'stale_interaction'
+          : 'session_terminal',
+      );
+    }
+    return this.sessions.dispatch(command.sessionId, command);
   }
 
   replayWindow(id: string): { earliestSequence: number; nextSequence: number } | undefined {
@@ -169,13 +225,11 @@ export class V2SessionFacade {
       provider: session.provider,
       transport: metadata.selection.transport,
       cwd: session.cwd,
-      status: v2Status(session.status),
+      status: metadata.status,
       selection: metadata.selection,
       executionId: metadata.executionId,
       currentTurnId: metadata.turnId,
-      // The legacy runner cannot distinguish pre-spawn failure from accepted work. Unknown is the
-      // only truthful, fail-closed value until #7 adds an explicit accepted-work boundary.
-      acceptedWork: 'unknown',
+      acceptedWork: metadata.interactive ? this.sessions.acceptedWork(session.id) : 'unknown',
       startedAt: session.startedAt,
       ...(session.completedAt === undefined ? {} : { completedAt: session.completedAt }),
       ...(session.error === undefined ? {} : { error: session.error }),
@@ -192,8 +246,7 @@ export class V2SessionFacade {
       0,
       (_sourceSequence, sourceEvent) => {
         for (const event of this.convert(id, metadata, sourceEvent)) {
-          this.record(metadata, event);
-          for (const listener of [...metadata.listeners]) listener(event.sequence, event);
+          this.publish(metadata, event);
           if (isTerminal(event)) {
             ended = true;
             metadata.sourceUnsubscribe?.();
@@ -211,6 +264,55 @@ export class V2SessionFacade {
     }
   }
 
+  private attachInteractiveSource(id: string, metadata: V2SessionMetadata): void {
+    let ended = false;
+    let unsubscribe: (() => void) | undefined;
+    // eslint-disable-next-line prefer-const
+    unsubscribe = this.sessions.subscribeInteractive(id, 0, (sourceIndex, sourceEvent) => {
+      const session = this.sessions.get(id, 2);
+      if (!session) return;
+      const event = agentEventV2EnvelopeSchema.parse({
+        ...(sourceEvent.type === 'session.started'
+          ? {
+              ...sourceEvent,
+              provider: session.provider,
+              transport: metadata.selection.transport,
+              selection: metadata.selection,
+            }
+          : sourceEvent),
+        sessionId: id,
+        executionId: metadata.executionId,
+        // SessionManager indices remain absolute across its own sliding retention window. If a
+        // provider burst raced creation, preserve that gap instead of renumbering retained events.
+        sequence: sourceIndex,
+        timestamp: new Date().toISOString(),
+      });
+      this.publish(metadata, event);
+      if (isTerminal(event)) {
+        ended = true;
+        metadata.sourceUnsubscribe?.();
+        metadata.sourceUnsubscribe = undefined;
+      }
+    });
+    if (!unsubscribe) throw new Error(`missing interactive v2 runtime for session: ${id}`);
+    metadata.sourceUnsubscribe = unsubscribe;
+    if (ended) {
+      unsubscribe();
+      metadata.sourceUnsubscribe = undefined;
+    }
+  }
+
+  private publish(metadata: V2SessionMetadata, event: AgentEventV2Envelope): void {
+    this.record(metadata, event);
+    for (const listener of [...metadata.listeners]) {
+      try {
+        listener(event.sequence, event);
+      } catch {
+        // A subscriber owns only its connection. It cannot fail provider consumption or peers.
+      }
+    }
+  }
+
   private record(metadata: V2SessionMetadata, event: AgentEventV2Envelope): void {
     const bytes = utf8ByteLength(JSON.stringify(event));
     while (
@@ -225,6 +327,116 @@ export class V2SessionFacade {
     metadata.events.set(event.sequence, { event, bytes });
     metadata.replayBytes += bytes;
     metadata.nextSequence = event.sequence + 1;
+    this.applyEventState(metadata, event);
+  }
+
+  private applyEventState(metadata: V2SessionMetadata, event: AgentEventV2Envelope): void {
+    switch (event.type) {
+      case 'session.status':
+        metadata.status = event.status;
+        break;
+      case 'session.completed':
+        metadata.status = 'completed';
+        break;
+      case 'session.failed':
+        metadata.status = 'failed';
+        break;
+      case 'session.cancelled':
+        metadata.status = 'cancelled';
+        break;
+      case 'session.interrupted':
+        metadata.status = 'interrupted';
+        break;
+      case 'turn.started':
+        metadata.turnId = event.turnId;
+        metadata.status = 'active';
+        break;
+      case 'turn.completed':
+      case 'turn.failed':
+      case 'turn.interrupted':
+        metadata.status = 'idle';
+        break;
+      case 'approval.requested':
+        metadata.pendingInteractions.set(event.requestId, {
+          kind: 'approval',
+          turnId: event.turnId,
+        });
+        break;
+      case 'question.requested':
+        metadata.pendingInteractions.set(event.requestId, {
+          kind: 'question',
+          turnId: event.turnId,
+        });
+        break;
+      case 'approval.resolved':
+      case 'question.resolved':
+      case 'question.cancelled':
+        metadata.pendingInteractions.delete(event.requestId);
+        break;
+      default:
+        break;
+    }
+  }
+
+  private commandCapability(command: AgentCommandV2): string {
+    switch (command.type) {
+      case 'input.follow_up':
+        return 'session.input.follow_up';
+      case 'input.steer':
+        return 'session.input.steer';
+      case 'session.interrupt':
+        return 'session.interrupt';
+      case 'approval.respond':
+        return 'interaction.approval';
+      case 'question.respond':
+        return 'interaction.question';
+    }
+  }
+
+  private commandMatchesSelection(
+    metadata: V2SessionMetadata,
+    capabilityId: string,
+    command: AgentCommandV2,
+  ): boolean {
+    const constraints = metadata.selection.enabled.find(
+      (entry) => entry.id === capabilityId,
+    )?.constraints;
+    if (!constraints) return false;
+    if (command.type === 'input.follow_up' || command.type === 'input.steer') {
+      if (constraints.kind !== 'text_input') return false;
+      let characters = 0;
+      for (const block of command.content) {
+        if (block.type === 'text') characters += block.text.length;
+        else if (block.type === 'image' || block.type === 'file') {
+          if (!constraints.attachmentKinds.includes(block.type)) return false;
+        } else characters += JSON.stringify(block.data).length;
+      }
+      return characters <= constraints.maxCharacters;
+    }
+    if (command.type === 'approval.respond' || command.type === 'question.respond') {
+      return (
+        constraints.kind === 'interaction' &&
+        utf8ByteLength(JSON.stringify(command)) <= constraints.maxPayloadBytes
+      );
+    }
+    return constraints.kind === 'acknowledgement';
+  }
+
+  private commandMatchesState(metadata: V2SessionMetadata, command: AgentCommandV2): boolean {
+    if (['completed', 'failed', 'cancelled', 'interrupted'].includes(metadata.status)) return false;
+    switch (command.type) {
+      case 'input.follow_up':
+        return metadata.status === 'idle';
+      case 'input.steer':
+      case 'session.interrupt':
+        return metadata.status === 'active' && metadata.turnId === command.turnId;
+      case 'approval.respond':
+      case 'question.respond':
+        // The supervisor owns the atomic interaction tuple. Let an identical post-resolution
+        // retry reach SessionManager's command ledger; a new stale id reaches the supervisor and
+        // deterministically returns stale_interaction without provider redispatch.
+        return true;
+    }
   }
 
   private convert(

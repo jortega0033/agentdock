@@ -5,11 +5,15 @@ import {
   providersV2ResponseSchema,
 } from '@agent-dock/shared';
 import type { ProviderRegistry } from '@agent-dock/agent-runtime';
-import { toProviderStatusV2 } from '../v2-legacy-provider.js';
+import { toProviderStatusV2 } from '../provider-v2.js';
 
 export function registerV2ProviderRoutes(app: FastifyInstance, registry: ProviderRegistry): void {
   app.get('/v2/providers', async () => {
-    const providers = (await registry.detectAll()).map(toProviderStatusV2);
+    const providers = await Promise.all(
+      registry
+        .list()
+        .map(async (provider) => toProviderStatusV2(provider, await provider.detect())),
+    );
     return providersV2ResponseSchema.parse({ providers });
   });
 
@@ -26,6 +30,6 @@ export function registerV2ProviderRoutes(app: FastifyInstance, registry: Provide
       return;
     }
 
-    reply.send(providerStatusV2Schema.parse(toProviderStatusV2(await provider.detect())));
+    reply.send(providerStatusV2Schema.parse(toProviderStatusV2(provider, await provider.detect())));
   });
 }

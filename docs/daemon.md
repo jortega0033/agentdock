@@ -97,16 +97,19 @@ Wire shapes (route bodies, the `AgentEvent`/`AgentEventEnvelope` format) are doc
 [protocol-v1.md](protocol-v1.md), not duplicated here.
 
 Protocol v2 is additive: authenticated `/v2/providers` and `/v2/sessions` routes expose scoped
-capability records, negotiate before starting provider work, and stream validated v2 envelopes.
-The unversioned routes above remain the v1 compatibility and rollback path. The complete v2 route,
-status, and wire-shape tables live in [protocol-v2.md](protocol-v2.md).
+capability records, negotiate before starting provider work, stream validated v2 envelopes, and
+dispatch accepted interactive commands through
+`POST /v2/sessions/:sessionId/commands`. The unversioned routes above remain the v1 compatibility
+and rollback path. The complete v2 route, status, and wire-shape tables live in
+[protocol-v2.md](protocol-v2.md).
 
 ## Session lifecycle: SessionManager, SessionStore
 
-`SessionManager` (`apps/daemon/src/session-manager.ts`) orchestrates everything: creates a session
-through the provider registry, consumes its normalized `AgentEvent` stream, and keeps the
-`AgentSession` record's `status` up to date as terminal events arrive
-(`starting` → `running` → one of `completed` / `failed` / `cancelled`).
+`SessionManager` (`apps/daemon/src/session-manager.ts`) orchestrates both legacy and interactive
+runtime handles: it creates sessions through the provider registry, consumes normalized event
+streams, and keeps the `AgentSession` record's status current as terminal events arrive. The v2
+facade owns the frozen capability selection, execution/turn IDs, normalized v2 replay window, and
+v2 lifecycle projection.
 
 The `AgentSession` record itself lives behind a `SessionStore` interface
 (`apps/daemon/src/session-store.ts`):
@@ -128,11 +131,30 @@ require implementing this interface, not touching `SessionManager`'s lifecycle l
 interface would likely need to become `async` at that point, a deliberately larger change left for
 when it's actually needed.
 
-The store owns only the `AgentSession` record. A session's live process handle (an
-`AsyncGenerator` plus a `cancel()` closure, not serializable at all) and its buffered event
-history are kept as separate, non-persistable runtime state inside `SessionManager`, specifically
-so `SessionStore` never grows into an accidental event-history database with its own
-schema-design questions.
+The store owns only the `AgentSession` record. A session's live legacy or interactive provider
+handle and its buffered event history are kept as separate, non-persistable runtime state inside
+`SessionManager`, specifically so `SessionStore` never grows into an accidental event-history
+database with its own schema-design questions.
+
+For an interactive v2 transport, creation resolves only after the provider startup handshake. The
+common supervisor enforces 1 MiB provider-frame and normalized-event limits, a 5,000-event / 16 MiB
+provider queue, a 200 KiB stderr diagnostic cap, at most 32 pending interactions, 30-second
+startup/command acceptance, five-minute interaction deadlines, a five-second graceful-close bound,
+mandatory process-tree hard-stop/reap fallback, and exactly one terminal event. The production
+Claude and Codex adapters do not expose this transport yet; only `FakeProvider` drives it in
+deterministic tests while native adapters remain gated by issue #8.
+
+The manager registers each startup before awaiting that handshake. Client disconnect, direct
+cancellation, cancel-all, and daemon shutdown abort and await pending starts; shutdown also closes
+the admission gate before taking its cancellation snapshot. A provider must honor the startup
+abort signal by reaping its host before rejecting.
+
+Interactive command dispatch is serialized per session. A canonical command ID/payload retry
+shares the original result; conflicting reuse returns `409 command_id_conflict`. Admission is
+capped at 64 pending commands or 1 MiB of pending command JSON and returns
+`429 session_backpressure` when full. The settled deduplication ledger retains at most 1,024
+entries. `session.interrupt` invokes the transport's interrupt operation and keeps the session
+available when supported; it is not cancellation or close.
 
 ## Event history and replay
 
@@ -156,6 +178,14 @@ stops growing, rather than growing memory unbounded. This is regression-tested d
 `apps/daemon/test/session-manager.test.ts` (drives a session past the cap and asserts the terminal
 event still arrives live). See [protocol-v1.md#ordering-guarantees](protocol-v1.md#ordering-guarantees)
 for the full ordering contract this upholds.
+
+Protocol v2 keeps a separate normalized replay window capped at 5,000 events or 16 MiB, evicting
+oldest frames first. A resume cursor outside `[earliestSequence, nextSequence]` returns
+`409 replay_gap`. Each connected v2 subscriber also gets an independent 256-event / 4 MiB write
+queue. Backpressure on one connection cannot stall the provider or another subscriber. A terminal
+event closes only after queued frames drain; subscriber overflow drops that connection's queue and
+ends it with `stream.error` / `stream_overflow`, including the last sequence handed to the socket
+when available.
 
 ## Session retention
 
@@ -192,7 +222,8 @@ the record, so deleting a live session doesn't orphan its process either.
 ## Shutdown
 
 On `SIGINT`/`SIGTERM`, the daemon (`apps/daemon/src/index.ts`): cancels every in-flight session and
-waits (bounded, 5 seconds by default) for their processes to actually exit
+waits (bounded, 16 seconds by default, covering interactive graceful-close and force-reap phases)
+for their processes to actually exit
 (`SessionManager.cancelAll()`), closes the Fastify server, removes the discovery file, then exits.
 This is idempotent: a second signal while shutdown is already in progress is a no-op. The bounded
 wait means shutdown won't hang forever if a child ignores termination, but also won't return
@@ -205,9 +236,9 @@ deliver a real `SIGTERM` the daemon's own shutdown handler can catch, so when El
 daemon child process directly (e.g. on app quit), the daemon's own `cancelAll()` above never runs
 at all on that platform. Electron compensates by calling `POST /sessions/cancel-all` over HTTP
 _before_ killing the daemon child process (HTTP is a request Windows can deliver reliably, unlike
-a signal to the daemon's own process), so every in-flight v1 session is confirmed cancelled before
-the daemon process is force-killed, not just the one session the desktop UI happens to be tracking. See
-`killDaemon()` in `apps/desktop/electron/main.ts` and
+a signal to the daemon's own process), and separately cancels each tracked interactive v2 session.
+This covers every session the desktop main process started, not just the one the current UI happens
+to be displaying. See `killDaemon()` in `apps/desktop/electron/main.ts` and
 [architecture.md#known-limitations](architecture.md#known-limitations) for what this does and
 doesn't cover on POSIX. The daemon process itself has always been confirmed to exit alongside the
 app in testing; what can be left behind is a stale discovery file, which is harmless, see

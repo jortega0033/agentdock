@@ -27,6 +27,8 @@ export function installAssetCaptureBridge(): void {
   if (params.get('theme') === 'dark') document.documentElement.dataset.theme = 'dark';
 
   let eventCallback: ((sessionId: string, event: AgentEvent) => void) | undefined;
+  const interactiveSessionId = '123e4567-e89b-42d3-a456-426614174000';
+  const interactiveExecutionId = '123e4567-e89b-42d3-a456-426614174001';
   const session: AgentSession = {
     id: 'session-docs-001',
     provider: 'claude',
@@ -86,6 +88,33 @@ export function installAssetCaptureBridge(): void {
         eventCallback = undefined;
       };
     },
+    createInteractiveSession: async (input) => ({
+      id: interactiveSessionId,
+      provider: input.provider,
+      transport: 'asset-capture-interactive',
+      cwd: input.cwd,
+      status: 'starting',
+      selection: {
+        transport: 'asset-capture-interactive',
+        enabled: [],
+        unavailableOptional: [],
+        possibleEffects: [],
+        effectsComplete: true,
+      },
+      executionId: interactiveExecutionId,
+      acceptedWork: 'not_accepted',
+      startedAt: '2026-08-30T12:00:00.000Z',
+      earliestSequence: 0,
+    }),
+    sendSessionCommand: async (command) => ({
+      status: 'accepted',
+      commandId: command.commandId,
+      sessionId: command.sessionId,
+      turnId: command.turnId,
+    }),
+    cancelInteractiveSession: async (sessionId) => ({ status: 'cancelling', sessionId }),
+    onInteractiveSessionEvent: () => () => {},
+    onInteractiveSessionStreamNotice: () => () => {},
     selectDirectory: async () => 'C:\\workspace\\agent-dock',
   };
 

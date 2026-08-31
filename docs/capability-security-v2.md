@@ -1,14 +1,17 @@
 # Capability and security model for protocol v2
 
-- **Status:** accepted design gate, implementation pending
+- **Status:** partially implemented. The v2 contract, negotiation, routes, client API, legacy bridge,
+  interactive supervisor, and provider fixtures exist. Trust, isolation, durable audit/persistence,
+  native rich provider transports, and renderer work remain planned.
 - **Decision date:** 2026-08-30
-- **Applies to:** the planned `/v2` protocol and rich Claude/Codex transports
+- **Applies to:** the current `/v2` protocol and planned rich Claude/Codex transports
 - **Does not change:** the currently shipped protocol v1 behavior
 
-This document fixes the capability vocabulary and security decisions that every protocol v2,
-provider, persistence, and desktop ticket must implement. It is a contract for future work, not a
-claim that the v2 features exist today. [Protocol v1](protocol-v1.md) remains the authoritative
-description of the current application.
+This document fixes the capability vocabulary and security decisions for protocol v2, provider,
+persistence, and desktop work. Its capability schemas and negotiation rules are implemented. Its
+workspace trust, isolation, durable audit, retention, and rich-provider requirements remain future
+work. [Protocol v1](protocol-v1.md) remains the authoritative description of the unversioned v1
+application.
 
 ## Decision summary
 
@@ -36,20 +39,20 @@ description of the current application.
 
 ## Compatibility boundary
 
-| Concern            | Protocol v1, current                                                  | Protocol v2, planned                                                                            |
+| Concern            | Protocol v1, current                                                  | Protocol v2, current implementation and planned controls                                       |
 | ------------------ | --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| Provider transport | One short-lived Claude/Codex CLI process per session                  | A negotiated, versioned transport with legacy CLI fallback                                      |
-| Input              | One prompt, then stdin closes                                         | Correlated commands, turns, approvals, and questions                                            |
-| Capability shape   | Optional booleans; unknown boolean keys pass through                  | Scoped support records with evidence, stability, prerequisites, and constraints                 |
-| Workspace trust    | No AgentDock trust state                                              | Default-untrusted, canonical workspace identity, project configuration gates                    |
-| Agent isolation    | Provider-owned behavior, not attested by AgentDock                    | Platform-specific state reported from verified enforcement                                      |
-| History            | Memory only; up to 5,000 events per session and 50 completed sessions | Bounded per-user persistence with explicit deletion and retention                               |
-| Credentials        | Full daemon environment inherited by the CLI; CLI owns login          | No designated auth-secret storage; documented environment/cloud or provider-owned login sources |
-| Approval/audit     | Provider-owned, with no AgentDock approval channel or audit           | Fail-closed AgentDock policy and durable decision metadata                                      |
+| Provider transport | One short-lived Claude/Codex CLI process per session                  | Negotiation and a `legacy-one-shot` bridge exist; native rich provider transports are planned   |
+| Input              | One prompt, then stdin closes                                         | Correlated commands, turns, approvals, and questions are implemented for the interactive path   |
+| Capability shape   | Optional booleans; unknown boolean keys pass through                  | Scoped support records, validation, and frozen negotiation selection are implemented            |
+| Workspace trust    | No AgentDock trust state                                              | Default-untrusted records exist; trust identity and configuration gates are planned              |
+| Agent isolation    | Provider-owned behavior, not attested by AgentDock                    | Verified platform-specific enforcement reporting is planned                                     |
+| History            | Memory only; up to 5,000 events per session and 50 completed sessions | In-memory v2 replay bounds exist; durable persistence, deletion, and retention are planned      |
+| Credentials        | Full daemon environment inherited by the CLI; CLI owns login          | No credential vault; source-specific authentication boundaries remain planned                    |
+| Approval/audit     | Provider-owned, with no AgentDock approval channel or audit           | The interactive supervisor handles correlation; durable audit-before-allow is planned            |
 
 Nothing in this decision retroactively adds workspace trust, approval enforcement, persistence, or
-sandboxing to v1. The unversioned v1 routes, schemas, runtime behavior, and tests remain unchanged
-until the separate v2 migration lands.
+sandboxing to v1. The unversioned v1 routes, schemas, runtime behavior, and tests remain unchanged.
+The additive v2 implementation does not yet provide those security controls.
 
 ## Capability vocabulary
 
@@ -470,7 +473,12 @@ until a fixture-backed adapter classification proves otherwise.
 
 ### Current adapter-tested behavior
 
-The current test suite proves only the v1 boolean contract. It does not create v2 support records.
+The current test suite covers the v1 boolean contract and the v2 schemas, negotiation, routes,
+client API, supervisor, and provider fixtures. The `legacy-one-shot` bridge creates conservative
+v2 support records from existing adapter booleans. A record is `supported` only when the adapter
+reports the behavior and its detected version has a matching checked-in compatibility fixture.
+Without that fixture, the bridge does not advertise support. The production Claude and Codex
+adapters still use this bridge; the interactive v2 path is exercised by `FakeProvider`.
 
 | V1 key         | Claude CLI adapter | Codex exec adapter | Closest v2 meaning                                         |
 | -------------- | -----------------: | -----------------: | ---------------------------------------------------------- |
@@ -480,9 +488,9 @@ The current test suite proves only the v1 boolean contract. It does not create v
 | `usage`        |             Tested |             Tested | `content.usage.tokens`; cost needs separate v2 evidence    |
 | `thinking`     |             Tested |             Tested | `content.thinking`, only when the CLI emits public content |
 
-The shared provider contract verifies normalization and lifecycle against fixtures. A generic Codex
-`mcp_tool_call` becoming `tool.started` does not prove MCP discovery, management, OAuth,
-elicitation, or approval capabilities.
+The shared provider contract and compatibility fixtures verify normalization and lifecycle. A
+generic Codex `mcp_tool_call` becoming `tool.started` does not prove MCP discovery, management,
+OAuth, elicitation, or approval capabilities.
 
 ### Vendor-described candidates
 
@@ -493,7 +501,7 @@ These sources justify implementation work but advertise no AgentDock support:
 | Codex app-server    | Rich-client authentication/history, threads and turns, approvals, streamed items, sandbox policies, images, structured output, MCP, skills, plugins, and hooks; individual methods can still be experimental | Unsupported until a versioned schema and fixtures pass           | [Codex app-server](https://developers.openai.com/codex/app-server)       |
 | Claude Agent SDK    | Sessions, tools, permissions, user input, MCP, hooks, skills/plugins, and subagents                                                                                                                          | Unsupported until auth, trust, packaging, and fixture gates pass | [Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview) |
 
-This snapshot was reviewed on 2026-08-30. Each adapter compatibility manifest must pin the exact
+This status snapshot was reviewed on 2026-08-31. Each adapter compatibility manifest must pin the exact
 provider/SDK version and evidence set it supports. A documentation change or runtime self-report
 alone never widens that range.
 
@@ -879,7 +887,8 @@ explicit amendment to this document and a review of all dependent tickets.
 
 ## Non-goals
 
-- Implementing protocol v2, provider transports, persistence, or UI in this ticket
+- Implementing the remaining provider transports, persistence, trust controls, or renderer UI in
+  this design document
 - Storing credentials or building an AgentDock credential vault
 - Marketplace browsing/installation or arbitrary hook editing/execution
 - Treating permissions, worktrees, or Electron's renderer sandbox as OS process isolation

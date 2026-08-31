@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for considering a contribution to Agent Dock. This is boilerplate meant to be forked and
+Thanks for considering a contribution to AgentDock. This is boilerplate meant to be forked and
 extended, so contributions here should stay in that spirit: keep the core small, provider-neutral,
 and easy for someone else to reason about after forking it.
 
@@ -64,7 +64,7 @@ pnpm typecheck   # strict TypeScript, no `any` without a comment justifying it
 pnpm lint
 pnpm test        # must pass without a real Claude/Codex install or any paid API call
 pnpm build
-pnpm audit       # electron-builder's own build-time deps are a known, documented exception —
+pnpm audit       # electron-builder's own build-time deps are a known, documented exception;
                  # see docs/packaging.md; nothing shipped in the app should show up here
 ```
 
@@ -97,8 +97,8 @@ If you're touching a provider adapter (`packages/agent-runtime/src/providers/*`)
 ## Code style
 
 - TypeScript strict mode, no `any` unless there's a comment explaining why it's unavoidable.
-- No comments explaining *what* code does: name things so that's obvious. A comment is for a
-  non-obvious *why*: a constraint, an invariant, a workaround for a specific CLI quirk.
+- No comments explaining _what_ code does: name things so that's obvious. A comment is for a
+  non-obvious _why_: a constraint, an invariant, a workaround for a specific CLI quirk.
 - Small, focused modules over one big file. If you're adding a provider, follow the existing
   `detect.ts` / `parser.ts` / `adapter.ts` split (see [docs/providers.md](docs/providers.md#adding-a-new-provider)).
 - No new abstraction or config surface for a hypothetical future need: this is boilerplate that
@@ -109,8 +109,8 @@ If you're touching a provider adapter (`packages/agent-runtime/src/providers/*`)
 Please open an issue before working on anything that would add: persistence (SQLite/a database),
 authentication of the app's own users, telemetry/analytics, a new heavy dependency, or a new
 provider mode (API-key based, cloud-hosted). These are explicitly out of scope for the current
-version (see the README's "What this is not" section) and may or may not be a direction the
-project wants to take.
+version (see [What AgentDock is not](README.md#what-agentdock-is-not)) and may or may not be a
+direction the project wants to take.
 
 ## License
 

@@ -1,5 +1,14 @@
 # Architecture
 
+AgentDock is an open-source Electron and local-daemon boilerplate for desktop products that use a
+user's existing signed-in Claude Code or Codex CLI. It is designed to be forked. A product fork can
+replace the reference UI and workflow, set its own application identity, and keep or adapt the
+local runtime layers it needs.
+
+The runtime, protocol, security boundaries, provider adapters, tests, and packaging support that
+boilerplate purpose. They provide a working base and clear extension points rather than defining a
+finished chat product.
+
 This is the map of the repository: what each layer does, why it's shaped this way, and where to
 find the deeper detail. Wire-format detail lives in [protocol-v1.md](protocol-v1.md) and
 [protocol-v2.md](protocol-v2.md), while the v2 trust and capability decisions live in
@@ -25,7 +34,7 @@ those.
               ▼
 ┌─────────────────────────┐
 │   AgentDockClient           │   Typed daemon SDK: HTTP+SSE, bearer auth, protocol-
-│   (packages/client)        │   version compatibility check. No Electron dependency —
+│   (packages/client)        │   version compatibility check. No Electron dependency;
 │                             │   usable from any Node process. See docs/client-sdk.md.
 └─────────────┬────────────┘
               │ HTTP + SSE, http://127.0.0.1:<port>, Bearer token, protocol v1
@@ -114,7 +123,8 @@ Three reasons, in order of importance:
 
 ## Runtime flow: what happens when a user presses "Run"
 
-This is the current protocol v1 one-shot flow. The v2 supervisor has not been implemented.
+This is the protocol v1 one-shot flow. Protocol v2 now has a separate interactive supervisor,
+while the production Claude and Codex adapters still use the legacy one-shot bridge.
 
 1. Renderer calls `window.agentDock.createSession({ provider, cwd, prompt })`.
 2. Preload forwards it over IPC to `ipcMain.handle('daemon:create-session', ...)` in `main.ts`.
@@ -147,7 +157,7 @@ This is the current protocol v1 one-shot flow. The v2 supervisor has not been im
 
 ```ts
 type AgentSession = {
-  id: string; // daemon-generated UUID — never a process id
+  id: string; // daemon-generated UUID; never a process id
   provider: ProviderId;
   cwd: string;
   prompt: string;

@@ -41,12 +41,24 @@ BLOCKED_ELEMENTS = {
     "use",
 }
 EXTERNAL_REFERENCE = re.compile(r"(?i)(?:https?|file|ftp):|data:|url\s*\(")
+LOCAL_FRAGMENT_REFERENCE = re.compile(
+    r"(?i)url\s*\(\s*(['\"]?)#[a-z_][\w:.-]*\1\s*\)"
+)
 LOCAL_PATH = re.compile(r"(?i)(?:[a-z]:[\\/]|/(?:home|users|tmp)/)")
 CSS_IMPORT = re.compile(r"(?i)@import\b")
 
 
 def local_name(value: str) -> str:
     return value.rsplit("}", 1)[-1].lower()
+
+
+def has_unsafe_reference(value: str) -> bool:
+    without_local_fragments = LOCAL_FRAGMENT_REFERENCE.sub("", value)
+    return bool(
+        EXTERNAL_REFERENCE.search(without_local_fragments)
+        or LOCAL_PATH.search(without_local_fragments)
+        or CSS_IMPORT.search(without_local_fragments)
+    )
 
 
 def assert_safe_svg(svg: bytes, source: Path = SOURCE) -> None:
@@ -66,11 +78,7 @@ def assert_safe_svg(svg: bytes, source: Path = SOURCE) -> None:
             raise ValueError(f"Blocked <{element_name}> element in {source}")
 
         for text in (element.text, element.tail):
-            if text and (
-                EXTERNAL_REFERENCE.search(text)
-                or LOCAL_PATH.search(text)
-                or CSS_IMPORT.search(text)
-            ):
+            if text and has_unsafe_reference(text):
                 raise ValueError(f"Blocked external or local text reference in {source}")
 
         for raw_name, value in element.attrib.items():
@@ -80,11 +88,7 @@ def assert_safe_svg(svg: bytes, source: Path = SOURCE) -> None:
                 raise ValueError(f"Blocked event attribute {attribute_name} in {source}")
             if attribute_name in {"href", "src"} and not normalized.startswith("#"):
                 raise ValueError(f"Blocked reference {attribute_name}={normalized!r} in {source}")
-            if (
-                EXTERNAL_REFERENCE.search(normalized)
-                or LOCAL_PATH.search(normalized)
-                or CSS_IMPORT.search(normalized)
-            ):
+            if has_unsafe_reference(normalized):
                 raise ValueError(f"Blocked external or local reference in {source}")
 
 

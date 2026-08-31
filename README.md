@@ -5,29 +5,49 @@
   </picture>
 </p>
 
-<p align="center"><strong>Run CLI-authenticated AI agents through one secure, typed local runtime.</strong></p>
+<p align="center"><strong>Open-source Electron and local-daemon boilerplate for desktop apps that use a user's signed-in Claude Code or Codex CLI.</strong></p>
 
 <p align="center">Electron · Fastify · React · TypeScript · Apache-2.0</p>
 
 ![AgentDock desktop runtime](./docs/images/social/readme-hero.webp)
 
-AgentDock is a reusable desktop foundation for products that run prompts through AI agent CLIs
-the user already installed and authenticated. It starts with
-[Claude Code](https://docs.anthropic.com/en/docs/claude-code) and
-[Codex](https://github.com/openai/codex), while keeping credentials inside each provider's own CLI.
+AgentDock is built for fork-based reuse. Fork the repository, replace the reference workflow and
+visual identity, and keep the local runtime pieces your product needs. Users continue signing in
+through [Claude Code](https://docs.anthropic.com/en/docs/claude-code) or
+[Codex CLI](https://github.com/openai/codex), so AgentDock does not collect or proxy provider API
+keys.
 
-> [!NOTE]
-> AgentDock is infrastructure and a working reference desktop, not a finished chat product. It has
-> no accounts, cloud backend, persistent history, or opinionated end-user workflow.
+## What AgentDock is not
 
-## Why AgentDock
+AgentDock includes a working reference desktop, but it is not a finished chat product. It has no
+accounts, cloud backend, persistent history, or fixed end-user workflow. Those decisions belong in
+the product you build from the boilerplate.
+
+## Build your product with AgentDock
+
+1. Fork the repository and replace the reference UI with your product workflow.
+2. Keep daemon access in a trusted process. Never expose the daemon token to a renderer.
+3. Add persistence, accounts, and product data in your own layer. AgentDock's
+   `MemorySessionStore` is intentionally temporary.
+4. Replace `appId`, `productName`, and the default assets by following
+   [the asset guide](docs/assets.md).
+5. Run the build, test, and packaging checks, and review the security boundaries before
+   distribution.
+
+### Downstream example
+
+Open Vacancy Radar is a downstream product built from AgentDock. It keeps the Electron shell,
+local daemon, and connection to the user's signed-in Claude Code or Codex CLI, then adds a
+vacancy-focused workflow and its own product behavior.
+
+## What the boilerplate provides
 
 - **CLI authentication stays local.** AgentDock never asks for, reads, or proxies API keys.
 - **One provider-neutral protocol.** Claude and Codex output becomes a typed, ordered event stream.
 - **A deliberate trust boundary.** The sandboxed renderer talks only to Electron main over IPC;
   only the trusted main process can reach the authenticated loopback daemon.
-- **A real distribution path.** The repository builds a Windows NSIS installer with the daemon and
-  AgentDock's default visual identity included.
+- **Windows packaging.** The repository builds an NSIS installer with the daemon and AgentDock's
+  default visual identity included.
 
 ## Quick start
 
@@ -165,16 +185,6 @@ parsing, and the adapter, passing the shared contract suite, and registering it 
 The protocol and client remain provider-neutral; the reference desktop needs one selector option.
 
 Follow [the provider guide](docs/providers.md#adding-a-new-provider) for the complete checklist.
-
-## Building your product on AgentDock
-
-1. Fork the repository and replace the reference UI with your product workflow.
-2. Keep daemon access in a trusted process; never expose the daemon token to a renderer.
-3. Add persistence in your product layer. AgentDock's `MemorySessionStore` is intentionally
-   ephemeral.
-4. Replace `appId`, `productName`, and the default assets documented in
-   [the asset guide](docs/assets.md).
-5. Run the complete build, test, and packaging gates before distribution.
 
 ## Documentation
 

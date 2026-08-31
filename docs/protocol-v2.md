@@ -361,11 +361,15 @@ compatibility bridge retains its v1 process-runner limits.
 
 ## Current implementation boundary
 
-Issue #7 provides the provider-neutral supervisor, command endpoint, bounded SSE delivery, client
-API, and a narrow Electron bridge. `FakeProvider` exercises the rich path in deterministic tests.
-The production Claude and Codex adapters still select `legacy-one-shot`; native transport work is
-intentionally outside issue #7, gated by
-[issue #8](https://github.com/jortega0033/agentdock/issues/8)'s conformance fixtures, and tracked in
+The current v2 implementation provides shared schemas and negotiation, provider discovery,
+versioned session routes, client APIs, a provider-neutral supervisor, bounded SSE delivery, and a
+narrow Electron bridge. `FakeProvider` exercises the rich interactive path in deterministic tests.
+Compatibility fixtures pin the legacy Claude and Codex CLI paths, plus the fake interactive path,
+to exact provider versions, transports, and fixture sets.
+
+The production Claude and Codex adapters still select `legacy-one-shot`; no native rich provider
+transport is implemented. Workspace trust, verified isolation, durable audit/persistence, and
+native transport work remain outside the current slice and are tracked in
 [issues #10](https://github.com/jortega0033/agentdock/issues/10) and
 [#11](https://github.com/jortega0033/agentdock/issues/11). The existing React renderer still uses
 the v1 flow. A rich interactive timeline and multi-session UI remain separate work in

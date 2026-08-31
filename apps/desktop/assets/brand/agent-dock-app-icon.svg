@@ -1,9 +1,15 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
   <title id="title">AgentDock application icon</title>
-  <desc id="desc">Two dock gates surrounding an agent module and its local runtime contact.</desc>
-  <rect x="48" y="48" width="928" height="928" rx="220" fill="#0B1020"/>
-  <path d="M190 270h184v96h-88v292h88v96H190V270Z" fill="#F8FAFC"/>
-  <path d="M834 270H650v96h88v292h-88v96h184V270Z" fill="#F8FAFC"/>
-  <path d="m512 236 140 82v164l-140 82-140-82V318l140-82Z" fill="#5B6CFF"/>
-  <rect x="457" y="630" width="110" height="88" rx="28" fill="#2DD4BF"/>
+  <desc id="desc">Glossy monochrome hexagonal AgentDock badge.</desc>
+  <defs>
+    <linearGradient id="badge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4b4b4b"/><stop offset=".5" stop-color="#252525"/><stop offset="1" stop-color="#080808"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="22" stdDeviation="18" flood-color="#000" flood-opacity=".72"/></filter>
+  </defs>
+  <path d="M512 74c51 0 307 148 342 209 35 61 35 396 0 458-35 61-291 209-342 209S205 802 170 741c-35-62-35-397 0-458C205 222 461 74 512 74Z" fill="url(#badge)" stroke="#777" stroke-width="10"/>
+  <g fill="#fafafa" filter="url(#shadow)">
+    <path d="M512 250 724 648H602L512 473l-90 175H300L512 250Z"/>
+    <path d="M294 738h436l66 124H228l66-124Z"/>
+  </g>
 </svg>

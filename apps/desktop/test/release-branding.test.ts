@@ -19,6 +19,7 @@ const RELEASE_VISIBLE_SOURCE_FILES = [
   '../src/components/ProviderPanel.tsx',
   '../src/asset-capture-bridge.ts',
   '../../../scripts/assets/generate_public_assets.py',
+  '../../../packages/agent-runtime/src/providers/claude/parser.ts',
 ];
 
 function readSource(relativePath: string): string {

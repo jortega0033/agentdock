@@ -9,10 +9,18 @@ import type {
 import { PROVIDER_DISPLAY_NAMES } from '@agent-dock/shared';
 import type { AgentDockBridge } from './window.js';
 
-/** Documentation screenshots must never present fictitious data as real: every version here is
- * the actual pinned/verified provider version from `compatibility-manifest.ts` and
- * `sdk-version.ts`, and is suffixed "(demo)" so a reader can never mistake this fixture-driven
- * capture for a live provider read. */
+/** Documentation screenshots must never present fictitious data as real. This renderer-side
+ * fixture cannot import `@agent-dock/agent-runtime` (that package is daemon/Node-only and
+ * crossing that boundary into the Electron renderer bundle is exactly the separation this repo's
+ * security model depends on), so the versions below are plain literals kept in manual sync with
+ * the daemon's pinned/verified values -- `CLAUDE_AGENT_SDK_CLAUDE_CODE_VERSION` in
+ * `packages/agent-runtime/src/providers/claude/sdk-version.ts` and
+ * `CODEX_LEGACY_COMPATIBILITY.providerVersion` in
+ * `packages/agent-runtime/src/providers/compatibility-manifest.ts`. Update both together, and
+ * keep every version suffixed "(demo)" so a reader can never mistake this fixture-driven capture
+ * for a live provider read. */
+const CLAUDE_DEMO_VERSION = '2.1.251 (demo)';
+const CODEX_DEMO_VERSION = '0.147.0 (demo)';
 const DEMO_TRANSPORT_ID = 'demo-interactive';
 
 const providers: ProviderStatus[] = [
@@ -21,7 +29,7 @@ const providers: ProviderStatus[] = [
     name: PROVIDER_DISPLAY_NAMES.claude,
     installed: true,
     authenticated: 'authenticated',
-    version: '2.1.251 (demo)',
+    version: CLAUDE_DEMO_VERSION,
     capabilities: { resume: true, cancellation: true, tools: true, usage: true, thinking: true },
   },
   {
@@ -29,7 +37,7 @@ const providers: ProviderStatus[] = [
     name: PROVIDER_DISPLAY_NAMES.codex,
     installed: true,
     authenticated: 'authenticated',
-    version: '0.147.0 (demo)',
+    version: CODEX_DEMO_VERSION,
     capabilities: { resume: true, cancellation: true, tools: true, usage: true },
   },
 ];

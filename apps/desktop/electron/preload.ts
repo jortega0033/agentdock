@@ -10,7 +10,12 @@ import {
   commandAcknowledgementV2Schema,
   createSessionV2RequestSchema,
   providersV2ResponseSchema,
+  sessionContinuationInputV2Schema,
+  sessionEventHistoryV2PageSchema,
+  sessionEventHistoryV2QuerySchema,
   sessionIdParamSchema,
+  sessionListV2PageSchema,
+  sessionListV2QuerySchema,
   utf8ByteLength,
   workspaceInspectRequestV2Schema,
   workspaceTrustUpdateRequestV2Schema,
@@ -29,6 +34,11 @@ import {
   type ProviderId,
   type ProviderStatus,
   type ProviderStatusV2,
+  type SessionContinuationInputV2,
+  type SessionEventHistoryV2Page,
+  type SessionEventHistoryV2Query,
+  type SessionListV2Page,
+  type SessionListV2Query,
   type WorkspaceTrustUpdateRequestV2,
   type WorkspaceTrustViewV2,
 } from '@agent-dock/shared';
@@ -85,6 +95,21 @@ export interface AgentDockBridge {
   cancelSession(sessionId: string): Promise<void>;
   onSessionEvent(callback: (sessionId: string, event: AgentEvent) => void): () => void;
   createInteractiveSession(input: CreateSessionV2Request): Promise<AgentSessionV2>;
+  listInteractiveSessions(options?: SessionListV2Query): Promise<SessionListV2Page>;
+  readInteractiveSessionHistory(
+    sessionId: string,
+    options?: SessionEventHistoryV2Query,
+  ): Promise<SessionEventHistoryV2Page>;
+  reconnectInteractiveSession(sessionId: string): Promise<AgentSessionV2>;
+  resumeInteractiveSession(
+    sessionId: string,
+    input: SessionContinuationInputV2,
+  ): Promise<AgentSessionV2>;
+  forkInteractiveSession(
+    sessionId: string,
+    input: SessionContinuationInputV2,
+  ): Promise<AgentSessionV2>;
+  deleteInteractiveSession(sessionId: string): Promise<void>;
   sendSessionCommand(command: RendererSessionCommand): Promise<CommandAcknowledgementV2>;
   respondApproval(
     interactionHandle: string,
@@ -101,8 +126,12 @@ export interface AgentDockBridge {
   onInteractiveSessionStreamNotice(
     callback: (sessionId: string, notice: InteractiveSessionStreamNotice) => void,
   ): () => void;
-  onInteractionRequested(callback: (interaction: RendererInteraction) => void): () => void;
-  onInteractionResolved(callback: (resolution: RendererInteractionResolution) => void): () => void;
+  onInteractionRequested(
+    callback: (sessionId: string, interaction: RendererInteraction) => void,
+  ): () => void;
+  onInteractionResolved(
+    callback: (sessionId: string, resolution: RendererInteractionResolution) => void,
+  ): () => void;
   inspectWorkspace(cwd: string): Promise<WorkspaceTrustViewV2>;
   setWorkspaceTrust(
     workspaceId: string,
@@ -291,7 +320,9 @@ function toRendererApprovalInteraction(
 }
 
 function toInteractionResolution(value: unknown): RendererInteractionResolution | undefined {
-  if (!isRecord(value) || !isHandle(value.interactionHandle)) return undefined;
+  if (!isRecord(value) || !isHandle(value.interactionHandle)) {
+    return undefined;
+  }
   switch (value.kind) {
     case 'approval_resolved':
       if (value.reason !== 'allowed' && value.reason !== 'denied') return undefined;
@@ -496,6 +527,10 @@ function isHandle(value: unknown): value is string {
   return typeof value === 'string' && HANDLE_PATTERN.test(value);
 }
 
+function isSessionId(value: unknown): value is string {
+  return sessionIdParamSchema.safeParse({ sessionId: value }).success;
+}
+
 function isByteBoundedString(value: unknown, maximum: number): value is string {
   return typeof value === 'string' && utf8ByteLength(value) <= maximum;
 }
@@ -553,6 +588,56 @@ const api: AgentDockBridge = {
       await ipcRenderer.invoke('daemon:create-interactive-session', parsedInput),
     );
   },
+  async listInteractiveSessions(options = {}) {
+    const input = sessionListV2QuerySchema.parse(options);
+    return sessionListV2PageSchema.parse(
+      await ipcRenderer.invoke('daemon:list-interactive-sessions', input),
+    );
+  },
+  async readInteractiveSessionHistory(sessionId, options = {}) {
+    const parsedSessionId = sessionIdParamSchema.parse({ sessionId }).sessionId;
+    const query = sessionEventHistoryV2QuerySchema.parse(options);
+    const page = sessionEventHistoryV2PageSchema.parse(
+      await ipcRenderer.invoke('daemon:read-interactive-session-history', {
+        sessionId: parsedSessionId,
+        query,
+      }),
+    );
+    return {
+      ...page,
+      events: page.events.filter((event) => !INTERACTION_EVENT_TYPES.has(event.type)),
+    };
+  },
+  async reconnectInteractiveSession(sessionId) {
+    const parsedSessionId = sessionIdParamSchema.parse({ sessionId }).sessionId;
+    return agentSessionV2Schema.parse(
+      await ipcRenderer.invoke('daemon:reconnect-interactive-session', parsedSessionId),
+    );
+  },
+  async resumeInteractiveSession(sessionId, input) {
+    const parsedSessionId = sessionIdParamSchema.parse({ sessionId }).sessionId;
+    const parsedInput = sessionContinuationInputV2Schema.parse(input);
+    return agentSessionV2Schema.parse(
+      await ipcRenderer.invoke('daemon:resume-interactive-session', {
+        sessionId: parsedSessionId,
+        input: parsedInput,
+      }),
+    );
+  },
+  async forkInteractiveSession(sessionId, input) {
+    const parsedSessionId = sessionIdParamSchema.parse({ sessionId }).sessionId;
+    const parsedInput = sessionContinuationInputV2Schema.parse(input);
+    return agentSessionV2Schema.parse(
+      await ipcRenderer.invoke('daemon:fork-interactive-session', {
+        sessionId: parsedSessionId,
+        input: parsedInput,
+      }),
+    );
+  },
+  async deleteInteractiveSession(sessionId) {
+    const parsedSessionId = sessionIdParamSchema.parse({ sessionId }).sessionId;
+    await ipcRenderer.invoke('daemon:delete-interactive-session', parsedSessionId);
+  },
   async sendSessionCommand(command) {
     const parsedCommand = parseRendererSessionCommand(command);
     const acknowledgement = commandAcknowledgementV2Schema.parse(
@@ -608,16 +693,18 @@ const api: AgentDockBridge = {
   },
   onInteractionRequested(callback) {
     const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => {
-      const interaction = toRendererInteraction(payload);
-      if (interaction) callback(interaction);
+      if (!isRecord(payload) || !isSessionId(payload.sessionId)) return;
+      const interaction = toRendererInteraction(payload.interaction);
+      if (interaction) callback(payload.sessionId, interaction);
     };
     ipcRenderer.on('daemon:interaction-requested', listener);
     return () => ipcRenderer.removeListener('daemon:interaction-requested', listener);
   },
   onInteractionResolved(callback) {
     const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => {
-      const resolution = toInteractionResolution(payload);
-      if (resolution) callback(resolution);
+      if (!isRecord(payload) || !isSessionId(payload.sessionId)) return;
+      const resolution = toInteractionResolution(payload.resolution);
+      if (resolution) callback(payload.sessionId, resolution);
     };
     ipcRenderer.on('daemon:interaction-resolved', listener);
     return () => ipcRenderer.removeListener('daemon:interaction-resolved', listener);

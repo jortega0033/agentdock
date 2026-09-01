@@ -226,7 +226,7 @@ describe('MemoryExecutionGraphStore', () => {
 describe('FileExecutionGraphStore', () => {
   it('atomically persists strict metadata/events with private permissions', async () => {
     const path = await graphPath();
-    const stored = terminalRecord();
+    const stored = terminalRecord({ branch: 'feature/persisted-branch' });
     const store = new FileExecutionGraphStore(path, { now: () => new Date(NOW) });
     store.reserve(stored);
     store.appendEvent(stored.session.id, startedEvent(stored.session));

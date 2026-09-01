@@ -12,6 +12,11 @@ import type {
   ProviderId,
   ProviderStatus,
   ProviderStatusV2,
+  SessionContinuationInputV2,
+  SessionEventHistoryV2Page,
+  SessionEventHistoryV2Query,
+  SessionListV2Page,
+  SessionListV2Query,
   WorkspaceTrustUpdateRequestV2,
   WorkspaceTrustViewV2,
 } from '@agent-dock/shared';
@@ -58,6 +63,21 @@ export interface AgentDockBridge {
   cancelSession(sessionId: string): Promise<void>;
   onSessionEvent(callback: (sessionId: string, event: AgentEvent) => void): () => void;
   createInteractiveSession(input: CreateSessionV2Request): Promise<AgentSessionV2>;
+  listInteractiveSessions(options?: SessionListV2Query): Promise<SessionListV2Page>;
+  readInteractiveSessionHistory(
+    sessionId: string,
+    options?: SessionEventHistoryV2Query,
+  ): Promise<SessionEventHistoryV2Page>;
+  reconnectInteractiveSession(sessionId: string): Promise<AgentSessionV2>;
+  resumeInteractiveSession(
+    sessionId: string,
+    input: SessionContinuationInputV2,
+  ): Promise<AgentSessionV2>;
+  forkInteractiveSession(
+    sessionId: string,
+    input: SessionContinuationInputV2,
+  ): Promise<AgentSessionV2>;
+  deleteInteractiveSession(sessionId: string): Promise<void>;
   sendSessionCommand(command: RendererSessionCommand): Promise<CommandAcknowledgementV2>;
   respondApproval(
     interactionHandle: string,
@@ -74,8 +94,12 @@ export interface AgentDockBridge {
   onInteractiveSessionStreamNotice(
     callback: (sessionId: string, notice: InteractiveSessionStreamNotice) => void,
   ): () => void;
-  onInteractionRequested(callback: (interaction: RendererInteraction) => void): () => void;
-  onInteractionResolved(callback: (resolution: RendererInteractionResolution) => void): () => void;
+  onInteractionRequested(
+    callback: (sessionId: string, interaction: RendererInteraction) => void,
+  ): () => void;
+  onInteractionResolved(
+    callback: (sessionId: string, resolution: RendererInteractionResolution) => void,
+  ): () => void;
   inspectWorkspace(cwd: string): Promise<WorkspaceTrustViewV2>;
   setWorkspaceTrust(
     workspaceId: string,

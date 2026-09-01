@@ -297,6 +297,24 @@ export function installAssetCaptureBridge(): void {
         earliestSequence: 0,
       };
     },
+    listInteractiveSessions: async () => ({ sessions: [] }),
+    readInteractiveSessionHistory: async () => ({ events: [] }),
+    reconnectInteractiveSession: async () => {
+      throw new Error('asset capture has no persisted session');
+    },
+    resumeInteractiveSession: async (_sessionId, input) =>
+      bridge.createInteractiveSession({
+        provider: 'claude',
+        cwd: 'C:\\workspace\\agent-dock',
+        ...input,
+      }),
+    forkInteractiveSession: async (_sessionId, input) =>
+      bridge.createInteractiveSession({
+        provider: 'claude',
+        cwd: 'C:\\workspace\\agent-dock',
+        ...input,
+      }),
+    deleteInteractiveSession: async () => {},
     sendSessionCommand: async (command) => ({
       status: 'accepted',
       commandId: '123e4567-e89b-42d3-a456-426614174004',

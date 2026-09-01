@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { AgentDockBridge } from '../src/window.js';
 
 // AD-07: the old test here asserted properties of a mock object the test itself constructed, so
 // it could never fail for the reason its name claimed. This imports the REAL electron/preload.ts
@@ -50,6 +51,12 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
         'cancelSession',
         'onSessionEvent',
         'createInteractiveSession',
+        'listInteractiveSessions',
+        'readInteractiveSessionHistory',
+        'reconnectInteractiveSession',
+        'resumeInteractiveSession',
+        'forkInteractiveSession',
+        'deleteInteractiveSession',
         'sendSessionCommand',
         'respondApproval',
         'answerQuestions',
@@ -193,6 +200,62 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
       ['daemon:create-interactive-session', createInput],
       ['daemon:send-session-command', command],
       ['daemon:cancel-interactive-session', sessionId],
+    ]);
+  });
+
+  it('uses schema-checked narrow IPC for catalog restore, reconnect, continuations, and delete', async () => {
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+    const session = {
+      id: sessionId,
+      provider: 'claude',
+      transport: 'fake-interactive',
+      cwd: '/tmp/project',
+      status: 'completed',
+      selection: {
+        transport: 'fake-interactive',
+        enabled: [],
+        unavailableOptional: [],
+        possibleEffects: [],
+        effectsComplete: true,
+      },
+      executionId: '123e4567-e89b-42d3-a456-426614174001',
+      acceptedWork: 'accepted',
+      startedAt: '2026-08-31T00:00:00.000Z',
+      completedAt: '2026-08-31T00:01:00.000Z',
+      earliestSequence: 0,
+    };
+    invoke
+      .mockResolvedValueOnce({ sessions: [session] })
+      .mockResolvedValueOnce({ events: [] })
+      .mockResolvedValueOnce(session)
+      .mockResolvedValueOnce(session)
+      .mockResolvedValueOnce(session)
+      .mockResolvedValueOnce(undefined);
+    const api = await loadPreload();
+    const bridge = api as unknown as AgentDockBridge;
+
+    await expect(bridge.listInteractiveSessions({ limit: 25 })).resolves.toEqual({
+      sessions: [session],
+    });
+    await expect(bridge.readInteractiveSessionHistory(sessionId, { limit: 25 })).resolves.toEqual({
+      events: [],
+    });
+    await expect(bridge.reconnectInteractiveSession(sessionId)).resolves.toEqual(session);
+    await expect(
+      bridge.resumeInteractiveSession(sessionId, { prompt: 'continue' }),
+    ).resolves.toEqual(session);
+    await expect(bridge.forkInteractiveSession(sessionId, { prompt: 'branch' })).resolves.toEqual(
+      session,
+    );
+    await expect(bridge.deleteInteractiveSession(sessionId)).resolves.toBeUndefined();
+
+    expect(invoke.mock.calls).toEqual([
+      ['daemon:list-interactive-sessions', { limit: 25 }],
+      ['daemon:read-interactive-session-history', { sessionId, query: { limit: 25 } }],
+      ['daemon:reconnect-interactive-session', sessionId],
+      ['daemon:resume-interactive-session', { sessionId, input: { prompt: 'continue' } }],
+      ['daemon:fork-interactive-session', { sessionId, input: { prompt: 'branch' } }],
+      ['daemon:delete-interactive-session', sessionId],
     ]);
   });
 
@@ -533,6 +596,7 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
   });
 
   it('reconstructs opaque interaction requests without forwarding native correlation IDs', async () => {
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
     const interactionHandle = 'I'.repeat(43);
     const questionInteractionHandle = 'J'.repeat(43);
     const questionHandle = 'Q'.repeat(43);
@@ -540,7 +604,9 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
     const api = await loadPreload();
     const callback = vi.fn();
     const dispose = (
-      api.onInteractionRequested as (cb: (interaction: unknown) => void) => () => void
+      api.onInteractionRequested as (
+        cb: (sessionId: string, interaction: unknown) => void,
+      ) => () => void
     )(callback);
     const listener = on.mock.calls.find(
       (call) => call[0] === 'daemon:interaction-requested',
@@ -549,42 +615,47 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
     listener?.(
       {},
       {
-        kind: 'approval',
-        interactionHandle,
-        title: 'Delete file?',
-        action: 'delete',
-        target: 'workspace file',
-        reason: 'requested by the agent',
-        possibleEffects: ['filesystem_write', 'destructive'],
-        effectsComplete: true,
-        allowedDecisions: ['allow_once', 'deny'],
-        deadlineAt: '2026-08-31T00:01:00.000Z',
-        sessionId: '123e4567-e89b-42d3-a456-426614174000',
-        turnId: '123e4567-e89b-42d3-a456-426614174001',
-        requestId: '123e4567-e89b-42d3-a456-426614174002',
+        sessionId,
+        interaction: {
+          kind: 'approval',
+          interactionHandle,
+          title: 'Delete file?',
+          action: 'delete',
+          target: 'workspace file',
+          reason: 'requested by the agent',
+          possibleEffects: ['filesystem_write', 'destructive'],
+          effectsComplete: true,
+          allowedDecisions: ['allow_once', 'deny'],
+          deadlineAt: '2026-08-31T00:01:00.000Z',
+          turnId: '123e4567-e89b-42d3-a456-426614174001',
+          requestId: '123e4567-e89b-42d3-a456-426614174002',
+        },
       },
     );
     listener?.(
       {},
       {
-        kind: 'question',
-        interactionHandle: questionInteractionHandle,
-        questions: [
-          {
-            questionHandle,
-            title: 'Mode',
-            prompt: 'Choose a mode',
-            options: [{ optionHandle, label: 'Safe' }],
-            allowsFreeText: false,
-            questionId: '123e4567-e89b-42d3-a456-426614174003',
-          },
-        ],
-        deadlineAt: '2026-08-31T00:01:00.000Z',
-        requestId: '123e4567-e89b-42d3-a456-426614174004',
+        sessionId,
+        interaction: {
+          kind: 'question',
+          interactionHandle: questionInteractionHandle,
+          questions: [
+            {
+              questionHandle,
+              title: 'Mode',
+              prompt: 'Choose a mode',
+              options: [{ optionHandle, label: 'Safe' }],
+              allowsFreeText: false,
+              questionId: '123e4567-e89b-42d3-a456-426614174003',
+            },
+          ],
+          deadlineAt: '2026-08-31T00:01:00.000Z',
+          requestId: '123e4567-e89b-42d3-a456-426614174004',
+        },
       },
     );
 
-    expect(callback).toHaveBeenCalledWith({
+    expect(callback).toHaveBeenCalledWith(sessionId, {
       kind: 'approval',
       interactionHandle,
       title: 'Delete file?',
@@ -596,7 +667,7 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
       allowedDecisions: ['allow_once', 'deny'],
       deadlineAt: '2026-08-31T00:01:00.000Z',
     });
-    expect(callback).toHaveBeenCalledWith({
+    expect(callback).toHaveBeenCalledWith(sessionId, {
       kind: 'question',
       interactionHandle: questionInteractionHandle,
       questions: [
@@ -610,7 +681,7 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
       ],
       deadlineAt: '2026-08-31T00:01:00.000Z',
     });
-    expect(JSON.stringify(callback.mock.calls)).not.toMatch(
+    expect(JSON.stringify(callback.mock.calls.map((call) => call[1]))).not.toMatch(
       /sessionId|turnId|requestId|questionId/,
     );
     dispose();
@@ -618,11 +689,14 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
   });
 
   it('reconstructs safe interaction resolution notices and drops native IDs', async () => {
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
     const interactionHandle = 'I'.repeat(43);
     const api = await loadPreload();
     const callback = vi.fn();
     const dispose = (
-      api.onInteractionResolved as (cb: (resolution: unknown) => void) => () => void
+      api.onInteractionResolved as (
+        cb: (sessionId: string, resolution: unknown) => void,
+      ) => () => void
     )(callback);
     const listener = on.mock.calls.find(
       (call) => call[0] === 'daemon:interaction-resolved',
@@ -631,20 +705,24 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
     listener?.(
       {},
       {
-        interactionHandle,
-        kind: 'question_cancelled',
-        reason: 'timeout',
-        sessionId: '123e4567-e89b-42d3-a456-426614174000',
-        questionId: '123e4567-e89b-42d3-a456-426614174001',
+        sessionId,
+        resolution: {
+          interactionHandle,
+          kind: 'question_cancelled',
+          reason: 'timeout',
+          questionId: '123e4567-e89b-42d3-a456-426614174001',
+        },
       },
     );
 
-    expect(callback).toHaveBeenCalledWith({
+    expect(callback).toHaveBeenCalledWith(sessionId, {
       interactionHandle,
       kind: 'question_cancelled',
       reason: 'timeout',
     });
-    expect(JSON.stringify(callback.mock.calls)).not.toMatch(/sessionId|questionId/);
+    expect(JSON.stringify(callback.mock.calls.map((call) => call[1]))).not.toMatch(
+      /sessionId|questionId/,
+    );
     dispose();
     expect(removeListener).toHaveBeenCalledWith('daemon:interaction-resolved', listener);
   });

@@ -16,6 +16,13 @@ import type { ProviderRegistry, WorkspaceTrustEvidence } from '@agent-dock/agent
 import type { SessionManager } from '../session-manager.js';
 import type { WorkspaceTrustStore } from '../workspace-trust-store.js';
 import { resolveWorkspaceIdentity, revalidateWorkspaceIdentity } from '../workspace-identity.js';
+import {
+  isWorkspaceDirty,
+  WorkspaceExecutionLeaseError,
+  WorkspaceExecutionLeaseManager,
+  workspaceLeaseMode,
+  type WorkspaceExecutionLease,
+} from '../workspace-execution-lease.js';
 import { capabilityRequestForContinuation, resolveProviderV2Manifest } from '../provider-v2.js';
 import { BoundedV2SseWriter } from '../v2-sse-writer.js';
 import {
@@ -142,6 +149,7 @@ export function registerV2SessionRoutes(
   trustStore?: WorkspaceTrustStore,
 ): void {
   const sessions = new V2SessionFacade(sessionManager);
+  const executionLeases = new WorkspaceExecutionLeaseManager();
 
   const startSession = async (
     req: FastifyRequest,
@@ -346,7 +354,16 @@ export function registerV2SessionRoutes(
             }
           : undefined;
       let session;
+      let executionLease: WorkspaceExecutionLease | undefined;
       try {
+        if (workspace) {
+          executionLease = executionLeases.acquire({
+            workspaceId: workspace.workspaceId,
+            mode: workspaceLeaseMode(negotiation.selection),
+            dirty: await isWorkspaceDirty(workspace),
+            allowDirtyShare: parsed.data.allowDirtyWorkspaceShare === true,
+          });
+        }
         session = await sessions.create(
           { ...parsed.data, cwd: canonicalCwd },
           negotiation.selection,
@@ -362,6 +379,11 @@ export function registerV2SessionRoutes(
           override?.lineage,
         );
       } catch (error) {
+        executionLease?.release();
+        if (error instanceof WorkspaceExecutionLeaseError) {
+          reply.code(409).send({ error: error.message, code: error.code });
+          return;
+        }
         if (sendPersistedSessionError(reply, error)) return;
         if (!(error instanceof V2ProviderStartupError)) throw error;
         if (sendPersistedSessionError(reply, error, error.reasonCode)) return;
@@ -384,6 +406,7 @@ export function registerV2SessionRoutes(
         });
         return;
       }
+      if (executionLease) releaseExecutionLeaseOnTerminal(sessions, session.id, executionLease);
       if (controller.signal.aborted || req.raw.aborted || reply.raw.destroyed) {
         await sessions.cancel(session.id);
         return;
@@ -694,4 +717,40 @@ export function registerV2SessionRoutes(
     }
     reply.code(204).send();
   });
+}
+
+function releaseExecutionLeaseOnTerminal(
+  sessions: V2SessionFacade,
+  sessionId: string,
+  lease: WorkspaceExecutionLease,
+): void {
+  let unsubscribe: (() => void) | undefined;
+  let terminalDuringReplay = false;
+  unsubscribe = sessions.subscribe(sessionId, 0, (_sequence, event) => {
+    if (
+      event.type !== 'session.completed' &&
+      event.type !== 'session.failed' &&
+      event.type !== 'session.cancelled' &&
+      event.type !== 'session.interrupted'
+    ) {
+      return;
+    }
+    lease.release();
+    if (unsubscribe) {
+      const release = unsubscribe;
+      unsubscribe = undefined;
+      release();
+    } else {
+      terminalDuringReplay = true;
+    }
+  });
+  if (!unsubscribe) {
+    lease.release();
+    return;
+  }
+  if (terminalDuringReplay) {
+    const release = unsubscribe;
+    unsubscribe = undefined;
+    release();
+  }
 }

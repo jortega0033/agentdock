@@ -342,6 +342,7 @@ export const sessionContinuationInputV2Schema = z
   .object({
     prompt: z.string().min(1, 'prompt is required').max(200_000, 'prompt is too long'),
     capabilities: capabilityRequestSchema.optional(),
+    allowDirtyWorkspaceShare: z.boolean().optional(),
   })
   .strict()
   .superRefine((input, ctx) => {
@@ -355,6 +356,8 @@ export interface CreateSessionV2Request {
   cwd: string;
   prompt: string;
   capabilities?: CapabilityRequest;
+  /** Explicit consent to add a read-only session to an already-shared dirty Git worktree. */
+  allowDirtyWorkspaceShare?: boolean;
   /**
    * @deprecated Use the daemon-owned `POST /v2/sessions/:sessionId/resume` or `/fork` routes.
    * Kept parse-compatible until consumers have migrated; new callers must not supply native IDs.
@@ -368,6 +371,7 @@ export const createSessionV2RequestSchema = z
     cwd: z.string().min(1, 'cwd is required'),
     prompt: z.string().min(1, 'prompt is required').max(200_000, 'prompt is too long'),
     capabilities: capabilityRequestSchema.optional(),
+    allowDirtyWorkspaceShare: z.boolean().optional(),
     continuation: sessionContinuationV2Schema.optional(),
   })
   .strict()
@@ -437,6 +441,8 @@ export interface AgentSessionV2 {
   provider: (typeof PROVIDER_IDS)[number];
   transport: string;
   cwd: string;
+  /** Launch-time Git branch label, or `detached` when HEAD was detached. */
+  branch?: string;
   status: z.infer<typeof sessionStatusV2Schema>;
   selection: CapabilitySelection;
   executionId: ExecutionId;
@@ -463,6 +469,7 @@ export const agentSessionV2Schema = z
     provider: z.enum(PROVIDER_IDS),
     transport: nonemptyWireStringSchema,
     cwd: z.string().min(1),
+    branch: z.string().min(1).max(1024).optional(),
     status: sessionStatusV2Schema,
     selection: capabilitySelectionSchema,
     executionId: executionIdSchema,

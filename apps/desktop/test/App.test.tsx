@@ -74,6 +74,7 @@ const SESSION: AgentSessionV2 = {
   provider: 'claude',
   transport: 'fake-interactive',
   cwd: '/tmp/project',
+  branch: 'feature/concurrent-workspace',
   status: 'starting',
   selection: {
     transport: 'fake-interactive',
@@ -109,6 +110,12 @@ function installBridge(overrides: Partial<AgentDockBridge> = {}): {
     cancelSession: vi.fn().mockResolvedValue(undefined),
     onSessionEvent: vi.fn().mockReturnValue(() => {}),
     createInteractiveSession: vi.fn().mockResolvedValue(SESSION),
+    listInteractiveSessions: vi.fn().mockResolvedValue({ sessions: [] }),
+    readInteractiveSessionHistory: vi.fn().mockResolvedValue({ events: [] }),
+    reconnectInteractiveSession: vi.fn().mockResolvedValue(SESSION),
+    resumeInteractiveSession: vi.fn().mockResolvedValue(SESSION),
+    forkInteractiveSession: vi.fn().mockResolvedValue(SESSION),
+    deleteInteractiveSession: vi.fn().mockResolvedValue(undefined),
     sendSessionCommand: vi.fn(),
     respondApproval: vi.fn().mockResolvedValue({ status: 'accepted' }),
     answerQuestions: vi.fn().mockResolvedValue({ status: 'accepted' }),
@@ -123,13 +130,13 @@ function installBridge(overrides: Partial<AgentDockBridge> = {}): {
     }),
     onInteractiveSessionStreamNotice: vi.fn().mockReturnValue(() => {}),
     onInteractionRequested: vi.fn((callback) => {
-      callbacks.interaction = callback;
+      callbacks.interaction = (interaction) => callback(SESSION_ID, interaction);
       return () => {
         callbacks.interaction = undefined;
       };
     }),
     onInteractionResolved: vi.fn((callback) => {
-      callbacks.resolution = callback;
+      callbacks.resolution = (resolution) => callback(SESSION_ID, resolution);
       return () => {
         callbacks.resolution = undefined;
       };
@@ -173,7 +180,10 @@ function event(
     : { ...meta, ...value };
 }
 
-beforeEach(() => installBridge());
+beforeEach(() => {
+  window.localStorage.clear();
+  installBridge();
+});
 afterEach(() => vi.restoreAllMocks());
 
 describe('App security flow', () => {
@@ -252,6 +262,165 @@ describe('App security flow', () => {
     callbacks.event?.(SESSION_ID, event(1, { type: 'session.completed' }));
     await waitFor(() =>
       expect(screen.getByLabelText('Session activity')).toHaveTextContent('session completed'),
+    );
+  });
+
+  it('runs three concurrent sessions without mixing background events or cancellation targets', async () => {
+    const secondSessionId = '223e4567-e89b-42d3-a456-426614174000';
+    const secondExecutionId = '223e4567-e89b-42d3-a456-426614174001';
+    const thirdSessionId = '323e4567-e89b-42d3-a456-426614174000';
+    const thirdExecutionId = '323e4567-e89b-42d3-a456-426614174001';
+    const secondSession: AgentSessionV2 = {
+      ...SESSION,
+      id: secondSessionId,
+      executionId: secondExecutionId,
+      startedAt: '2026-08-31T00:00:01.000Z',
+    };
+    const thirdSession: AgentSessionV2 = {
+      ...SESSION,
+      id: thirdSessionId,
+      executionId: thirdExecutionId,
+      startedAt: '2026-08-31T00:00:02.000Z',
+    };
+    const { bridge, callbacks } = installBridge({
+      createInteractiveSession: vi
+        .fn()
+        .mockResolvedValueOnce(SESSION)
+        .mockResolvedValueOnce(secondSession)
+        .mockResolvedValueOnce(thirdSession),
+    });
+    render(<App />);
+    await screen.findByText('Claude Code');
+
+    fillSessionForm();
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+    await waitFor(() => expect(bridge.createInteractiveSession).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByRole('textbox', { name: /prompt/i }), {
+      target: { value: 'second task' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+    await waitFor(() => expect(bridge.createInteractiveSession).toHaveBeenCalledTimes(2));
+    fireEvent.change(screen.getByRole('textbox', { name: /prompt/i }), {
+      target: { value: 'third task' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+    await waitFor(() => expect(bridge.createInteractiveSession).toHaveBeenCalledTimes(3));
+
+    callbacks.event?.(SESSION_ID, event(0, { type: 'content.delta', delta: 'first background' }));
+    callbacks.event?.(secondSessionId, {
+      ...event(0, { type: 'content.delta', delta: 'second foreground' }),
+      sessionId: secondSessionId,
+      executionId: secondExecutionId,
+    });
+    callbacks.event?.(thirdSessionId, {
+      ...event(0, { type: 'content.delta', delta: 'third foreground' }),
+      sessionId: thirdSessionId,
+      executionId: thirdExecutionId,
+    });
+    expect(await screen.findByText('third foreground')).toBeInTheDocument();
+    expect(screen.queryByText('first background')).not.toBeInTheDocument();
+    expect(screen.queryByText('second foreground')).not.toBeInTheDocument();
+
+    const interactionHandle = 'A'.repeat(43);
+    callbacks.interaction?.({
+      kind: 'approval',
+      interactionHandle,
+      title: 'Background approval',
+      action: 'execute',
+      target: 'workspace',
+      possibleEffects: ['command'],
+      effectsComplete: true,
+      allowedDecisions: ['allow_once', 'deny'],
+      deadlineAt: '2026-08-31T00:05:00.000Z',
+    });
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /claude · 123e4567/i })).toHaveTextContent(
+        'Needs attention',
+      ),
+    );
+    callbacks.resolution?.({
+      interactionHandle,
+      kind: 'approval_resolved',
+      reason: 'denied',
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Archive' }));
+    expect(bridge.cancelInteractiveSession).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() =>
+      expect(bridge.cancelInteractiveSession).toHaveBeenLastCalledWith(thirdSessionId),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /claude · 223e4567/i }));
+    expect(await screen.findByText('second foreground')).toBeInTheDocument();
+    expect(screen.queryByText('third foreground')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /claude · 123e4567/i }));
+    expect(await screen.findByText('first background')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    await waitFor(() =>
+      expect(bridge.cancelInteractiveSession).toHaveBeenLastCalledWith(SESSION_ID),
+    );
+  });
+
+  it('restores catalog selection, unread state, terminal history, and branch after restart', async () => {
+    const restoredId = '423e4567-e89b-42d3-a456-426614174000';
+    const restoredExecutionId = '423e4567-e89b-42d3-a456-426614174001';
+    const restoredSession: AgentSessionV2 = {
+      ...SESSION,
+      id: restoredId,
+      executionId: restoredExecutionId,
+      status: 'completed',
+      startedAt: '2026-08-31T00:00:03.000Z',
+      completedAt: '2026-08-31T00:01:00.000Z',
+    };
+    window.localStorage.setItem(
+      'agent-dock.session-workspace.v1',
+      JSON.stringify({
+        selectedSessionId: restoredId,
+        unreadBySession: { [SESSION_ID]: 3 },
+        archivedSessionIds: [SESSION_ID],
+      }),
+    );
+    const historyEvent: AgentEventV2Envelope = {
+      ...event(0, { type: 'content.delta', delta: 'restored terminal output' }),
+      sessionId: restoredId,
+      executionId: restoredExecutionId,
+    };
+    const { bridge } = installBridge({
+      listInteractiveSessions: vi.fn().mockResolvedValue({
+        sessions: [{ ...SESSION, status: 'completed' }, restoredSession],
+      }),
+      readInteractiveSessionHistory: vi.fn().mockImplementation(async (sessionId: string) => ({
+        events: sessionId === restoredId ? [historyEvent] : [],
+      })),
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText('restored terminal output')).toBeInTheDocument();
+    expect(screen.getByText('Branch: feature/concurrent-workspace')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /claude · 123e4567/i })).toHaveTextContent(
+      /3\s*Archived/,
+    );
+    expect(bridge.reconnectInteractiveSession).not.toHaveBeenCalled();
+  });
+
+  it('sends dirty-worktree sharing consent only after explicit opt-in', async () => {
+    const { bridge } = installBridge();
+    render(<App />);
+    await screen.findByText('Claude Code');
+    fillSessionForm();
+    fireEvent.click(
+      screen.getByRole('checkbox', {
+        name: /allow another read-only session to share this worktree/i,
+      }),
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'Run' }));
+
+    await waitFor(() =>
+      expect(bridge.createInteractiveSession).toHaveBeenCalledWith(
+        expect.objectContaining({ allowDirtyWorkspaceShare: true }),
+      ),
     );
   });
 

@@ -307,6 +307,7 @@ describe('protocol v2 content and interaction schemas', () => {
       provider: 'claude',
       transport: 'cli',
       cwd: '/tmp',
+      branch: 'feature/session-workspace',
       status: 'completed',
       selection,
       executionId,

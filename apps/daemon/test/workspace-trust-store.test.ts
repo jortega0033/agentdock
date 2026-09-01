@@ -98,6 +98,7 @@ describe('resolveWorkspaceIdentity', () => {
 
     expect(resolved.reusable).toBe(true);
     expect(resolved.canonicalPath).toBe(await realpath(workspace));
+    expect(resolved.branch).toMatch(/\S+/);
     expect(resolved.worktreeRoot.canonicalPath).toBe(await realpath(workspace));
     expect(resolved.gitCommonDirectory?.canonicalPath).toBe(
       await realpath(join(workspace, '.git')),
@@ -134,6 +135,8 @@ describe('resolveWorkspaceIdentity', () => {
     const linkedIdentity = await resolveWorkspaceIdentity(linked);
 
     expect(primaryIdentity.workspaceId).not.toBe(linkedIdentity.workspaceId);
+    expect(primaryIdentity.branch).toMatch(/\S+/);
+    expect(linkedIdentity.branch).toBe('detached');
     expect(primaryIdentity.worktreeRoot.fileId).not.toBe(linkedIdentity.worktreeRoot.fileId);
     expect(primaryIdentity.gitCommonDirectory).toEqual(linkedIdentity.gitCommonDirectory);
   }, 15_000);

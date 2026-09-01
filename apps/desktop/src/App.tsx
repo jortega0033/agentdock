@@ -1,33 +1,40 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import type {
   AgentEventV2Envelope,
+  AgentSessionV2,
   ApprovalDecisionV2,
   CapabilityRequest,
   ProviderId,
   ProviderStatusV2,
+  SessionEventHistoryV2Page,
+  SessionListV2Page,
   WorkspaceTrustViewV2,
 } from '@agent-dock/shared';
 import type {
-  RendererInteraction,
   RendererInteractionResolution,
   RendererQuestionResponse,
 } from '../electron/interaction-broker.js';
 import { ProviderPanel } from './components/ProviderPanel.js';
 import { ActivityTimeline } from './components/activity/ActivityTimeline.js';
-import {
-  activityHistoryReducer,
-  createActivityHistoryState,
-} from './components/activity/history.js';
 import { RendererInteractionTimelineProjector } from './components/activity/interaction-timeline.js';
 import { AgentDockMark } from './components/AgentDockMark.js';
 import { InteractionDialog, WorkspaceTrustDialog } from './components/SecurityDialogs.js';
+import {
+  createSessionWorkspaceState,
+  projectedSessionStatus,
+  sessionWorkspacePreferences,
+  sessionWorkspaceReducer,
+  type SessionWorkspaceAction,
+  type SessionWorkspacePreferences,
+} from './session-workspace.js';
 import runtimeUnavailableIllustration from '../assets/illustrations/runtime-unavailable.svg';
 
 type DaemonState = 'connecting' | 'ready' | 'unavailable';
-type RunStatus =
-  'idle' | 'starting' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
 
 const DAEMON_CONNECT_TIMEOUT_MS = 20_000;
+const CATALOG_PAGE_LIMIT = 100;
+const MAX_CATALOG_PAGES = 100;
+const WORKSPACE_PREFERENCES_KEY = 'agent-dock.session-workspace.v1';
 const INTERACTIVE_CAPABILITIES: CapabilityRequest = {
   required: [{ id: 'session.cancel' }],
   optional: [
@@ -43,20 +50,6 @@ const INTERACTIVE_CAPABILITIES: CapabilityRequest = {
   allowExperimental: false,
 };
 
-function terminalStatus(event: AgentEventV2Envelope): RunStatus | undefined {
-  if (event.type === 'session.completed') return 'completed';
-  if (event.type === 'session.failed') return 'failed';
-  if (event.type === 'session.cancelled') return 'cancelled';
-  if (event.type === 'session.interrupted') return 'interrupted';
-  return undefined;
-}
-
-function projectedSessionStatus(
-  status: 'starting' | 'active' | 'idle' | 'completed' | 'failed' | 'cancelled' | 'interrupted',
-): RunStatus {
-  return status === 'starting' || status === 'active' || status === 'idle' ? 'running' : status;
-}
-
 export function App() {
   const [daemonState, setDaemonState] = useState<DaemonState>('connecting');
   const [daemonError, setDaemonError] = useState<string>();
@@ -65,23 +58,29 @@ export function App() {
   const [provider, setProvider] = useState<ProviderId>('claude');
   const [cwd, setCwd] = useState('');
   const [prompt, setPrompt] = useState('');
+  const [allowDirtyWorkspaceShare, setAllowDirtyWorkspaceShare] = useState(false);
   const [formError, setFormError] = useState<string>();
-  const [runStatus, setRunStatus] = useState<RunStatus>('idle');
-  const [activityHistory, dispatchActivity] = useReducer(activityHistoryReducer, undefined, () =>
-    createActivityHistoryState(),
-  );
-  const [sessionId, setSessionId] = useState<string>();
   const [workspaceTrust, setWorkspaceTrust] = useState<WorkspaceTrustViewV2>();
   const [trustPrompt, setTrustPrompt] = useState<WorkspaceTrustViewV2>();
   const [trustBusy, setTrustBusy] = useState(false);
   const [trustError, setTrustError] = useState<string>();
-  const [interactions, setInteractions] = useState<RendererInteraction[]>([]);
   const [interactionBusy, setInteractionBusy] = useState(false);
   const [interactionError, setInteractionError] = useState<string>();
   const [revokingTrust, setRevokingTrust] = useState(false);
-  const sessionIdRef = useRef<string>();
-  const startingRef = useRef(false);
-  const interactionTimelineRef = useRef(new RendererInteractionTimelineProjector());
+  const [creating, setCreating] = useState(false);
+  const [catalogLoaded, setCatalogLoaded] = useState(false);
+  const [workspace, dispatchWorkspace] = useReducer(
+    sessionWorkspaceReducer,
+    undefined,
+    createSessionWorkspaceState,
+  );
+  const workspaceRef = useRef(workspace);
+  const pendingActionsRef = useRef(new Map<string, SessionWorkspaceAction[]>());
+  const interactionProjectorsRef = useRef(new Map<string, RendererInteractionTimelineProjector>());
+
+  useEffect(() => {
+    workspaceRef.current = workspace;
+  }, [workspace]);
 
   useEffect(() => {
     let cancelled = false;
@@ -110,60 +109,98 @@ export function App() {
 
   useEffect(() => {
     if (daemonState !== 'ready') return;
-    const listProvidersV2 = window.agentDock.listProvidersV2;
-    if (!listProvidersV2) {
-      setProvidersError('this desktop bridge does not support secure provider discovery');
-      return;
+    let cancelled = false;
+    void window.agentDock
+      .listProvidersV2()
+      .then((statuses) => {
+        if (!cancelled) setProviders(statuses);
+      })
+      .catch((error: Error) => {
+        if (!cancelled) setProvidersError(error.message);
+      });
+    void restoreSessionCatalog();
+    return () => {
+      cancelled = true;
+    };
+
+    async function restoreSessionCatalog(): Promise<void> {
+      try {
+        const sessions = await readAllSessions();
+        if (cancelled) return;
+        const hydrateAction: SessionWorkspaceAction = {
+          type: 'hydrate',
+          sessions,
+          preferences: readWorkspacePreferences(),
+        };
+        workspaceRef.current = sessionWorkspaceReducer(workspaceRef.current, hydrateAction);
+        dispatchWorkspace(hydrateAction);
+        for (const session of sessions) flushPendingActions(session.id);
+        await Promise.all(
+          sessions.map(async (session) => {
+            const events = await readAllHistory(session.id);
+            if (cancelled) return;
+            dispatchWorkspace({ type: 'replace_history', sessionId: session.id, events });
+            if (!isTerminal(session))
+              await window.agentDock.reconnectInteractiveSession(session.id);
+          }),
+        );
+      } catch (error) {
+        if (!cancelled) {
+          setFormError(error instanceof Error ? error.message : 'failed to restore sessions');
+        }
+      } finally {
+        if (!cancelled) setCatalogLoaded(true);
+      }
     }
-    listProvidersV2()
-      .then(setProviders)
-      .catch((error: Error) => setProvidersError(error.message));
   }, [daemonState]);
 
   useEffect(() => {
-    const unsubscribeEvents = window.agentDock.onInteractiveSessionEvent(
-      (eventSessionId, event) => {
-        if (!sessionIdRef.current && startingRef.current) sessionIdRef.current = eventSessionId;
-        if (sessionIdRef.current !== eventSessionId) return;
-        dispatchActivity({ type: 'append', event });
-        const terminal = terminalStatus(event);
-        if (terminal) {
-          setRunStatus(terminal);
-          startingRef.current = false;
-        } else if (event.type === 'session.status' && event.status !== 'starting') {
-          setRunStatus('running');
-        }
-      },
-    );
+    if (!catalogLoaded) return;
+    try {
+      window.localStorage.setItem(
+        WORKSPACE_PREFERENCES_KEY,
+        JSON.stringify(sessionWorkspacePreferences(workspace)),
+      );
+    } catch {
+      // Daemon state remains authoritative when best-effort UI preferences cannot be saved.
+    }
+  }, [catalogLoaded, workspace]);
+
+  useEffect(() => {
+    const unsubscribeEvents = window.agentDock.onInteractiveSessionEvent((sessionId, event) => {
+      dispatchOrQueue(sessionId, { type: 'append_event', event });
+    });
     const unsubscribeNotices = window.agentDock.onInteractiveSessionStreamNotice(
-      (eventSessionId, notice) => {
-        if (sessionIdRef.current !== eventSessionId) return;
+      (sessionId, notice) => {
         if (notice.type === 'replay_reset') {
-          setRunStatus(projectedSessionStatus(notice.session.status));
+          dispatchWorkspace({ type: 'replay_reset', session: notice.session });
           return;
         }
-        setFormError(notice.message);
-        setRunStatus('failed');
+        dispatchWorkspace({ type: 'stream_error', sessionId, message: notice.message });
       },
     );
-    const unsubscribeInteractions =
-      window.agentDock.onInteractionRequested?.((interaction) => {
+    const unsubscribeInteractions = window.agentDock.onInteractionRequested(
+      (sessionId, interaction) => {
         setInteractionError(undefined);
-        setInteractions((current) => [...current, interaction]);
-        dispatchActivity({
-          type: 'append',
-          event: interactionTimelineRef.current.projectInteraction(interaction),
+        dispatchOrQueue(sessionId, {
+          type: 'interaction_requested',
+          sessionId,
+          interaction,
+          timelineEvent: interactionProjector(sessionId).projectInteraction(interaction),
         });
-      }) ?? (() => {});
-    const unsubscribeResolutions =
-      window.agentDock.onInteractionResolved?.((resolution: RendererInteractionResolution) => {
-        const event = interactionTimelineRef.current.projectResolution(resolution);
-        if (event) dispatchActivity({ type: 'append', event });
-        setInteractions((current) =>
-          current.filter((item) => item.interactionHandle !== resolution.interactionHandle),
-        );
+      },
+    );
+    const unsubscribeResolutions = window.agentDock.onInteractionResolved(
+      (sessionId: string, resolution: RendererInteractionResolution) => {
+        dispatchOrQueue(sessionId, {
+          type: 'interaction_resolved',
+          sessionId,
+          resolution,
+          timelineEvent: interactionProjector(sessionId).projectResolution(resolution),
+        });
         setInteractionBusy(false);
-      }) ?? (() => {});
+      },
+    );
     return () => {
       unsubscribeEvents();
       unsubscribeNotices();
@@ -173,69 +210,47 @@ export function App() {
   }, []);
 
   const startInteractiveSession = useCallback(async () => {
-    dispatchActivity({ type: 'reset' });
-    interactionTimelineRef.current.reset();
-    setInteractions([]);
-    setSessionId(undefined);
-    sessionIdRef.current = undefined;
-    startingRef.current = true;
-    setRunStatus('starting');
+    setCreating(true);
     try {
       const session = await window.agentDock.createInteractiveSession({
         provider,
         cwd: cwd.trim(),
         prompt: prompt.trim(),
         capabilities: INTERACTIVE_CAPABILITIES,
+        ...(allowDirtyWorkspaceShare ? { allowDirtyWorkspaceShare: true } : {}),
       });
-      if (sessionIdRef.current && sessionIdRef.current !== session.id) {
-        throw new Error('interactive event stream did not match the created session');
-      }
-      sessionIdRef.current = session.id;
-      setSessionId(session.id);
-      setRunStatus(projectedSessionStatus(session.status));
+      const upsertAction: SessionWorkspaceAction = { type: 'upsert', session, select: true };
+      workspaceRef.current = sessionWorkspaceReducer(workspaceRef.current, upsertAction);
+      dispatchWorkspace(upsertAction);
+      flushPendingActions(session.id);
+      setPrompt('');
     } catch (error) {
-      sessionIdRef.current = undefined;
-      setRunStatus('failed');
       setFormError(error instanceof Error ? error.message : 'failed to start session');
     } finally {
-      startingRef.current = false;
+      setCreating(false);
     }
-  }, [provider, cwd, prompt]);
+  }, [allowDirtyWorkspaceShare, provider, cwd, prompt]);
 
   const handleRun = useCallback(async () => {
     setFormError(undefined);
     setTrustError(undefined);
-    if (!cwd.trim()) {
-      setFormError('working directory is required');
-      return;
-    }
-    if (!prompt.trim()) {
-      setFormError('prompt is required');
-      return;
-    }
-    const inspectWorkspace = window.agentDock.inspectWorkspace;
-    if (!inspectWorkspace) {
-      setRunStatus('failed');
-      setFormError('this desktop bridge does not support workspace trust');
-      return;
-    }
-    setRunStatus('starting');
+    if (!cwd.trim()) return setFormError('working directory is required');
+    if (!prompt.trim()) return setFormError('prompt is required');
+    setCreating(true);
     try {
-      const trust = await inspectWorkspace(cwd.trim());
+      const trust = await window.agentDock.inspectWorkspace(cwd.trim());
       setWorkspaceTrust(trust);
-      if (trust.state !== 'trusted') {
-        setTrustPrompt(trust);
-        return;
-      }
+      if (trust.state !== 'trusted') return setTrustPrompt(trust);
       await startInteractiveSession();
     } catch (error) {
-      setRunStatus('failed');
       setFormError(error instanceof Error ? error.message : 'failed to inspect workspace');
+    } finally {
+      setCreating(false);
     }
   }, [cwd, prompt, startInteractiveSession]);
 
   const handleTrustAndRun = useCallback(async () => {
-    if (!trustPrompt || !window.agentDock.setWorkspaceTrust) return;
+    if (!trustPrompt) return;
     setTrustBusy(true);
     setTrustError(undefined);
     try {
@@ -251,77 +266,128 @@ export function App() {
       setTrustError(error instanceof Error ? error.message : 'failed to trust workspace');
     } finally {
       setTrustBusy(false);
+      setCreating(false);
     }
   }, [cwd, startInteractiveSession, trustPrompt]);
 
-  const handleCancel = useCallback(async () => {
-    if (!sessionId) return;
+  const selectedEntry = workspace.selectedSessionId
+    ? workspace.entries[workspace.selectedSessionId]
+    : undefined;
+  const selectedInteraction = selectedEntry?.interactions[0];
+  const runStatus = creating
+    ? 'starting'
+    : selectedEntry
+      ? projectedSessionStatus(selectedEntry.session.status)
+      : 'idle';
+
+  const handleCancel = useCallback(async (sessionId?: string) => {
+    const target = sessionId ?? workspaceRef.current.selectedSessionId;
+    if (!target) return;
     try {
-      await window.agentDock.cancelInteractiveSession(sessionId);
+      await window.agentDock.cancelInteractiveSession(target);
     } catch (error) {
       setFormError(error instanceof Error ? error.message : 'failed to cancel session');
     }
-  }, [sessionId]);
-
-  const removeInteraction = useCallback((interactionHandle: string) => {
-    setInteractions((current) =>
-      current.filter((interaction) => interaction.interactionHandle !== interactionHandle),
-    );
   }, []);
 
   const handleApproval = useCallback(
     async (decision: ApprovalDecisionV2) => {
-      const interaction = interactions[0];
-      if (!interaction || interaction.kind !== 'approval' || !window.agentDock.respondApproval)
-        return;
+      if (!selectedEntry || !selectedInteraction || selectedInteraction.kind !== 'approval') return;
       setInteractionBusy(true);
       setInteractionError(undefined);
       try {
-        await window.agentDock.respondApproval(interaction.interactionHandle, decision);
+        await window.agentDock.respondApproval(selectedInteraction.interactionHandle, decision);
       } catch (error) {
-        setFormError(
+        setInteractionError(
           `${error instanceof Error ? error.message : 'approval response failed'}; the request will fail closed`,
         );
       } finally {
-        removeInteraction(interaction.interactionHandle);
+        dispatchWorkspace({
+          type: 'remove_interaction',
+          sessionId: selectedEntry.session.id,
+          interactionHandle: selectedInteraction.interactionHandle,
+        });
         setInteractionBusy(false);
       }
     },
-    [interactions, removeInteraction],
+    [selectedEntry, selectedInteraction],
   );
 
   const handleQuestions = useCallback(
     async (answers: RendererQuestionResponse['answers']) => {
-      const interaction = interactions[0];
-      if (!interaction || interaction.kind !== 'question' || !window.agentDock.answerQuestions)
-        return;
+      if (!selectedEntry || !selectedInteraction || selectedInteraction.kind !== 'question') return;
       setInteractionBusy(true);
       setInteractionError(undefined);
       try {
-        await window.agentDock.answerQuestions(interaction.interactionHandle, answers);
+        await window.agentDock.answerQuestions(selectedInteraction.interactionHandle, answers);
       } catch (error) {
-        setFormError(
+        setInteractionError(
           `${error instanceof Error ? error.message : 'question response failed'}; the request will fail closed`,
         );
       } finally {
-        removeInteraction(interaction.interactionHandle);
+        dispatchWorkspace({
+          type: 'remove_interaction',
+          sessionId: selectedEntry.session.id,
+          interactionHandle: selectedInteraction.interactionHandle,
+        });
         setInteractionBusy(false);
       }
     },
-    [interactions, removeInteraction],
+    [selectedEntry, selectedInteraction],
   );
 
+  const handleContinuation = useCallback(
+    async (kind: 'resume' | 'fork') => {
+      if (!selectedEntry || !prompt.trim()) return;
+      setCreating(true);
+      setFormError(undefined);
+      try {
+        const operation =
+          kind === 'resume'
+            ? window.agentDock.resumeInteractiveSession
+            : window.agentDock.forkInteractiveSession;
+        const session = await operation(selectedEntry.session.id, {
+          prompt: prompt.trim(),
+          capabilities: INTERACTIVE_CAPABILITIES,
+          ...(allowDirtyWorkspaceShare ? { allowDirtyWorkspaceShare: true } : {}),
+        });
+        const upsertAction: SessionWorkspaceAction = { type: 'upsert', session, select: true };
+        workspaceRef.current = sessionWorkspaceReducer(workspaceRef.current, upsertAction);
+        dispatchWorkspace(upsertAction);
+        flushPendingActions(session.id);
+        setPrompt('');
+      } catch (error) {
+        setFormError(error instanceof Error ? error.message : `failed to ${kind} session`);
+      } finally {
+        setCreating(false);
+      }
+    },
+    [allowDirtyWorkspaceShare, prompt, selectedEntry],
+  );
+
+  const handleDelete = useCallback(async () => {
+    if (!selectedEntry || !isTerminal(selectedEntry.session)) return;
+    try {
+      await window.agentDock.deleteInteractiveSession(selectedEntry.session.id);
+      interactionProjectorsRef.current.delete(selectedEntry.session.id);
+      dispatchWorkspace({ type: 'delete', sessionId: selectedEntry.session.id });
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : 'failed to delete session');
+    }
+  }, [selectedEntry]);
+
   const handleRevokeTrust = useCallback(async () => {
-    if (!workspaceTrust || !window.agentDock.setWorkspaceTrust) return;
+    if (!workspaceTrust) return;
     setRevokingTrust(true);
     setFormError(undefined);
     try {
-      const trust = await window.agentDock.setWorkspaceTrust(workspaceTrust.workspaceId, {
-        cwd: cwd.trim(),
-        incarnation: workspaceTrust.incarnation,
-        state: 'untrusted',
-      });
-      setWorkspaceTrust(trust);
+      setWorkspaceTrust(
+        await window.agentDock.setWorkspaceTrust(workspaceTrust.workspaceId, {
+          cwd: cwd.trim(),
+          incarnation: workspaceTrust.incarnation,
+          state: 'untrusted',
+        }),
+      );
     } catch (error) {
       setFormError(error instanceof Error ? error.message : 'failed to revoke workspace trust');
     } finally {
@@ -329,14 +395,17 @@ export function App() {
     }
   }, [cwd, workspaceTrust]);
 
-  const isRunning = runStatus === 'starting' || runStatus === 'running';
   const selectedProviderStatus = providers?.find((status) => status.id === provider);
+  const selectedSessionProviderStatus = providers?.find(
+    (status) => status.id === selectedEntry?.session.provider,
+  );
   const canRun =
     daemonState === 'ready' &&
     !!selectedProviderStatus?.installed &&
-    !isRunning &&
+    !creating &&
     cwd.trim().length > 0 &&
     prompt.trim().length > 0;
+  const selectedTerminal = selectedEntry ? isTerminal(selectedEntry.session) : false;
 
   return (
     <div className="app-shell">
@@ -380,7 +449,48 @@ export function App() {
       )}
 
       {daemonState === 'ready' && (
-        <main className="workspace">
+        <main className="workspace workspace--sessions">
+          <aside className="workspace__sidebar card" aria-label="Sessions">
+            <div className="section-heading">
+              <div>
+                <span className="eyebrow">Workspace</span>
+                <h2>Sessions</h2>
+              </div>
+              <span className="section-count">{workspace.order.length}</span>
+            </div>
+            <div className="session-list">
+              {workspace.order.map((sessionId) => {
+                const entry = workspace.entries[sessionId];
+                if (!entry) return null;
+                return (
+                  <button
+                    key={sessionId}
+                    type="button"
+                    className={`session-list__item${workspace.selectedSessionId === sessionId ? ' session-list__item--selected' : ''}${entry.archived ? ' session-list__item--archived' : ''}`}
+                    onClick={() => dispatchWorkspace({ type: 'select', sessionId })}
+                  >
+                    <span className="session-list__title">
+                      {entry.session.provider} · {shortId(sessionId)}
+                    </span>
+                    <span className="session-list__meta">
+                      {projectedSessionStatus(entry.session.status)} · {entry.session.transport}
+                    </span>
+                    <span className="session-list__signals">
+                      {entry.interactions.length > 0 && <strong>Needs attention</strong>}
+                      {entry.unread > 0 && (
+                        <span className="session-list__unread">{entry.unread}</span>
+                      )}
+                      {entry.archived && <span>Archived</span>}
+                    </span>
+                  </button>
+                );
+              })}
+              {catalogLoaded && workspace.order.length === 0 && (
+                <p className="session-list__empty">No sessions yet.</p>
+              )}
+            </div>
+          </aside>
+
           <div className="workspace__controls">
             <section className="card">
               <div className="section-heading">
@@ -393,7 +503,6 @@ export function App() {
               {providersError && <div className="banner banner--error">{providersError}</div>}
               {providers && <ProviderPanel providers={providers} />}
             </section>
-
             <section className="card">
               <div className="section-heading">
                 <div>
@@ -406,7 +515,7 @@ export function App() {
                 <select
                   value={provider}
                   onChange={(event) => setProvider(event.target.value as ProviderId)}
-                  disabled={isRunning}
+                  disabled={creating}
                 >
                   <option value="claude">Claude Code</option>
                   <option value="codex">Codex</option>
@@ -423,12 +532,12 @@ export function App() {
                       setWorkspaceTrust(undefined);
                     }}
                     placeholder="/path/to/project"
-                    disabled={isRunning}
+                    disabled={creating}
                   />
                   <button
                     className="button button--secondary"
                     type="button"
-                    disabled={isRunning}
+                    disabled={creating}
                     onClick={async () => {
                       const directory = await window.agentDock.selectDirectory();
                       if (directory) {
@@ -461,8 +570,17 @@ export function App() {
                   onChange={(event) => setPrompt(event.target.value)}
                   rows={5}
                   placeholder="Describe the task for your agent…"
-                  disabled={isRunning}
+                  disabled={creating}
                 />
+              </label>
+              <label className="dirty-share-option">
+                <input
+                  type="checkbox"
+                  checked={allowDirtyWorkspaceShare}
+                  onChange={(event) => setAllowDirtyWorkspaceShare(event.target.checked)}
+                  disabled={creating}
+                />
+                Allow another read-only session to share this worktree when it is already dirty
               </label>
               {formError && (
                 <div className="banner banner--error" role="alert">
@@ -481,10 +599,18 @@ export function App() {
                 <button
                   className="button button--secondary"
                   type="button"
-                  onClick={handleCancel}
-                  disabled={runStatus !== 'running'}
+                  onClick={() => void handleContinuation('resume')}
+                  disabled={!selectedTerminal || !prompt.trim() || creating}
                 >
-                  Cancel
+                  Resume
+                </button>
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  onClick={() => void handleContinuation('fork')}
+                  disabled={!selectedTerminal || !prompt.trim() || creating}
+                >
+                  Fork
                 </button>
               </div>
             </section>
@@ -500,11 +626,59 @@ export function App() {
                 {runStatus}
               </span>
             </div>
+            {selectedEntry && (
+              <div className="session-facts" aria-label="Session details">
+                <span>{selectedEntry.session.cwd}</span>
+                <span>Branch: {selectedEntry.session.branch ?? 'not a Git worktree'}</span>
+                <span>{selectedEntry.session.provider}</span>
+                <span>{selectedEntry.session.transport}</span>
+                <span>Trust: verified at dispatch</span>
+                {selectedSessionProviderStatus && (
+                  <span>Sandbox: {selectedSessionProviderStatus.sandbox.badge}</span>
+                )}
+                <span>{lineageLabel(selectedEntry.session)}</span>
+              </div>
+            )}
+            {selectedEntry?.streamError && (
+              <div className="banner banner--error">{selectedEntry.streamError}</div>
+            )}
             <ActivityTimeline
-              events={activityHistory.events}
-              omittedEventCount={activityHistory.omittedEventCount}
-              focusBlockingCards={interactions.length === 0}
+              events={selectedEntry?.activity.events ?? []}
+              omittedEventCount={selectedEntry?.activity.omittedEventCount ?? 0}
+              focusBlockingCards={!selectedInteraction}
             />
+            {selectedEntry && (
+              <div className="row session-actions">
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  onClick={() => void handleCancel(selectedEntry.session.id)}
+                  disabled={projectedSessionStatus(selectedEntry.session.status) !== 'running'}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  onClick={() =>
+                    dispatchWorkspace({
+                      type: 'toggle_archive',
+                      sessionId: selectedEntry.session.id,
+                    })
+                  }
+                >
+                  {selectedEntry.archived ? 'Unarchive' : 'Archive'}
+                </button>
+                <button
+                  className="button button--danger"
+                  type="button"
+                  onClick={() => void handleDelete()}
+                  disabled={!selectedTerminal}
+                >
+                  Delete
+                </button>
+              </div>
+            )}
           </section>
         </main>
       )}
@@ -516,21 +690,126 @@ export function App() {
           error={trustError}
           onCancel={() => {
             setTrustPrompt(undefined);
-            setRunStatus('idle');
+            setCreating(false);
           }}
           onTrust={() => void handleTrustAndRun()}
         />
       )}
-      {interactions[0] && (
+      {selectedInteraction && selectedEntry && (
         <InteractionDialog
-          interaction={interactions[0]}
+          interaction={selectedInteraction}
           busy={interactionBusy}
           error={interactionError}
           onApproval={(decision) => void handleApproval(decision)}
           onQuestions={(answers) => void handleQuestions(answers)}
-          onCancelSession={() => void handleCancel()}
+          onCancelSession={() => void handleCancel(selectedEntry.session.id)}
         />
       )}
     </div>
   );
+
+  function dispatchOrQueue(sessionId: string, action: SessionWorkspaceAction): void {
+    if (workspaceRef.current.entries[sessionId]) {
+      dispatchWorkspace(action);
+      return;
+    }
+    const pending = pendingActionsRef.current.get(sessionId) ?? [];
+    pending.push(action);
+    pendingActionsRef.current.set(sessionId, pending);
+  }
+
+  function flushPendingActions(sessionId: string): void {
+    const pending = pendingActionsRef.current.get(sessionId) ?? [];
+    pendingActionsRef.current.delete(sessionId);
+    for (const action of pending) dispatchWorkspace(action);
+  }
+
+  function interactionProjector(sessionId: string): RendererInteractionTimelineProjector {
+    let projector = interactionProjectorsRef.current.get(sessionId);
+    if (!projector) {
+      projector = new RendererInteractionTimelineProjector();
+      interactionProjectorsRef.current.set(sessionId, projector);
+    }
+    return projector;
+  }
+}
+
+async function readAllSessions(): Promise<AgentSessionV2[]> {
+  const sessions: AgentSessionV2[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  for (let pageIndex = 0; pageIndex < MAX_CATALOG_PAGES; pageIndex += 1) {
+    const page: SessionListV2Page = await window.agentDock.listInteractiveSessions({
+      limit: CATALOG_PAGE_LIMIT,
+      ...(cursor ? { cursor } : {}),
+    });
+    sessions.push(...page.sessions);
+    if (!page.nextCursor) return sessions;
+    if (seenCursors.has(page.nextCursor)) throw new Error('session catalog returned a cursor loop');
+    seenCursors.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
+  throw new Error('session catalog exceeded the desktop restore bound');
+}
+
+async function readAllHistory(sessionId: string): Promise<AgentEventV2Envelope[]> {
+  const events: AgentEventV2Envelope[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  for (let pageIndex = 0; pageIndex < MAX_CATALOG_PAGES; pageIndex += 1) {
+    const page: SessionEventHistoryV2Page = await window.agentDock.readInteractiveSessionHistory(
+      sessionId,
+      { limit: CATALOG_PAGE_LIMIT, ...(cursor ? { cursor } : {}) },
+    );
+    events.push(...page.events);
+    if (!page.nextCursor) return events;
+    if (seenCursors.has(page.nextCursor)) throw new Error('session history returned a cursor loop');
+    seenCursors.add(page.nextCursor);
+    cursor = page.nextCursor;
+  }
+  throw new Error('session history exceeded the desktop restore bound');
+}
+
+function readWorkspacePreferences(): SessionWorkspacePreferences | undefined {
+  try {
+    const value: unknown = JSON.parse(
+      window.localStorage.getItem(WORKSPACE_PREFERENCES_KEY) ?? 'null',
+    );
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const record = value as Record<string, unknown>;
+    const unread = record.unreadBySession;
+    const archived = record.archivedSessionIds;
+    return {
+      ...(typeof record.selectedSessionId === 'string'
+        ? { selectedSessionId: record.selectedSessionId }
+        : {}),
+      unreadBySession:
+        unread && typeof unread === 'object' && !Array.isArray(unread)
+          ? Object.fromEntries(
+              Object.entries(unread).filter(
+                ([, count]) => typeof count === 'number' && Number.isInteger(count) && count >= 0,
+              ),
+            )
+          : {},
+      archivedSessionIds: Array.isArray(archived)
+        ? archived.filter((sessionId): sessionId is string => typeof sessionId === 'string')
+        : [],
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function isTerminal(session: AgentSessionV2): boolean {
+  return ['completed', 'failed', 'cancelled', 'interrupted'].includes(session.status);
+}
+
+function shortId(sessionId: string): string {
+  return sessionId.slice(0, 8);
+}
+
+function lineageLabel(session: AgentSessionV2): string {
+  return session.parentSessionId
+    ? `${session.continuationKind ?? 'continued'} from ${shortId(session.parentSessionId)}`
+    : 'Fresh session';
 }

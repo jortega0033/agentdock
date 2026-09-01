@@ -78,6 +78,7 @@ interface V2SessionMetadata {
   nativeTools: Map<string, ToolCorrelation>;
   interactive: boolean;
   status: AgentSessionV2['status'];
+  branch?: string;
   acceptedWork: AgentSessionV2['acceptedWork'];
   terminalReason?: string;
   pendingInteractions: Map<string, { kind: 'approval' | 'question'; turnId: string }>;
@@ -345,6 +346,7 @@ export class V2SessionFacade {
             lineage,
             continuationScope,
             runtimeMetadata,
+            workspace?.branch,
           ),
         );
         reservedSessionIds.add(session.id);
@@ -755,6 +757,7 @@ export class V2SessionFacade {
         nativeTools: new Map(),
         interactive: activeInteractive,
         status: v2Status(session.status),
+        ...(workspace?.branch ? { branch: workspace.branch } : {}),
         acceptedWork: activeInteractive ? 'not_accepted' : 'unknown',
         pendingInteractions: new Map(),
         ...(providerMetadata?.providerSessionId
@@ -892,6 +895,9 @@ export class V2SessionFacade {
         cwd: parent.cwd,
         prompt: input.prompt,
         ...(input.capabilities ? { capabilities: input.capabilities } : {}),
+        ...(input.allowDirtyWorkspaceShare === undefined
+          ? {}
+          : { allowDirtyWorkspaceShare: input.allowDirtyWorkspaceShare }),
         continuation: { kind, providerSessionId: parent.providerSessionId },
       },
       lineage: {
@@ -1025,12 +1031,14 @@ export class V2SessionFacade {
     lineage?: V2LineageContext,
     continuationScope?: ProviderContinuationScope,
     runtimeMetadata?: ProviderRuntimeMetadataV2,
+    branch?: string,
   ): DurableExecutionRecord {
     const projected = agentSessionV2Schema.parse({
       id: session.id,
       provider: session.provider,
       transport: selection.transport,
       cwd: session.cwd,
+      ...(branch ? { branch } : {}),
       status: 'starting',
       selection,
       executionId,
@@ -1088,6 +1096,7 @@ export class V2SessionFacade {
         nativeTools: new Map(),
         interactive: record.interactive,
         status: storedSession.status,
+        ...(storedSession.branch ? { branch: storedSession.branch } : {}),
         acceptedWork: storedSession.acceptedWork,
         ...(storedSession.terminalReason ? { terminalReason: storedSession.terminalReason } : {}),
         pendingInteractions: new Map(),
@@ -1151,6 +1160,7 @@ export class V2SessionFacade {
       provider: session.provider,
       transport: metadata.selection.transport,
       cwd: session.cwd,
+      ...(metadata.branch ? { branch: metadata.branch } : {}),
       status: metadata.status,
       selection: metadata.selection,
       executionId: metadata.executionId,

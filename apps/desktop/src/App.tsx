@@ -10,6 +10,7 @@ import type {
   SessionListV2Page,
   WorkspaceTrustViewV2,
 } from '@agent-dock/shared';
+import { PROVIDER_DISPLAY_NAMES } from '@agent-dock/shared';
 import type {
   RendererInteractionResolution,
   RendererQuestionResponse,
@@ -538,8 +539,8 @@ export function App() {
                   onChange={(event) => setProvider(event.target.value as ProviderId)}
                   disabled={creating}
                 >
-                  <option value="claude">Claude Code</option>
-                  <option value="codex">Codex</option>
+                  <option value="claude">{PROVIDER_DISPLAY_NAMES.claude}</option>
+                  <option value="codex">{PROVIDER_DISPLAY_NAMES.codex}</option>
                 </select>
               </label>
               <label>

@@ -1,4 +1,4 @@
-import type { ProviderStatusV2 } from '@agent-dock/shared';
+import { PROVIDER_DISPLAY_NAMES, type ProviderStatusV2 } from '@agent-dock/shared';
 import noProvidersIllustration from '../../assets/illustrations/no-providers.svg';
 
 function authLabel(status: ProviderStatusV2): string {
@@ -20,7 +20,10 @@ export function ProviderPanel({ providers }: { providers: ProviderStatusV2[] }) 
       <div className="provider-panel provider-panel--empty">
         <img className="provider-panel__empty-illustration" src={noProvidersIllustration} alt="" />
         <strong>No providers found</strong>
-        <span>Install Claude Code or Codex, then restart AgentDock.</span>
+        <span>
+          Install {PROVIDER_DISPLAY_NAMES.claude} or {PROVIDER_DISPLAY_NAMES.codex}, then restart
+          AgentDock.
+        </span>
       </div>
     );
   }

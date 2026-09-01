@@ -6,23 +6,30 @@ import type {
   ProviderStatusV2,
   WorkspaceTrustViewV2,
 } from '@agent-dock/shared';
+import { PROVIDER_DISPLAY_NAMES } from '@agent-dock/shared';
 import type { AgentDockBridge } from './window.js';
+
+/** Documentation screenshots must never present fictitious data as real: every version here is
+ * the actual pinned/verified provider version from `compatibility-manifest.ts` and
+ * `sdk-version.ts`, and is suffixed "(demo)" so a reader can never mistake this fixture-driven
+ * capture for a live provider read. */
+const DEMO_TRANSPORT_ID = 'demo-interactive';
 
 const providers: ProviderStatus[] = [
   {
     id: 'claude',
-    name: 'Claude Code',
+    name: PROVIDER_DISPLAY_NAMES.claude,
     installed: true,
     authenticated: 'authenticated',
-    version: '2.4.1',
+    version: '2.1.251 (demo)',
     capabilities: { resume: true, cancellation: true, tools: true, usage: true, thinking: true },
   },
   {
     id: 'codex',
-    name: 'Codex',
+    name: PROVIDER_DISPLAY_NAMES.codex,
     installed: true,
     authenticated: 'authenticated',
-    version: '1.9.0',
+    version: '0.147.0 (demo)',
     capabilities: { resume: true, cancellation: true, tools: true, usage: true },
   },
 ];
@@ -34,7 +41,7 @@ const providersV2: ProviderStatusV2[] = providers.map((provider) => ({
   authenticated: provider.authenticated,
   transports: [
     {
-      id: 'asset-capture-interactive',
+      id: DEMO_TRANSPORT_ID,
       priority: 0,
       stability: 'stable',
       possibleEffects: ['read', 'filesystem_write', 'command'],
@@ -162,7 +169,7 @@ export function installAssetCaptureBridge(): void {
     },
     createInteractiveSession: async (input) => {
       const selection = {
-        transport: 'asset-capture-interactive',
+        transport: DEMO_TRANSPORT_ID,
         enabled: [],
         unavailableOptional: [],
         possibleEffects: [],

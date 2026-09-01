@@ -30,9 +30,9 @@ exact version this repo was built against).
 
 See [docs/architecture.md](docs/architecture.md) for the full picture, and
 [DEVELOPMENT.md](DEVELOPMENT.md) for an "I want to change X, start here" map. In short:
-`packages/shared` (types/contracts) → `packages/agent-runtime` (provider adapters, process
-management) → `apps/daemon` (HTTP+SSE server) → `apps/desktop` (Electron+React demo client).
-Dependencies only flow in that direction.
+`packages/shared` sits under two branches: `packages/agent-runtime` → `apps/daemon`, and
+`packages/client` → `apps/desktop`. The desktop main process uses the client to reach the daemon;
+the desktop does not import the daemon as a package.
 
 ## Architecture rules
 
@@ -40,7 +40,7 @@ These aren't style preferences: breaking them tends to break the security model 
 the tests assume. The full list, with the reasoning behind each, is
 [DEVELOPMENT.md#common-architectural-rules](DEVELOPMENT.md#common-architectural-rules); briefly:
 never build a shell command string, never let the renderer call the daemon directly, never accept
-an executable path from a request, never branch on provider id outside `packages/agent-runtime`,
+an executable path from a request, keep provider-native behavior in `packages/agent-runtime`, and
 never add a generic IPC passthrough to the preload bridge.
 
 ## Testing requirements
@@ -52,10 +52,11 @@ never add a generic IPC passthrough to the preload bridge.
 - Never commit a fixture, test, or example that contains a real credential, token, or account
   identifier, even a revoked or expired one. Provider CLI fixtures are small `node` scripts
   standing in for the real CLI's I/O shape, never real recorded CLI output.
-- If your change affects the public contract (anything in
-  [docs/protocol-v1.md](docs/protocol-v1.md)'s "public/stable" list, `@agent-dock/client`'s exports,
-  or a daemon route's shape), update the relevant doc (`docs/protocol-v1.md`, `docs/client-sdk.md`,
-  or `docs/daemon.md`) in the same PR. A behavior change with no doc update for it isn't done.
+- If your change affects a wire contract, `@agent-dock/client`'s exports, or a daemon route's shape,
+  update the relevant protocol document ([v1](docs/protocol-v1.md) or
+  [v2](docs/protocol-v2.md)), [client SDK guide](docs/client-sdk.md), and
+  [daemon guide](docs/daemon.md) in the same PR. A behavior change with no doc update for it isn't
+  done.
 
 ## Before opening a PR
 
@@ -64,8 +65,9 @@ pnpm typecheck   # strict TypeScript, no `any` without a comment justifying it
 pnpm lint
 pnpm test        # must pass without a real Claude/Codex install or any paid API call
 pnpm build
-pnpm audit       # electron-builder's own build-time deps are a known, documented exception;
-                 # see docs/packaging.md; nothing shipped in the app should show up here
+pnpm audit --prod # currently passes; treat any production/runtime finding as a blocker
+pnpm audit       # currently exits nonzero for two documented electron-builder dev-tool advisories;
+                 # compare any new finding with docs/packaging.md
 ```
 
 If you touched anything under `apps/desktop/electron/` (main process, preload, or packaging
@@ -74,12 +76,13 @@ config), also run `pnpm package:win` (Windows) and confirm the app still launche
 alone won't catch (see [docs/packaging.md#verifying-a-packaging-sensitive-change](docs/packaging.md#verifying-a-packaging-sensitive-change)
 for real ones this project already hit).
 
-These same commands run automatically in CI on every push and pull request
-(`.github/workflows/ci.yml`): `pnpm install --frozen-lockfile`, `lint`, `typecheck`, `test`,
-`build`, in that order, on Linux. A separate workflow (`.github/workflows/package-windows.yml`)
-runs `pnpm package:win` on Windows for every push and PR too, and fails if the NSIS installer
-doesn't actually get produced. Neither workflow installs or authenticates a real Claude/Codex CLI.
-See [Testing requirements](#testing-requirements) above for why that's never necessary.
+Linux CI runs `pnpm install --frozen-lockfile`, provider conformance, `lint`, `typecheck`, `test`,
+and `build`, in that order, on every push to `main` and every pull request
+(`.github/workflows/ci.yml`). `pnpm audit` is currently a local contribution check, not a CI step.
+A separate Windows workflow (`.github/workflows/package-windows.yml`) runs provider conformance,
+`pnpm package:win`, focused process-ownership tests, and the packaged-daemon smoke test; it also
+fails if the NSIS installer was not produced. Neither workflow installs or authenticates a real
+Claude/Codex CLI. See [Testing requirements](#testing-requirements) above for why that's unnecessary.
 
 ### Provider contribution checklist
 
@@ -106,11 +109,13 @@ If you're touching a provider adapter (`packages/agent-runtime/src/providers/*`)
 
 ## Scope
 
-Please open an issue before working on anything that would add: persistence (SQLite/a database),
-authentication of the app's own users, telemetry/analytics, a new heavy dependency, or a new
-provider mode (API-key based, cloud-hosted). These are explicitly out of scope for the current
-version (see [What AgentDock is not](README.md#what-agentdock-is-not)) and may or may not be a
-direction the project wants to take.
+Please open an issue before changing the durable session/execution schema, adding authentication of
+the app's own users, telemetry/analytics, a new heavy dependency, or a new provider transport or
+authentication mode. AgentDock already includes local file-backed session/execution metadata,
+Claude Agent SDK transports for reviewed commercial auth sources, and Codex app-server support;
+changes to those surfaces need migration and security review. Hosted user accounts, product
+telemetry, and a product backend remain downstream concerns; see
+[What AgentDock is](README.md#what-agentdock-is).
 
 ## License
 

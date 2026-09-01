@@ -10,12 +10,13 @@ not-yet-attempted.
 ```bash
 pnpm build         # compiles every package, the prerequisite for packaging, not packaging itself
 pnpm package:win   # pnpm build, then electron-builder --win nsis
-pnpm package       # pnpm build, then electron-builder for whatever platform you're on
+pnpm package       # pnpm build, then electron-builder's current-platform defaults (unverified outside Windows)
 ```
 
-Both `package` commands are non-interactive and safe to run from a clean checkout after `pnpm
+On Windows, both package commands are non-interactive and run from a clean checkout after `pnpm
 install`, with no code signing configured: there's nothing to sign with in this repository (see
-[Unsigned installer](#unsigned-installer-and-smartscreen) below).
+[Unsigned installer](#unsigned-installer-and-smartscreen) below). Only `package:win` has a configured,
+CI-verified target; the generic command is not a supported macOS/Linux release pipeline.
 
 ## What `pnpm build` produces (the prerequisite step)
 
@@ -30,9 +31,9 @@ install`, with no code signing configured: there's nothing to sign with in this 
   was an actual bug, not a theoretical risk: caught by running the packaged-mode code path
   (`node dist/index.js`) and hitting `ERR_MODULE_NOT_FOUND`, see
   `apps/daemon/scripts/build.mjs` for the fix.
-- `apps/daemon/dist/claude-agent-sdk/`: the pinned Windows x64 SDK executable plus its SDK/native
-  notices. The build executes `claude.exe --version` and rejects a package/version mismatch before
-  staging it.
+- On Windows, `apps/daemon/dist/claude-agent-sdk/`: the pinned Windows x64 SDK executable plus its
+  SDK/native notices. The build executes `claude.exe --version` and rejects a package/version
+  mismatch before staging it. Non-Windows builds skip this platform asset.
 - `apps/desktop/dist/`: the Vite production build of the React renderer
 - `apps/desktop/dist-electron/main.js`, `preload.js`: the Electron main process and preload
   script, each bundled to a single file (`main.js` inlines `@agent-dock/client`,
@@ -112,15 +113,28 @@ exactly the class of bug this function's test coverage exists to catch.
 
 ## What electron-builder treats as a runtime dependency
 
-`react`, `react-dom`, `zod`, and `@agent-dock/shared`/`@agent-dock/client` are all fully inlined
-into `dist/` and `dist-electron/main.js` at build time (Vite for the renderer, esbuild via
-vite-plugin-electron for main), none of them are read from `node_modules` once built. They live in
-`package.json`'s `devDependencies`, not `dependencies`, specifically so electron-builder's automatic
-production-dependency resolution (which inspects `dependencies` and copies the matching
-`node_modules` trees into the package independently of the `files` config) doesn't embed a second,
-unused, unbundled copy of each. This was caught by unpacking a real built `app.asar` and finding
-`node_modules/@agent-dock/shared` inside it despite an explicit `files` list that excluded
-`node_modules` entirely.
+`react`, `react-dom`, and the `@agent-dock/shared`/`@agent-dock/client` workspace packages are fully
+inlined into `dist/` and `dist-electron/main.js` at build time (Vite for the renderer, esbuild via
+vite-plugin-electron for main). `zod` arrives transitively through `@agent-dock/shared` and is
+bundled with it. The desktop package has no runtime `dependencies`; its direct runtime inputs live
+in `devDependencies`, specifically so electron-builder's automatic production-dependency resolution
+(which inspects `dependencies` and copies matching `node_modules` trees independently of the
+`files` config) does not embed a second, unused, unbundled copy. This was caught by unpacking a real
+built `app.asar` and finding `node_modules/@agent-dock/shared` inside it despite an explicit `files`
+list that excluded `node_modules` entirely.
+
+## Current dependency-audit exception
+
+With the committed lockfile, `pnpm audit` currently exits nonzero for two high-severity advisories in
+the `electron-builder` development-tool chain: `builder-util-runtime@9.2.10`
+([GHSA-p2f4-r6v6-j797](https://github.com/advisories/GHSA-p2f4-r6v6-j797)) and
+`app-builder-lib@25.1.8`
+([GHSA-7g7r-gx96-252g](https://github.com/advisories/GHSA-7g7r-gx96-252g)). Both dependency paths run
+through the `electron-builder` devDependency; this project's `files` list and bundled-output model do
+not copy that tool chain into the installed application. This is a narrow, visible exception, not a
+blanket audit waiver: compare future output, treat any new production/runtime path as a blocker, and
+rerun the full packaging checks when upgrading `electron-builder`. `pnpm audit --prod` currently
+reports no known vulnerabilities.
 
 ## Start Menu and single-instance behavior
 
@@ -130,7 +144,7 @@ the install directory (`allowToChangeInstallationDirectory: true`). The installe
 `app.requestSingleInstanceLock()`: launching it a second time (Start Menu, desktop, or otherwise)
 focuses the existing window rather than opening a second one, which would otherwise spawn a second
 daemon and lose the race described in
-[daemon.md#single-instance-behavior](daemon.md#single-instance-behavior). This was verified live
+[daemon.md#duplicate-start-behavior](daemon.md#duplicate-start-behavior). This was verified live
 against a real installed build: launching the packaged `.exe` a second time while the first was
 running left the process count and the daemon's port unchanged.
 
@@ -149,15 +163,14 @@ local testing.
 | ----------- | ------------ | ---------------- | --------------------------------------------------------------------------- | ----------------------------------------- | --------- |
 | **Windows** | verified     | verified         | verified (installed, launched, closed, relaunched, second-instance-blocked) | verified (NSIS, silent install/uninstall) | verified  |
 | **macOS**   | untested     | untested         | untested                                                                    | not implemented                           | n/a       |
-| **Linux**   | untested     | untested         | untested                                                                    | not implemented                           | n/a       |
+| **Linux**   | untested     | CI-verified      | untested                                                                    | not implemented                           | n/a       |
 
-Nothing in the code is deliberately Windows-only: path handling uses `node:path` throughout, and
-process management already has explicit POSIX branches (see
-[SECURITY.md](../SECURITY.md#process-hygiene)), but "should work" and "verified" are different
-claims; only Windows has actually been installed and exercised end to end. Adding `mac`/`linux`
-targets (`dmg`/`zip`, `AppImage`/`deb`) to `electron-builder.yml` is a reasonable next step but
-wasn't attempted here: macOS/Linux packaging are explicitly out of scope for this milestone, same
-as signing/notarization.
+The core runtime uses `node:path` and has explicit POSIX process-group branches (see
+[SECURITY.md](../SECURITY.md#process-hygiene)), and Linux CI verifies the production build. The
+shipped packaging/native assets are deliberately Windows x64-specific today: NSIS, the Job Object
+host, and the pinned Claude SDK executable. Only Windows has been installed and exercised end to
+end. Adding `mac`/`linux` targets and native assets (`dmg`/`zip`, `AppImage`/`deb`) was not attempted;
+macOS/Linux packaging, signing, and notarization remain out of scope.
 
 ## Verifying a packaging-sensitive change
 
@@ -169,5 +182,6 @@ catch every packaging-mode failure mode: the three real bugs documented above
 [architecture.md](architecture.md)) were each only caught by actually running `pnpm package:win` and
 launching the result. Run it, then run `pnpm --filter @agent-dock/desktop
 test:packaged-daemon-win`; that smoke test executes the packaged SDK binary, checks its exact pinned
-version and notices, and proves the daemon still starts. Also inspect the installer, Start Menu,
-and window icons before considering the change done.
+version and notices, starts the packaged daemon, verifies PATH-based Codex detection/app-server
+launch, and exercises the packaged Job Object host. Also inspect the installer, Start Menu, and
+window icons before considering the change done.

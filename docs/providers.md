@@ -9,8 +9,14 @@ interface (`packages/agent-runtime/src/types.ts`):
 interface AgentProvider {
   readonly id: ProviderId;
   readonly name: string;
-  detect(): Promise<ProviderStatus>;
+  detect(options?: ProviderDetectionOptions): Promise<ProviderStatus>;
   startSession(options: StartSessionOptions): ProviderSessionHandle;
+  getV2Support?(status: ProviderStatus): ProviderV2Support | undefined;
+  startInteractiveSession?(
+    options: StartInteractiveSessionOptions,
+  ): Promise<InteractiveProviderSessionHandle>;
+  readonly mcp?: ProviderMcpControlPlane;
+  readonly components?: ProviderComponentControlPlane;
 }
 ```
 
@@ -18,10 +24,12 @@ An implementation owns everything provider-specific: executable discovery, comma
 process spawning, output parsing, and normalization into `AgentEvent`. Nothing outside
 `packages/agent-runtime` should ever need to know a provider's native event shape; that's the whole
 point of normalizing into the shared `AgentEvent` union documented in
-[protocol-v1.md](protocol-v1.md). In practice, an adapter doesn't implement spawning/parsing
-directly: it delegates to the shared `runProviderSession()` helper (see
+[protocol-v1.md](protocol-v1.md). The v1 one-shot path normally delegates spawning and parsing to
+the shared `runProviderSession()` helper (see
 [architecture.md#process-management](architecture.md#process-management)) and supplies only
-`buildArgs()` and `parseLine()`, the two genuinely provider-specific pure functions.
+`buildArgs()` and `parseLine()`. A rich v2 adapter instead advertises an exact support manifest and
+implements the optional interactive-session factory; MCP and provider-component control planes are
+also optional.
 
 That paragraph describes the current protocol v1 one-shot adapters. The bidirectional provider
 contract and its security gates are defined in
@@ -33,8 +41,9 @@ contract and its security gates are defined in
 on whatever `PATH` the daemon inherited: a GUI app's `PATH` frequently differs from an
 interactive login shell's, especially on macOS. It:
 
-1. Tries a real PATH lookup (`where` on Windows, `which` on POSIX; never a shell builtin like
-   `command -v`, and never a shell at all).
+1. Tries a PATH lookup. Windows scans absolute PATH entries directly for supported `.exe`/`.cmd`
+   names; POSIX invokes `which` without a shell. Relative and empty Windows PATH entries are
+   ignored instead of implicitly searching the working directory.
 2. Falls back to a short, curated list of directories CLI installers commonly use, per
    `commonInstallDirs()`: `~/.local/bin`, `/usr/local/bin`, `/opt/homebrew/bin`,
    `~/.npm-global/bin` on macOS; `~/.local/bin`, `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin`,
@@ -56,18 +65,26 @@ this was built to handle, so it was worth confirming rather than assuming.
 
 ```ts
 type AuthStatus = 'authenticated' | 'unauthenticated' | 'unknown';
+type AuthSource =
+  'chatgpt' | 'api_key' | 'claude_subscription' | 'bedrock' | 'vertex' | 'foundry' | 'unknown';
 
 type ProviderStatus = {
   id: 'claude' | 'codex';
   name: string;
   installed: boolean;
   authenticated: AuthStatus;
+  authSource?: AuthSource;
+  accountFingerprint?: string; // internal only; never serialized
+  selectedModel?: string; // internal only; never serialized
   capabilities: ProviderCapabilities;
   executablePath?: string;
   version?: string;
   error?: string;
 };
 ```
+
+`accountFingerprint` and `selectedModel` are detector/runtime binding inputs, not public provider
+status. The daemon removes both before validating and returning either v1 or v2 provider responses.
 
 `AuthStatus` is deliberately a pure three-value string union with no boolean member. It used to be
 `boolean | 'unknown'`, which let a lazy `if (status.authenticated)` silently treat "couldn't
@@ -139,8 +156,8 @@ without provider-specific branches and remain unselected by default.
 The complete catalog, legacy mapping, sandbox matrix, workspace trust rules, credential posture,
 retention limits, and fallback boundary live in
 [capability-security-v2.md](capability-security-v2.md). Claude Agent SDK support records are
-advertised only for their exact pinned Windows/auth/trust scope; Codex native support remains gated
-by its conformance evidence.
+advertised only for their exact pinned Windows/auth/trust scope. Codex app-server support is likewise
+restricted to its exact validated CLI version and requires authenticated, trusted launch state.
 
 ## Claude adapter
 
@@ -182,12 +199,14 @@ Claude's response and token usage came back as normalized events, and the sessio
 
 ### Claude transport modes
 
-`AGENT_DOCK_CLAUDE_TRANSPORT` accepts `auto` (default), `sdk`, or `cli`. The `cli` mode is the
-legacy path documented above and remains unchanged. `auto` selects the Claude Agent SDK only for a
-user-provided `ANTHROPIC_API_KEY` or exactly one of the supported Bedrock, Vertex, or Foundry
-configurations. Claude.ai/subscription OAuth and `CLAUDE_CODE_OAUTH_TOKEN` are never eligible for
-the SDK. `sdk` fails closed if its eligibility checks do not pass; there is no cross-auth SDK-to-CLI
-fallback after SDK work is accepted.
+`AGENT_DOCK_CLAUDE_TRANSPORT` accepts `auto` (default), `sdk`, or `cli`. The `cli` mode is the legacy
+path documented above and remains unchanged. The SDK path requires Windows, the exact pinned SDK
+executable, an authenticated detection snapshot whose source still matches, a trusted workspace at
+launch, and either a user-provided `ANTHROPIC_API_KEY` or exactly one supported Bedrock, Vertex, or
+Foundry configuration. Claude.ai/subscription OAuth and `CLAUDE_CODE_OAUTH_TOKEN` are never SDK
+credentials. `auto` selects the legacy CLI when an SDK eligibility gate fails before transport
+selection; `sdk` fails closed. Once the SDK transport is selected, import, startup, or query failure
+does not fall back to the CLI.
 
 The SDK and its Windows executable are pinned to `@anthropic-ai/claude-agent-sdk` **0.3.251** and
 the embedded Claude executable **2.1.251**. Windows packaging stages the executable and notices
@@ -224,52 +243,29 @@ Verified manually the same way as Claude: a real, already-authenticated `codex` 
 correct response through the full daemon → adapter → SSE pipeline, including capturing Codex's own
 thread id as `providerSessionId`.
 
-### Historical v0.2 decision: staying on `codex exec --json` (AD-21)
+### Historical v0.2 decision and current v2 transport
 
-This v0.2 decision was recorded against the CLI version verified during the post-audit hardening pass:
-**codex-cli 0.147.0**, which itself labels `app-server` `[experimental]` (with a further
-stable/experimental split inside `app-server` too). This is a dated decision, not a permanent one.
-Revisit it if any of these four triggers becomes true:
+The v0.2 decision to keep the unversioned protocol-v1 path on `codex exec --json` was recorded
+against **codex-cli 0.147.0**. That compatibility path remains: it preserves the simple one-process,
+one-turn JSONL adapter and its v1 contract.
 
-1. Interactive tool approvals enter AgentDock's scope (something `codex exec --json` structurally
-   cannot provide: there is no client→daemon response channel in protocol v1 for it either).
-2. A real multi-turn conversational loop replaces the current one-shot "type a prompt, press Run"
-   UX, making per-turn CLI boot cost a measured bottleneck.
-3. OpenAI drops the `[experimental]` label from `app-server` and publishes a stability policy.
-4. `codex exec --json` itself is deprecated, or its output schema regresses in a way this adapter
-   can't absorb.
+Protocol v2 now has a native `codex-app-server` transport for the exact validated
+**codex-cli 0.147.0** scope. `AGENT_DOCK_CODEX_TRANSPORT` accepts `auto` (default), `app-server`, or
+`exec`: `auto` advertises app-server only when the detected version matches that compatibility
+record, while `exec` keeps v2 on the conservative legacy bridge. Starting app-server additionally
+requires an exact detected executable, authenticated provider status, and a trusted workspace; it
+uses the provider's `workspace-write` sandbox request and `on-request` approval policy.
 
-Triggers 1 and 2 are now planned under the v2 integration epic, and OpenAI now documents
-app-server as its rich-client interface. The current adapter still stays on `codex exec --json`
-even though the provider-neutral v2 protocol and supervisor now exist. Native migration remains
-gated by [issue #8](https://github.com/jortega0033/agentdock/issues/8)'s provider conformance
-fixtures and the trust policy, then is tracked in
-[issue #10](https://github.com/jortega0033/agentdock/issues/10). Its security constraints are fixed
-in [capability-security-v2.md](capability-security-v2.md).
+The app-server manifest covers follow-up and steer input, interrupt/cancel, resume/fork, approvals
+and bounded questions, streamed messages, tools, plans, and usage. API-key authentication does not
+advertise resume or fork because the runtime cannot bind continuation identity for that auth source.
+The exact method allowlist, schema hash, and fake JSON-RPC harness are compatibility evidence; they
+do not imply support for every method exposed by app-server.
 
-Migrating before those dependencies would cost real things this project depends on:
-per-session process isolation and the structurally-derived "exactly one terminal event, always
-last" guarantee (both fall out of `runProviderSession()` deriving the terminal event from process
-exit; an `app-server` migration would have to re-derive both at the RPC layer, for this provider
-only), and the symmetric, copyable one-adapter-per-provider pattern that is this repo's actual
-pedagogical deliverable: `app-server`'s bidirectional JSON-RPC, session multiplexing, and
-approval/interrupt flows would make the Codex adapter the largest and least copyable file in the
-repo.
-
-**Correction to an earlier claim in this doc**: a migration to `app-server` was previously
-described as touching only `buildArgs`/`parseLine`. That understates it. `runProviderSession()`
-closes stdin immediately after spawn, reads a one-way JSONL stream to completion, and derives the
-terminal event from process exit; `app-server` violates three of those four assumptions (it's
-bidirectional, long-lived, and multiplexes sessions rather than one-process-per-session), so a real
-migration would need new process-lifecycle plumbing in the shared runner, not just two swapped-out
-functions.
-
-The runtime now has those provider-neutral additions: an optional `ProviderV2Support` manifest,
-an optional `startInteractiveSession()` factory, a bidirectional transport contract, and a common
-session supervisor for commands, interactions, bounds, accepted-work state, teardown, and terminal
-events. `FakeProvider` and `ClaudeProvider` exercise this path; `CodexProvider` remains on
-`legacy-one-shot` pending its conformance evidence. Rich renderer UI is not part of the
-provider contract or issue #7.
+The provider-neutral interactive contract and supervisor re-establish lifecycle, accepted-work,
+teardown, and terminal-event guarantees at the RPC layer. Both real providers and `FakeProvider`
+exercise that path within their advertised scopes; the renderer consumes the same normalized v2
+events and commands without provider-native branching.
 
 ## Provider contract tests
 
@@ -299,9 +295,9 @@ It lives under `test/support/`, not `src/`: it's a vitest-coupled test helper, n
 package's public runtime API, so it isn't exported from `index.ts`. A provider adapter maintained
 outside this repo would copy the pattern rather than import the file directly.
 
-Both `ClaudeProvider` and `CodexProvider` pass the full suite today (24 tests total, 12 each; run
-`pnpm --filter @agent-dock/agent-runtime test` to see current counts directly rather than trusting
-a number in prose, which is exactly the kind of claim that drifts silently). Provider-specific
+Both `ClaudeProvider` and `CodexProvider` pass the shared contract files today (32 tests total: 15
+Claude and 17 Codex). Run those files or the agent-runtime test suite to verify the current count.
+Provider-specific
 parsing detail (the exact Claude/Codex JSONL shapes) stays in `test/claude-parser.test.ts` /
 `test/codex-parser.test.ts`, which the contract suite doesn't replace. Both providers' `detect()`
 auth parsing also has dedicated pure-function tests independent of the contract suite, see
@@ -311,8 +307,9 @@ auth parsing also has dedicated pure-function tests independent of the contract 
 
 This checklist targets the current protocol v1 adapter shape.
 
-Say you want to add `GeminiProvider`. You should not need to touch the daemon's routes, the client
-package, or the desktop UI at all:
+Say you want to add `GeminiProvider`. The daemon's generic provider routes and client methods do not
+need provider-specific branches, but the shared provider ID, daemon registry, and current desktop
+provider picker do need updates:
 
 1. **Register the id.** Add `'gemini'` to `PROVIDER_IDS` in `packages/shared/src/provider.ts`.
 2. **Write `detect.ts`.** Resolve the executable (via `findExecutable`, see
@@ -340,8 +337,9 @@ package, or the desktop UI at all:
 8. **Register it.** Add `new GeminiProvider(logger)` to `buildProviderRegistry()` in
    `apps/daemon/src/providers.ts`.
 
-That's the whole surface. `GET /providers` picks it up automatically (it iterates the registry),
-`@agent-dock/client` needs no changes (it already validates against the shared `ProviderStatus`
-schema, not a provider-specific one), and the desktop UI's provider `<select>` only needs a new
-`<option>`; its event rendering already works for any provider because it only ever switches on
-`AgentEvent.type`.
+That's the v1 surface. `GET /providers` picks up the registered adapter automatically,
+`@agent-dock/client` needs no provider-specific method (it validates against the shared
+`ProviderStatus` schema), and the desktop UI's provider `<select>` needs a new `<option>`; event
+rendering remains provider-neutral because it switches on normalized `AgentEvent.type`. A rich v2
+transport additionally needs scoped support evidence and the optional interactive factory described
+above.

@@ -1,17 +1,19 @@
 # Capability and security model for protocol v2
 
-- **Status:** partially implemented. The v2 contract, negotiation, routes, client API, legacy bridge,
-  interactive supervisor, and provider fixtures exist. Trust, isolation, durable audit/persistence,
-  native rich provider transports, and renderer work remain planned.
+- **Status:** partially implemented. The v2 contract, negotiation, routes/client, durable
+  session/history store, workspace trust store, interactive supervisor, approval audit, Claude Agent
+  SDK and Codex app-server transports, and renderer are implemented. Broad OS-isolation guarantees,
+  complete MCP/component/subagent controls, and provider-executed attachment/structured-output flows
+  are not complete.
 - **Decision date:** 2026-08-30
-- **Applies to:** the current `/v2` protocol and planned rich Claude/Codex transports
-- **Does not change:** the currently shipped protocol v1 behavior
+- **Applies to:** the current `/v2` protocol and rich Claude/Codex transports
+- **Keeps compatible:** protocol v1 route and event shapes; current production v1 starts also use
+  the shared workspace-trust admission gate described below
 
 This document fixes the capability vocabulary and security decisions for protocol v2, provider,
-persistence, and desktop work. Its capability schemas and negotiation rules are implemented. Its
-workspace trust, isolation, durable audit, retention, and rich-provider requirements remain future
-work. [Protocol v1](protocol-v1.md) remains the authoritative description of the unversioned v1
-application.
+persistence, and desktop work. Status statements below distinguish implemented controls from design
+requirements that are not yet enforced. [Protocol v1](protocol-v1.md) remains the authoritative
+description of the unversioned v1 application.
 
 ## Decision summary
 
@@ -27,32 +29,42 @@ application.
 6. AgentDock has no provider, cloud, or MCP credential store and never collects designated
    authentication values through its API or UI. Adapters may pass approved inherited values
    opaquely to provider transports, but never persist or render them.
-7. Persisted data is allowlisted, bounded, redacted, and retained for fixed periods. Raw provider
+7. Persisted data is allowlisted, bounded, and redacted. Raw provider
    frames, reasoning, process environments, designated authentication data, and unrestricted tool
    payloads are not persisted. User text and selected files can still contain user-supplied secrets.
-8. An approval is forwarded only after its audit record is durable. Failure, timeout,
-   disconnection, or ambiguity denies the action.
+8. An interactive provider action is allowed only after its approval audit record is durable.
+   Failure, timeout, disconnection, or ambiguity denies the action. If the audit write itself fails,
+   AgentDock still forwards a provider-native deny and reports `audit_failure`; it does not cancel
+   the session solely for that failure. The standalone MCP invocation route does not currently make
+   this audited-approval guarantee.
 9. A transport may fall back only before its exact accepted-work boundary. Work that may have
    started is never replayed through another transport.
 10. Resume and fork use stored provider-native identifiers. Fork is never simulated by replaying a
     transcript, and dirty worktrees are never removed automatically.
 
+The current implementation is stricter than decision 5: it rejects every untrusted session start.
+Running an untrusted workspace under a proven restricted profile remains a design target, not a
+shipped capability.
+
 ## Compatibility boundary
 
-| Concern            | Protocol v1, current                                                                             | Protocol v2, current implementation and planned controls                                              |
-| ------------------ | ------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
-| Provider transport | One short-lived Claude/Codex CLI process per session                                             | Negotiation and a `legacy-one-shot` bridge exist; native rich provider transports are planned         |
-| Input              | One prompt, then stdin closes                                                                    | Correlated commands, turns, approvals, and questions are implemented for the interactive path         |
-| Capability shape   | Optional booleans; unknown boolean keys pass through                                             | Scoped support records, validation, and frozen negotiation selection are implemented                  |
-| Workspace trust    | No AgentDock trust state                                                                         | Default-untrusted records exist; trust identity and configuration gates are planned                   |
-| Agent isolation    | Provider-owned behavior, not attested by AgentDock                                               | Verified platform-specific enforcement reporting is planned                                           |
-| History            | Event replay remains memory-only; compatibility metadata omits prompts and raw error diagnostics | Durable normalized history, pagination, whole-lineage deletion, and bounded retention are implemented |
-| Credentials        | Full daemon environment inherited by the CLI; CLI owns login                                     | No credential vault; source-specific authentication boundaries remain planned                         |
-| Approval/audit     | Provider-owned, with no AgentDock approval channel or audit                                      | The interactive supervisor handles correlation; durable audit-before-allow is planned                 |
+| Concern            | Protocol v1, current                                                                               | Protocol v2, current implementation                                                                   |
+| ------------------ | -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Provider transport | One short-lived Claude/Codex CLI process per session                                               | `legacy-one-shot`, pinned Claude Agent SDK, and pinned Codex app-server scopes are implemented        |
+| Input              | One prompt, then stdin closes                                                                      | Correlated commands, turns, approvals, and questions are implemented for the interactive path         |
+| Capability shape   | Optional booleans; unknown boolean keys pass through                                               | Scoped support records, validation, and frozen negotiation selection are implemented                  |
+| Workspace trust    | No trust fields/routes in v1; production session creation checks the shared v2-managed trust store | Canonical default-untrusted identities, explicit trust updates, revocation, and launch gates exist    |
+| Agent isolation    | Provider-owned behavior, not attested by AgentDock                                                 | Policy/sandbox state is reported conservatively; broad platform-specific guarantees remain incomplete |
+| History            | Event replay remains memory-only; compatibility metadata omits prompts and raw error diagnostics   | Durable normalized history, pagination, whole-lineage deletion, and bounded retention are implemented |
+| Credentials        | Full daemon environment inherited by the CLI; CLI owns login                                       | No credential vault; rich transports use transport-specific eligibility and environment behavior      |
+| Approval/audit     | Provider-owned, with no AgentDock approval channel or audit                                        | Interactive approvals are correlated and durably audited before allow; standalone MCP invoke is not   |
 
-Nothing in this decision retroactively adds workspace trust, approval enforcement, durable event
-history, or sandboxing to v1. The additive v2 routes own the durable execution graph and its security
-controls without accepting renderer-selected provider-native IDs.
+Protocol v1 keeps its original request/event shapes and has no trust-management routes, approval
+channel, durable event history, or sandbox claims. The production daemon nevertheless requires the
+current workspace incarnation to be trusted before either a v1 or v2 start; callers manage that
+state through `/v2/workspaces`. V2 owns the remaining security controls. A validated session
+snapshot may expose `providerSessionId`, but create/resume/fork requests never accept a
+renderer-supplied provider-native continuation ID.
 
 ## Capability vocabulary
 
@@ -473,12 +485,12 @@ until a fixture-backed adapter classification proves otherwise.
 
 ### Current adapter-tested behavior
 
-The current test suite covers the v1 boolean contract and the v2 schemas, negotiation, routes,
-client API, supervisor, and provider fixtures. The `legacy-one-shot` bridge creates conservative
-v2 support records from existing adapter booleans. A record is `supported` only when the adapter
-reports the behavior and its detected version has a matching checked-in compatibility fixture.
-Without that fixture, the bridge does not advertise support. The production Claude and Codex
-adapters still use this bridge; the interactive v2 path is exercised by `FakeProvider`.
+The test suite covers the v1 boolean contract; v2 schemas, negotiation, routes, client, supervisor,
+and stores; replay fixtures; and the native rich transports. The `legacy-one-shot` bridge creates
+conservative v2 support records from existing adapter booleans only when the detected version has a
+matching replay fixture. Production Claude and Codex may use that bridge, or advertise their pinned
+native transport when its exact eligibility checks pass. `FakeProvider` supplies deterministic
+interactive conformance scenarios.
 
 | V1 key         | Claude CLI adapter | Codex exec adapter | Closest v2 meaning                                         |
 | -------------- | -----------------: | -----------------: | ---------------------------------------------------------- |
@@ -492,32 +504,33 @@ The shared provider contract and compatibility fixtures verify normalization and
 generic Codex `mcp_tool_call` becoming `tool.started` does not prove MCP discovery, management,
 OAuth, elicitation, or approval capabilities.
 
-### Vendor-described candidates
+### Current transport evidence
 
-These sources justify implementation work but advertise no AgentDock support:
+| Transport         | Exact implemented scope                                                                                                          | Compatibility evidence                                                                                    |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Claude legacy CLI | Claude Code 2.1.228 through `legacy-one-shot`                                                                                    | Sanitized replay fixtures and shared provider-contract tests                                              |
+| Codex legacy exec | codex-cli 0.147.0 through `legacy-one-shot`                                                                                      | Sanitized replay fixtures and shared provider-contract tests                                              |
+| Claude Agent SDK  | SDK 0.3.251 with embedded Claude Code 2.1.251, Windows x64, trusted workspace, eligible API/cloud auth; settings/extras disabled | Pinned package/binary versions, fixture-set metadata, and SDK adapter/options/process/transport tests     |
+| Codex app-server  | codex-cli 0.147.0, authenticated provider, trusted workspace; exact stable method allowlist                                      | Checked-in generated schema and hash, compatibility manifest, scope tests, and live fake JSON-RPC harness |
+| Fake interactive  | Deterministic test-only transport                                                                                                | Sanitized interactive replay fixtures and supervisor/route tests                                          |
 
-| Candidate transport | Vendor-described surface used for planning                                                                                                                                                                   | AgentDock status                                                 | Primary source                                                           |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Codex app-server    | Rich-client authentication/history, threads and turns, approvals, streamed items, sandbox policies, images, structured output, MCP, skills, plugins, and hooks; individual methods can still be experimental | Unsupported until a versioned schema and fixtures pass           | [Codex app-server](https://developers.openai.com/codex/app-server)       |
-| Claude Agent SDK    | Sessions, tools, permissions, user input, MCP, hooks, skills/plugins, and subagents                                                                                                                          | Unsupported until auth, trust, packaging, and fixture gates pass | [Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview) |
-
-This status snapshot was reviewed on 2026-08-31. Each adapter compatibility manifest must pin the exact
-provider/SDK version and evidence set it supports. A documentation change or runtime self-report
-alone never widens that range.
+Each adapter compatibility record pins the exact provider/SDK version and evidence set it supports.
+Vendor documentation or runtime self-report alone never widens that range. A normalized legacy tool
+event still does not prove MCP discovery, management, OAuth, elicitation, or approval support.
 
 ## Execution and data boundaries
 
-| Boundary                | Sensitive or executable assets                                                | Threat                                                                       | Required v2 control                                                                                    |
-| ----------------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| Renderer                | Prompts, visible history, approval choices, attachment previews               | Compromise, forged correlation, unsafe HTML/URLs, oversized payloads         | Narrow typed preload methods; no daemon token/native IDs/secrets; text-only rendering; bounded content |
-| Preload                 | Typed renderer requests and pushed events                                     | Accidental generic IPC tunnel or extra-field leakage                         | Explicit method allowlist; reconstruct/validate objects in both directions; no generic `invoke`        |
-| Electron main           | Daemon bearer token/base URL, OS dialogs, external browser launch             | Token exposure, arbitrary path/URL launch                                    | Token stays in main memory; picker-issued handles; validate schemes/hosts; narrow daemon client calls  |
-| Local daemon            | Policy, session state, capability selection, audit/history                    | Cross-session confusion, replay, unauthorized dispatch, secret persistence   | Bearer/origin controls; runtime schemas; correlation ownership; fail-closed policy; bounded stores     |
-| Provider process or SDK | Workspace access, inherited credentials, network, tool execution              | Provider compromise, protocol drift, orphan process, duplicated side effects | Versioned adapter; least environment; process supervision; sandbox truth; no post-accept fallback      |
-| Workspace files         | Source, instructions, settings, hooks, MCP, skills/plugins, agent definitions | Prompt injection and repository-controlled code execution                    | Canonical identity; default-untrusted; suppress project sources; execution leases                      |
-| MCP server              | Local process or remote service, tool effects, OAuth                          | Code execution on connect, credential leakage, destructive/external action   | Source preview; explicit trust/connect; provider-owned tokens; effect policy; audit                    |
-| OAuth browser flow      | Authorization URL and completion status                                       | Token interception, custom-scheme abuse, navigation inside renderer          | Explicit user action; system browser; validated URL; provider owns callback/token; status only         |
-| Persisted history       | Prompts, normalized output, paths, usage, approvals, attachments              | Local disclosure, stale secrets, unbounded retention                         | Per-user permissions; allowlist/redaction; quotas/TTL; explicit delete; no raw native payloads         |
+| Boundary                | Sensitive or executable assets                                                                           | Threat                                                                       | Required v2 control                                                                                                                                                                    |
+| ----------------------- | -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Renderer                | Prompts, visible history, approval choices, attachment previews, validated provider session ID snapshots | Compromise, forged correlation, unsafe HTML/URLs, oversized payloads         | Narrow typed preload methods; no daemon token/credentials; native continuation IDs are never accepted from renderer requests; inert text rendering; bounded content                    |
+| Preload                 | Typed renderer requests and pushed events                                                                | Accidental generic IPC tunnel or extra-field leakage                         | Explicit method allowlist; reconstruct/validate objects in both directions; no generic `invoke`                                                                                        |
+| Electron main           | Daemon bearer token/base URL, OS dialogs, external browser launch                                        | Token exposure, arbitrary path/URL launch                                    | Discovery read and authenticated calls stay in main; token never crosses preload; network-error text may reveal the non-secret base URL; picker-issued handles; validate schemes/hosts |
+| Local daemon            | Policy, session state, capability selection, audit/history                                               | Cross-session confusion, replay, unauthorized dispatch, secret persistence   | Bearer/origin controls; runtime schemas; correlation ownership; fail-closed policy; bounded stores                                                                                     |
+| Provider process or SDK | Workspace access, inherited credentials, network, tool execution                                         | Provider compromise, protocol drift, orphan process, duplicated side effects | Versioned adapter; documented transport-specific environment handling; process supervision; sandbox truth; no post-accept fallback                                                     |
+| Workspace files         | Source, instructions, settings, hooks, MCP, skills/plugins, agent definitions                            | Prompt injection and repository-controlled code execution                    | Canonical identity; default-untrusted; suppress project sources; execution leases                                                                                                      |
+| MCP server              | Local process or remote service, tool effects, OAuth                                                     | Code execution on connect, credential leakage, destructive/external action   | Source preview; explicit trust/connect; provider-owned tokens; effect policy; audit                                                                                                    |
+| OAuth browser flow      | Authorization URL and completion status                                                                  | Token interception, custom-scheme abuse, navigation inside renderer          | Explicit user action; system browser; validated URL; provider owns callback/token; status only                                                                                         |
+| Persisted history       | Prompts, normalized output, paths, usage, approvals, attachments                                         | Local disclosure, stale secrets, unbounded retention                         | Per-user permissions; allowlist/redaction; quotas/TTL; explicit delete; no raw native payloads                                                                                         |
 
 The Electron renderer's `sandbox: true` is a Chromium renderer control. It is unrelated to whether
 a Claude/Codex tool command is isolated from the host filesystem or network.
@@ -542,10 +555,10 @@ root, or a recreated directory. An AgentDock-created worktree starts untrusted. 
 may offer a separate explicit trust decision only after showing the source revision and every
 ignored/untracked file proposed for copy.
 
-| State       | Entry                                                                | Project-controlled behavior                                                         | Session eligibility                                                     |
-| ----------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| `untrusted` | Default for every new identity, moved repository, or unresolved path | Inspectable as inert metadata where safe; never loaded or executed                  | Only a transport that proves the restricted untrusted profile may start |
-| `trusted`   | Explicit user grant or managed policy for the canonical identity     | May load through the owning provider, still subject to sandbox, approval, and audit | New sessions may request trusted capabilities                           |
+| State       | Entry                                                                | Project-controlled behavior                                                         | Session eligibility                                                                                         |
+| ----------- | -------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `untrusted` | Default for every new identity, moved repository, or unresolved path | Inspectable as inert metadata where safe; never loaded or executed                  | Design target: only a proven restricted profile may start; the current daemon rejects every untrusted start |
+| `trusted`   | Explicit user grant or managed policy for the canonical identity     | May load through the owning provider, still subject to sandbox, approval, and audit | New sessions may request trusted capabilities                                                               |
 
 A trust grant affects only new sessions; AgentDock never upgrades the permissions, configuration
 sources, or sandbox of an already running provider process. Revocation is fail-closed: the daemon
@@ -664,19 +677,19 @@ or weaker `unelevated` sandbox mechanism. Neither state silently substitutes for
 
 ### Provider command-sandbox and platform matrix
 
-| Transport                | macOS/Linux                                                                                 | WSL2                                                       | Native Windows                                                    | Testable AgentDock claim                                                                                                                                                                                                                |
-| ------------------------ | ------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Current Claude CLI v1    | `provider_managed`                                                                          | `provider_managed`                                         | `unavailable` for Claude's Bash sandbox                           | Current adapter does not select or attest a sandbox on any platform                                                                                                                                                                     |
-| Planned Claude Agent SDK | `enforced` only after the requested Bash read/write/network policy and escape fixtures pass | Same, plus WSL2 boundary/socket restrictions verified      | Bash sandbox `unavailable`; SDK remains supported                 | Require `failIfUnavailable: true`, `allowUnsandboxedCommands: false`, network mode `deny`, workspace-only provider-visible reads, denied writes, and the separate non-Bash tool policy above; native Windows never shows Bash sandboxed |
-| Current Codex exec v1    | `provider_managed`                                                                          | `provider_managed`                                         | `provider_managed`                                                | Current adapter does not select or attest an exact policy                                                                                                                                                                               |
-| Planned Codex app-server | `enforced` only after the requested policy and host probe pass                              | Treat as Linux isolation and verify that exact environment | `enforced` only after Windows sandbox setup and host verification | Any setup rejection, unknown version, or missing proof becomes `failed`/`unknown`, never `enforced`                                                                                                                                     |
+| Transport        | macOS/Linux                              | WSL2                            | Native Windows                                                     | Current AgentDock claim                                                                                                |
+| ---------------- | ---------------------------------------- | ------------------------------- | ------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| Claude CLI v1    | `provider_managed`                       | `provider_managed`              | Bash sandbox `unavailable`                                         | The adapter does not select or attest an exact sandbox policy                                                          |
+| Claude Agent SDK | Transport currently unavailable          | Transport currently unavailable | Pinned SDK transport available only for trusted, eligible sessions | Bash is disabled and no `isolation.*` guarantee is advertised                                                          |
+| Codex exec v1    | `provider_managed`                       | `provider_managed`              | `provider_managed`                                                 | The adapter does not select or attest an exact sandbox policy                                                          |
+| Codex app-server | Requests `workspace-write` when eligible | Same runtime policy request     | Same runtime policy request                                        | Available for the pinned, trusted/authenticated scope, but currently advertises no `isolation.*` enforcement guarantee |
 
 Claude's vendor sandbox covers Bash subprocesses, not every Read/Edit/Write or computer-use path,
-and is supported on macOS, Linux, and WSL2 rather than native Windows. Its default can fall back to
-unsandboxed execution, so AgentDock's v2 untrusted profile must explicitly fail closed. See
-[Claude Code sandboxing](https://code.claude.com/docs/en/sandboxing). Codex app-server exposes
-explicit turn sandbox policies and Windows sandbox setup, but AgentDock still needs versioned host
-fixtures before reporting `enforced`; see
+and is supported on macOS, Linux, and WSL2 rather than native Windows. The current AgentDock SDK
+scope disables Bash instead of claiming that sandbox. See
+[Claude Code sandboxing](https://code.claude.com/docs/en/sandboxing). Codex app-server accepts an
+explicit turn sandbox policy, but requesting `workspace-write` is not proof of an OS-enforced
+boundary; AgentDock needs versioned host evidence before reporting `enforced`. See
 [Codex app-server](https://developers.openai.com/codex/app-server).
 
 ## Credentials and OAuth
@@ -685,13 +698,14 @@ fixtures before reporting `enforced`; see
   entries, token callback, or secret-returning API in v2. User text and selected files can still
   contain pasted secrets; AgentDock cannot reliably detect or promise to redact those values.
 - Renderer input can never supply a process environment or designated authentication value. UI/API
-  output contains only a non-secret source label such as `provider_login`, `environment_api_key`,
-  `bedrock`, `vertex`, or `foundry`.
-- V2 adapters pass only documented base/runtime and selected provider-auth environment keys. Those
-  credential values may transit the inherited process environment unchanged, but AgentDock never
-  collects, inspects, persists, logs, or returns them. A broader inherited environment is a
-  trusted-profile opt-in and must be reported without values. Environments are never event, audit,
-  fixture, or log data.
+  output contains only a non-secret source label: `chatgpt`, `api_key`, `claude_subscription`,
+  `bedrock`, `vertex`, `foundry`, or `unknown`.
+- Environment handling is transport-specific. The Claude Agent SDK child receives an allowlisted
+  environment for its reviewed auth source; Codex app-server and the legacy one-shot CLI paths
+  currently inherit the daemon's full process environment. Renderer requests cannot widen or
+  replace it. AgentDock does not return environment values through provider status, events, audit,
+  fixtures, or logs; forks that need a narrower Codex/legacy boundary must launch the daemon with a
+  minimal environment or implement explicit filtering.
 - A Claude session that inherits authentication values sets
   `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1`. Bash, hooks, and stdio MCP remain unsupported unless fixtures
   prove their children receive no auth values and cannot read provider/cloud credential files;
@@ -701,9 +715,9 @@ fixtures before reporting `enforced`; see
   Free/Pro/Max credentials through the SDK. Subscription login remains available only through the
   unmodified, provider-owned Claude Code CLI flow. See
   [Anthropic's authentication and credential-use policy](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use).
-- The Claude SDK integration may merge disabled. Enabling it by default in a release, or bundling
-  its Claude Code binary, requires a recorded review of then-current Anthropic distribution,
-  authentication, and branding terms.
+- The Claude SDK integration is available in `auto` mode and is a pinned runtime dependency. Windows
+  packaging stages its matching Claude executable and notices outside ASAR. Release changes still
+  require review of then-current Anthropic distribution, authentication, and branding terms.
 - Codex login remains owned by the installed Codex runtime. AgentDock may use existing
   runtime-owned authentication and expose browser/device login status, but it must not expose
   app-server `account/login/start` with `type: "apiKey"` or experimental
@@ -719,11 +733,12 @@ fixtures before reporting `enforced`; see
   See [Claude Agent SDK MCP OAuth](https://code.claude.com/docs/en/agent-sdk/mcp#oauth2-authentication).
 - Starting a stdio MCP server is code execution, even before a tool is called. Trust and manifest
   preview therefore apply to connection, not merely invocation.
-- MCP inspection normalizes each configuration field as `public`, `secret`, or `unknown`. It may
-  expose a validated executable and argument value only when a fixture-backed provider schema marks
-  that field public; secret/unknown arguments, headers, environment values, client secrets, and
-  OAuth secrets expose presence and source only. Editing sends typed fields back through the owning
-  provider and never returns a secret value to the renderer.
+- MCP inspection normalizes each configuration field as `public`, `secret`, or `unknown`.
+  Environment, header, bearer-token, URL, client-secret, and OAuth-secret values are withheld. The
+  current adapter classifies configured stdio `command` and `args` as public and returns them
+  verbatim without inspecting embedded secrets; users and downstream clients must not place
+  credentials there and must treat inspection output as sensitive configuration. Editing sends
+  typed fields back through the owning provider.
 
 The current v1 CLI path still inherits the daemon's full environment, as documented in
 [SECURITY.md](../SECURITY.md#environment-inheritance-a-deliberate-tradeoff-not-an-oversight).
@@ -742,20 +757,20 @@ V2 uses a per-user state directory with restrictive OS permissions. It does not 
 application-layer encryption in this phase, so the UI and documentation must describe the local
 plaintext-at-rest property.
 
-| Data class                                                                           | Persisted fields                                                                                                                  | Bounds and retention                                                                                                                                                               | Deletion                                                                                           |
-| ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Session metadata and normalized user-visible history                                 | IDs/lineage, provider/transport labels, trust/sandbox state, timestamps, user text, assistant text, safe content summaries, usage | 30 days after the whole lineage becomes terminal; global caps include all records and tombstones: 500 sessions and 250 MiB; evict the oldest eligible whole terminal lineage first | Explicit deletion is whole-lineage and removes content promptly; active lineages cannot be deleted |
-| Tool, command, diff, and artifact content                                            | Normalized summary and fields explicitly classified `safe_to_persist`; workspace paths stored relative where possible             | Unstructured/raw inputs, results, stdout/stderr, and external absolute paths are live-only by default                                                                              | Deleted with lineage; explicit exports are user files outside AgentDock retention                  |
-| Approval audit                                                                       | Version, session/turn/request IDs, normalized effect/permission key, risk, decision, actor, timestamps, safe target summary       | Append-only closed segments; 90 days and 50 MiB globally                                                                                                                           | Rotate oldest closed segments; content deletion does not rewrite audit metadata                    |
-| Provider extension data                                                              | Persist only provider, transport, extension name/version, safe summary, and truncation/redaction reason                           | Raw native frame never leaves adapter process memory; encoded view max 64 KiB, depth 16, 1,024 total keys/items, summary 512 characters, and 1 MiB live budget per session         | Discard raw data after normalization and all live extension data at terminal state                 |
-| Provider-public thinking/reasoning                                                   | None by default                                                                                                                   | Live bounded display only                                                                                                                                                          | Discard at terminal state; explicit user export is separate                                        |
-| Attachments staged by AgentDock                                                      | Opaque ID, normalized name/MIME/size/hash, staged copy; never original path in renderer events                                    | 25 MiB each; 100 MiB and 20 files per session; 500 MiB and 200 files globally; unreferenced TTL 24 hours; referenced copy follows its lineage's 30-day retention                   | Delete staged copy only; never alter the user's source file                                        |
-| Designated auth fields/tokens, process environments, native credential/approval data | Never                                                                                                                             | Forbidden in state, events, audit, fixtures, and logs                                                                                                                              | Reject or redact before crossing the adapter boundary                                              |
+| Data class                                                                           | Persisted fields                                                                                                                  | Bounds and retention                                                                                                                                                                   | Deletion                                                                                                          |
+| ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Session metadata and normalized user-visible history                                 | IDs/lineage, provider/transport labels, trust/sandbox state, timestamps, user text, assistant text, safe content summaries, usage | 30 days after the whole lineage becomes terminal; global caps include all records and tombstones: 500 sessions and 250 MiB; evict the oldest eligible whole terminal lineage first     | Explicit deletion is whole-lineage and removes content promptly; active lineages cannot be deleted                |
+| Tool, command, diff, and artifact content                                            | Normalized summary and fields explicitly classified `safe_to_persist`; workspace paths stored relative where possible             | Unstructured/raw inputs, results, stdout/stderr, and external absolute paths are live-only by default                                                                                  | Deleted with lineage; explicit exports are user files outside AgentDock retention                                 |
+| Approval audit                                                                       | Version, session/turn/request IDs, normalized effect/permission key, risk, decision, actor, timestamps, safe target summary       | One append-only JSONL file capped at 64 MiB; no age-based expiry or segment rotation is currently implemented                                                                          | Appends fail at the cap; content deletion does not rewrite audit metadata                                         |
+| Provider extension data                                                              | Persist only provider, transport, extension name/version, safe summary, and truncation/redaction reason                           | Raw native frame never leaves adapter process memory; each encoded view is capped at 64 KiB, depth 16, 1,024 total keys/items, and a 512-character summary                             | Discard raw data after normalization and all live extension data at terminal state                                |
+| Provider-public thinking/reasoning                                                   | None by default                                                                                                                   | Live bounded display only                                                                                                                                                              | Discard at terminal state; explicit user export is separate                                                       |
+| Attachments staged by AgentDock                                                      | Opaque ID, normalized name/MIME/size, staged copy; never original path in renderer events                                         | 25 MiB each; 100 MiB and 20 files per session; 500 MiB and 200 files globally; unreferenced copies older than 24 hours are pruned when the attachment store loads, normally at startup | Referenced copies currently have no age or lineage-deletion cleanup hook; the user's source file is never altered |
+| Designated auth fields/tokens, process environments, native credential/approval data | Never                                                                                                                             | Forbidden in state, events, audit, fixtures, and logs                                                                                                                                  | Reject or redact before crossing the adapter boundary                                                             |
 
 User-controlled prompts, assistant-visible text, tool-selected files, and attachments may contain
 pasted or embedded secrets. They are not treated as designated authentication fields and cannot be
-reliably secret-scanned; the UI warns users and these values follow the content-retention policy
-above.
+reliably secret-scanned. They follow the content-retention policy above; a downstream product must
+give users an appropriate warning before collecting sensitive content.
 
 A lineage is its root session, every resume/fork descendant, and the tombstones required to preserve
 those references. It is the eviction unit. Cleanup is transactional and may evict a lineage only
@@ -791,7 +806,6 @@ provider limit wins.
 | One approval interaction            |                                                                                            32 KiB total; 512-character title; 4 KiB each for action, target, and reason | Deny before showing or forwarding an oversized value                                                                                                                                     |
 | One question interaction            | 32 KiB total; 3 questions; 10 options each; 512-character titles/labels; 4 KiB prompts/descriptions; 2 KiB option descriptions; 8 KiB previews; 16 KiB free-text answer | Cancel before showing or forwarding an oversized value                                                                                                                                   |
 | One extension view                  |                                                                                                     64 KiB, depth 16, 1,024 aggregate keys/items, 512-character summary | Emit only a typed redaction/truncation summary                                                                                                                                           |
-| All live extension views            |                                                                                                                                                       1 MiB per session | Drop later views with a counted truncation event                                                                                                                                         |
 
 JSON carries no inline binary; attachments use opaque handles and the separate byte quotas above.
 Truncation never creates partial JSON, changes a command/approval target, or converts malformed data
@@ -814,10 +828,11 @@ The sole responder stream receives a per-connection 256-bit lease outside the ev
 that live lease may authorize approval or question response commands; observer streams receive no
 lease, and the Electron renderer receives neither the lease nor native correlation IDs.
 
-- Approval allow/deny decisions are forwarded only after the normalized audit record is durable. A
-  timeout, responder disconnect, session interrupt, cancellation, daemon shutdown, or audit-store
-  failure resolves an approval to `denied`. If the audit store is unavailable, AgentDock denies
-  locally, forwards no approval response that could permit execution, and cancels the turn/process.
+- An approval that permits execution is forwarded only after the normalized audit record is
+  durable. Timeout, responder disconnect, session interrupt, cancellation, or daemon shutdown
+  resolves an approval to `denied`. If the audit write fails, AgentDock forwards a provider-native
+  deny, returns `audit_failure` for the response command, and leaves the session active; it never
+  converts an unaudited decision into permission to execute.
 - A question timeout, responder disconnect, overflow, session interrupt, cancellation, or shutdown
   sends the provider-native cancel/no-answer response when supported, emits `cancelled`, and
   interrupts the current turn. The session becomes resumable only after the provider confirms it is
@@ -829,23 +844,30 @@ lease, and the Electron renderer receives neither the lease nor native correlati
   timeout, disconnect, or cancellation path observes the recorded resolution and performs no
   provider action.
 
+Those audit-before-allow rules describe approvals initiated by an interactive provider session.
+`POST /v2/integrations/mcp/invoke` is currently a separate, in-memory approval-token flow: it does
+not append to `AuditStore`, and the production CLI MCP control plane reports direct invocation as
+unsupported. Do not treat that standalone route as an audited destructive-action path until it is
+wired through the same durable gate or disabled by policy.
+
 ## Transport fallback and accepted-work boundary
 
 Fallback is a side-effect safety rule, not a timeout policy. Each adapter compatibility manifest
 defines one tested boundary:
 
-| Transport        | Replay becomes forbidden when                                               | Fallback rule                                                                               |
-| ---------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Codex app-server | The complete `turn/start` request is handed to app-server                   | No fallback after delivery; app-server exposes no documented idempotency/no-work proof      |
-| Claude Agent SDK | `WarmQuery.query(prompt)` is invoked after an inert, successful `startup()` | Import/startup failure may fall back before prompt submission; never after query invocation |
-| Codex exec       | Process spawn is attempted because the prompt is already present in argv    | No fallback after the spawn attempt; success/failure ambiguity cannot replay                |
-| Claude CLI       | The first prompt byte is handed to child stdin                              | No fallback after any prompt delivery; partial-write failure is ambiguous                   |
+| Transport        | Replay becomes forbidden when                                               | Fallback rule                                                                              |
+| ---------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Codex app-server | The complete `turn/start` request is handed to app-server                   | No fallback after delivery; app-server exposes no documented idempotency/no-work proof     |
+| Claude Agent SDK | `WarmQuery.query(prompt)` is invoked after an inert, successful `startup()` | No runtime fallback is wired after SDK selection; startup/query failure fails that session |
+| Codex exec       | Process spawn is attempted because the prompt is already present in argv    | No fallback after the spawn attempt; success/failure ambiguity cannot replay               |
+| Claude CLI       | The first prompt byte is handed to child stdin                              | No fallback after any prompt delivery; partial-write failure is ambiguous                  |
 
-- Probe, import, schema, handshake, or startup failure may fall back at most once when it occurs
-  before the boundary and proves that no work was accepted. A Claude pre-prompt `startup()` is
-  fallback-eligible only while project sources, hooks, plugins, and MCP are disabled. Starting a
-  stdio MCP server or executing any startup hook crosses the no-replay boundary even before a model
-  turn.
+- Codex probe, schema, handshake, or startup failure may fall back at most once when it occurs before
+  the boundary and proves that no work was accepted. Claude `auto` can select the legacy CLI when an
+  SDK eligibility gate fails before transport selection, but an import/startup failure after SDK
+  selection is not replayed through the CLI. Starting a stdio MCP server or executing any startup
+  hook would cross the no-replay boundary even before a model turn; the current SDK profile disables
+  those sources.
 - A fallback candidate must re-satisfy the exact provider account/auth source, model, required
   capabilities, workspace trust/source gates, sandbox profile, and retention scope. Claude SDK
   API/cloud authentication never falls back to a subscription-authenticated CLI. A
@@ -867,14 +889,18 @@ defines one tested boundary:
 | File edit              | Trusted workspace, `isolation.filesystem.workspace_write: enforced`, exclusive mutation lease                                                                           | Show paths/diff; ask before write unless an exact bounded session grant exists                                                                 | Approval decision plus safe diff summary, not raw native payload                    |
 | Shell command          | Trusted workspace, command effect, exclusive mutation lease                                                                                                             | Ask with normalized command/cwd/effects; timeout/disconnect denies                                                                             | Command summary, decision, exit status; raw output live-only unless classified safe |
 | Network access         | Trusted workspace, `isolation.network.restricted: enforced`                                                                                                             | Ask for exact host/protocol/port; a generic command approval cannot grant network                                                              | Destination summary and decision; no headers/tokens                                 |
-| Destructive MCP action | Trusted server/source, destructive effect, exclusive mutation lease                                                                                                     | `allow_once` only; audit append must succeed before provider response                                                                          | Server/tool identity, safe target summary, decision; no raw arguments/result        |
+| Destructive MCP action | Trusted server/source, destructive effect, exclusive mutation lease                                                                                                     | Design requirement: `allow_once` only and durable audit before provider response; the standalone invoke route does not yet satisfy this gate   | Server/tool identity, safe target summary, decision; no raw arguments/result        |
 
-These scenarios are the minimum fake-provider policy fixtures for the approval/trust ticket. Any
-failure to classify the action uses the destructive row.
+These scenarios are the minimum policy cases exercised with the fake provider. Any failure to
+classify the action uses the destructive row.
 
-## Downstream implementation gates
+## Implementation traceability
 
-| Tickets                                                                                                              | Must consume this decision without redefining it                                                                 |
+The linked issues are the historical implementation units that consumed this decision. Their open
+or closed state is not a capability claim; the current status and limitations are stated at the top
+of this document and in the transport/control sections above.
+
+| Tickets                                                                                                              | Decision area                                                                                                    |
 | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | [#6](https://github.com/jortega0033/agentdock/issues/6), [#7](https://github.com/jortega0033/agentdock/issues/7)     | Support-record schema, opaque negotiation, command correlation, accepted-work state, and one terminal event      |
 | [#8](https://github.com/jortega0033/agentdock/issues/8)                                                              | Evidence kinds, exact scopes, malformed/unknown frames, fallback fixtures, and designated-secret boundary tests  |
@@ -893,8 +919,8 @@ explicit amendment to this document and a review of all dependent tickets.
 
 ## Non-goals
 
-- Implementing the remaining provider transports, persistence, trust controls, or renderer UI in
-  this design document
+- Completing OS-isolation evidence, production MCP/component/subagent execution controls, or
+  provider-executed attachment and structured-output workflows in this design document
 - Storing credentials or building an AgentDock credential vault
 - Marketplace browsing/installation or arbitrary hook editing/execution
 - Treating permissions, worktrees, or Electron's renderer sandbox as OS process isolation

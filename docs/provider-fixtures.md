@@ -6,11 +6,16 @@ credential, reasoning payload, tool input/result, or other free-form provider te
 
 ## Compatibility contract
 
-Fixtures live under `packages/agent-runtime/test/conformance/fixtures/<fixture-set>/` and conform to
-`provider-fixture.schema.json`. The runtime compatibility manifest pins each supported
-provider/version/transport tuple to one exact schema set and fixture set. Updating a provider
-version therefore requires updated fixtures and manifest metadata in the same change; CI rejects
-either side on its own.
+Replay fixtures live under `packages/agent-runtime/test/conformance/fixtures/<fixture-set>/` and
+conform to `provider-fixture.schema.json`. The replay compatibility manifest pins each covered
+provider/version/transport tuple to one exact schema and fixture set, so changing either side alone
+fails the replay conformance tests.
+
+Native rich transports use transport-specific evidence instead of that replay-fixture format.
+Codex app-server pins a CLI version, generated schema artifact/hash, exact method allowlist, and a
+live fake JSON-RPC harness. Claude Agent SDK pins the SDK and embedded executable versions and uses
+SDK transport tests plus fixture-set metadata. Those records must not be inferred from legacy JSONL
+fixtures.
 
 Legacy fixtures also record sanitized `argv` and `stdin` under `nativeInput`. Contract tests compare
 that outbound oracle with the real adapter argument builder and prompt-transport setting; prompt
@@ -21,6 +26,10 @@ Run the credential-free gate on Windows or Linux with:
 ```console
 pnpm test:provider-conformance
 ```
+
+That focused command covers replay/fake/legacy contract and fixture-safety suites. Run
+`pnpm --filter @agent-dock/agent-runtime test` for the complete runtime suite, including the native
+Claude SDK and Codex app-server transport tests.
 
 Secret-backed live-provider smoke tests may run separately on a protected schedule, but they are
 never required for pull requests and are not compatibility evidence.

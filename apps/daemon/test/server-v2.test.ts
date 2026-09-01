@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -25,7 +25,11 @@ import {
   agentSessionV2Schema,
   providerStatusV2Schema,
   providersV2ResponseSchema,
+  sessionEventHistoryV2PageSchema,
+  sessionListV2PageSchema,
   type AgentEvent,
+  type AgentEventV2,
+  type AgentSessionV2,
   type CapabilitySupportRecord,
   type ProviderStatus,
 } from '@agent-dock/shared';
@@ -33,6 +37,7 @@ import { buildServer } from '../src/server.js';
 import { SessionManager } from '../src/session-manager.js';
 import { resolveWorkspaceIdentity } from '../src/workspace-identity.js';
 import { WorkspaceTrustStore } from '../src/workspace-trust-store.js';
+import { FileExecutionGraphStore } from '../src/execution-graph-store.js';
 
 const TOKEN = 'test-token-v2';
 
@@ -395,7 +400,7 @@ describe('v2 discovery and authorization', () => {
 });
 
 describe('POST /v2/sessions capability negotiation', () => {
-  it('plumbs fresh, resume, and fork only for daemon-issued same-scope continuation ids', async () => {
+  it('uses parent-addressed resume and fork routes with immutable lineage', async () => {
     const status: ProviderStatus = {
       id: 'claude',
       name: 'Continuation fixture',
@@ -441,28 +446,25 @@ describe('POST /v2/sessions capability negotiation', () => {
     });
     const originalStart = provider.startInteractiveSession.bind(provider);
     let forkTargetSequence = 0;
-    const forkTargetOverride: { value?: string } = {};
-    const startInteractive = vi
-      .spyOn(provider, 'startInteractiveSession')
-      .mockImplementation(async (options) => {
-        const handle = await originalStart(options);
-        return {
-          events: handle.events,
-          accepted: handle.accepted,
-          send: (command) => handle.send(command),
-          resolveInteraction: (requestId, reason) => handle.resolveInteraction(requestId, reason),
-          interrupt: () => handle.interrupt(),
-          close: () => handle.close(),
-          providerSessionId:
-            options.continuation?.kind === 'fork'
-              ? (forkTargetOverride.value ?? `native-fork-${++forkTargetSequence}`)
-              : (options.continuation?.providerSessionId ?? 'native-thread-1'),
-          continuationEvidence: {
-            accountFingerprint: createHash('sha256').update('fixture@example.test').digest('hex'),
-            selectedModel: 'fixture-model',
-          },
-        };
-      });
+    vi.spyOn(provider, 'startInteractiveSession').mockImplementation(async (options) => {
+      const handle = await originalStart(options);
+      return {
+        events: handle.events,
+        accepted: handle.accepted,
+        send: (command) => handle.send(command),
+        resolveInteraction: (requestId, reason) => handle.resolveInteraction(requestId, reason),
+        interrupt: () => handle.interrupt(),
+        close: () => handle.close(),
+        providerSessionId:
+          options.continuation?.kind === 'fork'
+            ? 'native-fork-' + String(++forkTargetSequence)
+            : (options.continuation?.providerSessionId ?? 'native-thread-1'),
+        continuationEvidence: {
+          accountFingerprint: createHash('sha256').update('fixture@example.test').digest('hex'),
+          selectedModel: 'fixture-model',
+        },
+      };
+    });
     registry.register(provider);
     const identity = await resolveWorkspaceIdentity(cwd);
     const trustStore = new WorkspaceTrustStore(join(cwd, 'trust.json'));
@@ -475,15 +477,33 @@ describe('POST /v2/sessions capability negotiation', () => {
       token: TOKEN,
       logger: noopLogger,
     });
+    const capabilities = {
+      required: [{ id: 'session.cancel' }],
+      optional: [],
+      allowExperimental: false,
+    };
     const payload = {
-      provider: 'claude',
+      provider: 'claude' as const,
       cwd,
-      prompt: 'continue safely',
-      capabilities: {
-        required: [{ id: 'session.cancel' }],
-        optional: [],
-        allowExperimental: false,
-      },
+      prompt: 'start continuation parent',
+      capabilities,
+    };
+    const continuationInput = (prompt: string) => ({ prompt, capabilities });
+    const cancelAndWait = async (sessionId: string): Promise<void> => {
+      const cancelled = await app.inject({
+        method: 'POST',
+        url: '/v2/sessions/' + sessionId + '/cancel',
+        headers: auth(),
+      });
+      expect(cancelled.statusCode, cancelled.body).toBe(202);
+      await vi.waitFor(async () => {
+        const snapshot = await app.inject({
+          method: 'GET',
+          url: '/v2/sessions/' + sessionId,
+          headers: auth(),
+        });
+        expect(agentSessionV2Schema.parse(snapshot.json()).status).toBe('cancelled');
+      });
     };
 
     const fresh = await app.inject({
@@ -497,231 +517,120 @@ describe('POST /v2/sessions capability negotiation', () => {
     expect(freshSession.providerSessionId).toBe('native-thread-1');
     expect(provider.interactiveStartedOptions[0]?.continuation).toBeUndefined();
 
-    const sessionCountBeforeFreshCollision = sessionManager.list(2).length;
-    const closesBeforeFreshCollision = provider.interactiveCloses;
-    const freshCollision = await app.inject({
+    const sessionsBeforeTargetCollision = sessionManager.list(2).length;
+    const closesBeforeTargetCollision = provider.interactiveCloses;
+    const targetCollision = await app.inject({
       method: 'POST',
       url: '/v2/sessions',
       headers: auth(),
-      payload: { ...payload, prompt: 'fresh collision' },
+      payload: { ...payload, prompt: 'provider reused an active native id' },
     });
-    expect(freshCollision.statusCode).toBe(502);
-    expect(freshCollision.json()).toMatchObject({
-      code: 'provider_transport_startup_failed',
-      details: { reason: 'continuation_binding_collision' },
-    });
-    expect(sessionManager.list(2)).toHaveLength(sessionCountBeforeFreshCollision);
-    expect(provider.interactiveCloses).toBe(closesBeforeFreshCollision + 1);
+    expect(targetCollision.statusCode).toBe(409);
+    expect(targetCollision.json()).toMatchObject({ code: 'continuation_in_use' });
+    expect(sessionManager.list(2)).toHaveLength(sessionsBeforeTargetCollision);
+    expect(provider.interactiveCloses).toBe(closesBeforeTargetCollision + 1);
+    const dispatchesAfterTargetCollision = provider.interactiveStartedOptions.length;
 
-    const liveFreshResume = await app.inject({
+    const rawContinuation = await app.inject({
       method: 'POST',
       url: '/v2/sessions',
       headers: auth(),
       payload: {
         ...payload,
-        prompt: 'resume fresh thread while its session is live',
-        continuation: { kind: 'resume', providerSessionId: 'native-thread-1' },
+        prompt: 'renderer-selected native id',
+        continuation: { kind: 'resume', providerSessionId: freshSession.providerSessionId },
       },
     });
-    expect(liveFreshResume.statusCode).toBe(502);
-    expect(liveFreshResume.json()).toMatchObject({
-      code: 'provider_transport_startup_failed',
-      details: { reason: 'continuation_in_use' },
-    });
-    expect(provider.interactiveStartedOptions).toHaveLength(2);
+    expect(rawContinuation.statusCode).toBe(400);
+    expect(rawContinuation.json()).toMatchObject({ code: 'raw_continuation_forbidden' });
+    expect(provider.interactiveStartedOptions).toHaveLength(dispatchesAfterTargetCollision);
 
-    const cancelledFresh = await app.inject({
+    const activeParent = await app.inject({
       method: 'POST',
-      url: `/v2/sessions/${freshSession.id}/cancel`,
+      url: '/v2/sessions/' + freshSession.id + '/resume',
       headers: auth(),
+      payload: continuationInput('resume active parent'),
     });
-    expect(cancelledFresh.statusCode, cancelledFresh.body).toBe(202);
-    await vi.waitFor(async () => {
-      const snapshot = await app.inject({
-        method: 'GET',
-        url: `/v2/sessions/${freshSession.id}`,
-        headers: auth(),
-      });
-      expect(agentSessionV2Schema.parse(snapshot.json()).status).toBe('cancelled');
-    });
+    expect(activeParent.statusCode).toBe(409);
+    expect(activeParent.json()).toMatchObject({ code: 'continuation_parent_active' });
+    expect(provider.interactiveStartedOptions).toHaveLength(dispatchesAfterTargetCollision);
 
-    startInteractive.mockRejectedValueOnce(
-      new ProviderTransportStartupError(
-        'fixture_start_failed',
-        'not_delivered',
-        'fixture startup failure',
+    await cancelAndWait(freshSession.id);
+
+    const dispatchesBeforeResume = provider.interactiveStartedOptions.length;
+    const attempts = await Promise.all(
+      ['first resume', 'concurrent resume'].map((prompt) =>
+        app.inject({
+          method: 'POST',
+          url: '/v2/sessions/' + freshSession.id + '/resume',
+          headers: auth(),
+          payload: continuationInput(prompt),
+        }),
       ),
     );
-    const failedStart = await app.inject({
+    const continued = attempts.find((attempt) => attempt.statusCode === 201);
+    const conflict = attempts.find((attempt) => attempt.statusCode === 409);
+    expect(continued).toBeDefined();
+    expect(conflict).toBeDefined();
+    expect(conflict?.json()).toMatchObject({ code: 'continuation_in_use' });
+    expect(provider.interactiveStartedOptions).toHaveLength(dispatchesBeforeResume + 1);
+
+    const resumedSession = agentSessionV2Schema.parse(continued!.json());
+    expect(resumedSession).toMatchObject({
+      providerSessionId: freshSession.providerSessionId,
+      rootExecutionId: freshSession.executionId,
+      parentSessionId: freshSession.id,
+      parentExecutionId: freshSession.executionId,
+      continuationKind: 'resume',
+    });
+    expect(provider.interactiveStartedOptions.at(-1)?.continuation).toEqual({
+      kind: 'resume',
+      providerSessionId: freshSession.providerSessionId,
+    });
+    expect(provider.interactiveStartedOptions.at(-1)?.expectedContinuationEvidence).toEqual({
+      accountFingerprint: createHash('sha256').update('fixture@example.test').digest('hex'),
+      selectedModel: 'fixture-model',
+    });
+    expect(continued!.body).not.toContain('accountFingerprint');
+
+    await cancelAndWait(resumedSession.id);
+
+    const dispatchesBeforeStaleAncestor = provider.interactiveStartedOptions.length;
+    const staleAncestor = await app.inject({
       method: 'POST',
-      url: '/v2/sessions',
+      url: '/v2/sessions/' + freshSession.id + '/resume',
       headers: auth(),
-      payload: {
-        ...payload,
-        continuation: { kind: 'resume', providerSessionId: 'native-thread-1' },
-      },
+      payload: continuationInput('resume a stale ancestor'),
     });
-    expect(failedStart.statusCode).toBe(502);
-    expect(failedStart.json()).toMatchObject({
-      code: 'provider_transport_startup_failed',
-      details: { reason: 'fixture_start_failed' },
-    });
+    expect(staleAncestor.statusCode).toBe(404);
+    expect(staleAncestor.json()).toMatchObject({ code: 'continuation_binding_not_found' });
+    expect(provider.interactiveStartedOptions).toHaveLength(dispatchesBeforeStaleAncestor);
 
-    for (const kind of ['resume', 'fork'] as const) {
-      const attempts = await Promise.all(
-        ['first', 'concurrent'].map((label) =>
-          app.inject({
-            method: 'POST',
-            url: '/v2/sessions',
-            headers: auth(),
-            payload: {
-              ...payload,
-              prompt: `${label} ${kind}`,
-              continuation: { kind, providerSessionId: 'native-thread-1' },
-            },
-          }),
-        ),
-      );
-      const continued = attempts.find((attempt) => attempt.statusCode === 201)!;
-      const conflict = attempts.find((attempt) => attempt.statusCode === 502)!;
-      expect(continued.statusCode, continued.body).toBe(201);
-      expect(conflict?.json()).toMatchObject({
-        code: 'provider_transport_startup_failed',
-        details: { reason: 'continuation_in_use' },
-      });
-      expect(provider.interactiveStartedOptions.at(-1)?.continuation).toEqual({
-        kind,
-        providerSessionId: 'native-thread-1',
-      });
-      expect(provider.interactiveStartedOptions.at(-1)?.expectedContinuationEvidence).toEqual({
-        accountFingerprint: createHash('sha256').update('fixture@example.test').digest('hex'),
-        selectedModel: 'fixture-model',
-      });
-      expect(continued.body).not.toContain('accountFingerprint');
-      const continuedSession = agentSessionV2Schema.parse(continued.json());
-      if (kind === 'fork') {
-        expect(continuedSession.providerSessionId).toBe('native-fork-1');
-        const concurrentTargetResume = await app.inject({
-          method: 'POST',
-          url: '/v2/sessions',
-          headers: auth(),
-          payload: {
-            ...payload,
-            prompt: 'resume fork target while fork session is live',
-            continuation: {
-              kind: 'resume',
-              providerSessionId: continuedSession.providerSessionId,
-            },
-          },
-        });
-        expect(concurrentTargetResume.statusCode).toBe(502);
-        expect(concurrentTargetResume.json()).toMatchObject({
-          code: 'provider_transport_startup_failed',
-          details: { reason: 'continuation_in_use' },
-        });
-      }
-      const cancelled = await app.inject({
-        method: 'POST',
-        url: `/v2/sessions/${continuedSession.id}/cancel`,
-        headers: auth(),
-      });
-      expect(cancelled.statusCode, cancelled.body).toBe(202);
-      await vi.waitFor(async () => {
-        const snapshot = await app.inject({
-          method: 'GET',
-          url: `/v2/sessions/${continuedSession.id}`,
-          headers: auth(),
-        });
-        expect(agentSessionV2Schema.parse(snapshot.json()).status).toBe('cancelled');
-      });
-      if (kind === 'fork') {
-        const resumedTarget = await app.inject({
-          method: 'POST',
-          url: '/v2/sessions',
-          headers: auth(),
-          payload: {
-            ...payload,
-            prompt: 'resume fork target after fork session terminal',
-            continuation: {
-              kind: 'resume',
-              providerSessionId: continuedSession.providerSessionId,
-            },
-          },
-        });
-        expect(resumedTarget.statusCode, resumedTarget.body).toBe(201);
-        const resumedTargetSession = agentSessionV2Schema.parse(resumedTarget.json());
-        const targetCancelled = await app.inject({
-          method: 'POST',
-          url: `/v2/sessions/${resumedTargetSession.id}/cancel`,
-          headers: auth(),
-        });
-        expect(targetCancelled.statusCode, targetCancelled.body).toBe(202);
-      }
-    }
-
-    forkTargetOverride.value = 'native-fork-1';
-    const sessionCountBeforeForkCollision = sessionManager.list(2).length;
-    const closesBeforeForkCollision = provider.interactiveCloses;
-    const forkCollision = await app.inject({
+    const dispatchesBeforeFork = provider.interactiveStartedOptions.length;
+    const forked = await app.inject({
       method: 'POST',
-      url: '/v2/sessions',
+      url: '/v2/sessions/' + resumedSession.id + '/fork',
       headers: auth(),
-      payload: {
-        ...payload,
-        prompt: 'fork into an existing target',
-        continuation: { kind: 'fork', providerSessionId: 'native-thread-1' },
-      },
+      payload: continuationInput('fork terminal resumed session'),
     });
-    expect(forkCollision.statusCode).toBe(502);
-    expect(forkCollision.json()).toMatchObject({
-      code: 'provider_transport_startup_failed',
-      details: { reason: 'continuation_binding_collision' },
+    expect(forked.statusCode, forked.body).toBe(201);
+    expect(provider.interactiveStartedOptions).toHaveLength(dispatchesBeforeFork + 1);
+    const forkedSession = agentSessionV2Schema.parse(forked.json());
+    expect(forkedSession).toMatchObject({
+      providerSessionId: 'native-fork-1',
+      rootExecutionId: freshSession.executionId,
+      parentSessionId: resumedSession.id,
+      parentExecutionId: resumedSession.executionId,
+      continuationKind: 'fork',
     });
-    expect(sessionManager.list(2)).toHaveLength(sessionCountBeforeForkCollision);
-    expect(provider.interactiveCloses).toBe(closesBeforeForkCollision + 1);
-
-    const unknown = await app.inject({
-      method: 'POST',
-      url: '/v2/sessions',
-      headers: auth(),
-      payload: {
-        ...payload,
-        continuation: { kind: 'resume', providerSessionId: 'unknown-thread' },
-      },
+    expect(provider.interactiveStartedOptions.at(-1)?.continuation).toEqual({
+      kind: 'fork',
+      providerSessionId: resumedSession.providerSessionId,
     });
-    expect(unknown.statusCode).toBe(502);
-    expect(unknown.json()).toMatchObject({
-      code: 'provider_transport_startup_failed',
-      details: { reason: 'continuation_binding_not_found' },
-    });
-    expect(provider.interactiveStartedOptions).toHaveLength(6);
-
-    const otherCwd = mkdtempSync(join(tmpdir(), 'agent-dock-daemon-v2-other-'));
-    try {
-      const otherIdentity = await resolveWorkspaceIdentity(otherCwd);
-      await trustStore.setTrusted(otherIdentity);
-      const crossWorkspace = await app.inject({
-        method: 'POST',
-        url: '/v2/sessions',
-        headers: auth(),
-        payload: {
-          ...payload,
-          cwd: otherCwd,
-          continuation: { kind: 'fork', providerSessionId: 'native-thread-1' },
-        },
-      });
-      expect(crossWorkspace.statusCode).toBe(502);
-      expect(crossWorkspace.json()).toMatchObject({
-        code: 'provider_transport_startup_failed',
-        details: { reason: 'continuation_scope_mismatch' },
-      });
-      expect(provider.interactiveStartedOptions).toHaveLength(6);
-    } finally {
-      rmSync(otherCwd, { recursive: true, force: true });
-    }
+    await cancelAndWait(forkedSession.id);
   });
 
-  it('passes a bound resume id to legacy exec and rejects legacy fork before dispatch', async () => {
+  it('derives legacy resume identity from a terminal parent and rejects unsupported fork', async () => {
     const status: ProviderStatus = {
       id: 'claude',
       name: 'Legacy continuation fixture',
@@ -748,7 +657,7 @@ describe('POST /v2/sessions capability negotiation', () => {
       token: TOKEN,
       logger: noopLogger,
     });
-    const payload = { provider: 'claude', cwd, prompt: 'legacy fresh' };
+    const payload = { provider: 'claude' as const, cwd, prompt: 'legacy fresh' };
     const fresh = await app.inject({
       method: 'POST',
       url: '/v2/sessions',
@@ -757,43 +666,272 @@ describe('POST /v2/sessions capability negotiation', () => {
     });
     expect(fresh.statusCode, fresh.body).toBe(201);
     const freshSession = agentSessionV2Schema.parse(fresh.json());
-    let issuedId: string | undefined;
+    let terminalParent = freshSession;
     await vi.waitFor(async () => {
       const snapshot = await app.inject({
         method: 'GET',
-        url: `/v2/sessions/${freshSession.id}`,
+        url: '/v2/sessions/' + freshSession.id,
         headers: auth(),
       });
-      issuedId = agentSessionV2Schema.parse(snapshot.json()).providerSessionId;
-      expect(issuedId).toBe(`fake-${freshSession.id}`);
+      terminalParent = agentSessionV2Schema.parse(snapshot.json());
+      expect(terminalParent.status).toBe('completed');
+      expect(terminalParent.providerSessionId).toBe('fake-' + freshSession.id);
     });
 
     const resumed = await app.inject({
       method: 'POST',
-      url: '/v2/sessions',
+      url: '/v2/sessions/' + freshSession.id + '/resume',
       headers: auth(),
-      payload: {
-        ...payload,
-        prompt: 'legacy resume',
-        continuation: { kind: 'resume', providerSessionId: issuedId },
-      },
+      payload: { prompt: 'legacy resume' },
     });
     expect(resumed.statusCode, resumed.body).toBe(201);
-    expect(provider.startedOptions[1]?.resumeProviderSessionId).toBe(issuedId);
+    expect(provider.startedOptions[1]?.resumeProviderSessionId).toBe(
+      terminalParent.providerSessionId,
+    );
+    const resumedSession = agentSessionV2Schema.parse(resumed.json());
+    expect(resumedSession).toMatchObject({
+      rootExecutionId: freshSession.executionId,
+      parentSessionId: freshSession.id,
+      parentExecutionId: freshSession.executionId,
+      continuationKind: 'resume',
+    });
+    await vi.waitFor(async () => {
+      const snapshot = await app.inject({
+        method: 'GET',
+        url: '/v2/sessions/' + resumedSession.id,
+        headers: auth(),
+      });
+      const terminalResume = agentSessionV2Schema.parse(snapshot.json());
+      expect(terminalResume.status).toBe('completed');
+    });
 
     const forked = await app.inject({
       method: 'POST',
-      url: '/v2/sessions',
+      url: '/v2/sessions/' + freshSession.id + '/fork',
       headers: auth(),
-      payload: {
-        ...payload,
-        prompt: 'legacy fork',
-        continuation: { kind: 'fork', providerSessionId: issuedId },
-      },
+      payload: { prompt: 'legacy fork' },
     });
     expect(forked.statusCode).toBe(422);
     expect(forked.json()).toMatchObject({ code: 'required_capability_unavailable' });
     expect(provider.startedOptions).toHaveLength(2);
+  });
+
+  it('fails a continuation deterministically when the terminal parent has no native id', async () => {
+    const registry = new ProviderRegistry();
+    const provider = new ObservationProvider();
+    const start = vi.spyOn(provider, 'startSession');
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger);
+    const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+    const fresh = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: { provider: 'claude', cwd, prompt: 'no native id' },
+    });
+    expect(fresh.statusCode, fresh.body).toBe(201);
+    const freshSession = agentSessionV2Schema.parse(fresh.json());
+    await vi.waitFor(async () => {
+      const snapshot = await app.inject({
+        method: 'GET',
+        url: '/v2/sessions/' + freshSession.id,
+        headers: auth(),
+      });
+      const parent = agentSessionV2Schema.parse(snapshot.json());
+      expect(parent.status).toBe('completed');
+      expect(parent.providerSessionId).toBeUndefined();
+    });
+
+    const missing = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions/' + freshSession.id + '/resume',
+      headers: auth(),
+      payload: { prompt: 'resume without native id' },
+    });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toMatchObject({ code: 'continuation_not_found' });
+    expect(start).toHaveBeenCalledTimes(1);
+  });
+
+  it('paginates durable session lists and normalized event history', async () => {
+    const { app } = setup();
+    const created: AgentSessionV2[] = [];
+    for (const prompt of ['first paginated session', 'second paginated session']) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/v2/sessions',
+        headers: auth(),
+        payload: { provider: 'claude', cwd, prompt },
+      });
+      expect(response.statusCode, response.body).toBe(201);
+      created.push(agentSessionV2Schema.parse(response.json()));
+    }
+
+    await vi.waitFor(async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: '/v2/sessions/' + created[0]!.id + '/history?limit=100',
+        headers: auth(),
+      });
+      expect(response.statusCode, response.body).toBe(200);
+      expect(sessionEventHistoryV2PageSchema.parse(response.json()).events.length).toBeGreaterThan(
+        1,
+      );
+    });
+
+    const firstListResponse = await app.inject({
+      method: 'GET',
+      url: '/v2/sessions?limit=1',
+      headers: auth(),
+    });
+    expect(firstListResponse.statusCode, firstListResponse.body).toBe(200);
+    const firstListPage = sessionListV2PageSchema.parse(firstListResponse.json());
+    expect(firstListPage.sessions).toHaveLength(1);
+    expect(firstListPage.nextCursor).toBeDefined();
+
+    const secondListResponse = await app.inject({
+      method: 'GET',
+      url: '/v2/sessions?limit=1&cursor=' + encodeURIComponent(firstListPage.nextCursor as string),
+      headers: auth(),
+    });
+    expect(secondListResponse.statusCode, secondListResponse.body).toBe(200);
+    const secondListPage = sessionListV2PageSchema.parse(secondListResponse.json());
+    expect(secondListPage.sessions).toHaveLength(1);
+    expect([firstListPage.sessions[0]!.id, secondListPage.sessions[0]!.id].sort()).toEqual(
+      created.map((session) => session.id).sort(),
+    );
+
+    const firstHistoryResponse = await app.inject({
+      method: 'GET',
+      url: '/v2/sessions/' + created[0]!.id + '/history?limit=1',
+      headers: auth(),
+    });
+    expect(firstHistoryResponse.statusCode, firstHistoryResponse.body).toBe(200);
+    const firstHistoryPage = sessionEventHistoryV2PageSchema.parse(firstHistoryResponse.json());
+    expect(firstHistoryPage.events).toHaveLength(1);
+    expect(firstHistoryPage.nextCursor).toBeDefined();
+
+    const secondHistoryResponse = await app.inject({
+      method: 'GET',
+      url:
+        '/v2/sessions/' +
+        created[0]!.id +
+        '/history?limit=1&cursor=' +
+        encodeURIComponent(firstHistoryPage.nextCursor as string),
+      headers: auth(),
+    });
+    expect(secondHistoryResponse.statusCode, secondHistoryResponse.body).toBe(200);
+    const secondHistoryPage = sessionEventHistoryV2PageSchema.parse(secondHistoryResponse.json());
+    expect(secondHistoryPage.events).toHaveLength(1);
+    expect(secondHistoryPage.events[0]!.sessionId).toBe(created[0]!.id);
+    expect(secondHistoryPage.events[0]!.sequence).toBeGreaterThan(
+      firstHistoryPage.events[0]!.sequence,
+    );
+  });
+
+  it('serves retained session metadata and normalized history after daemon reconstruction', async () => {
+    const registry = new ProviderRegistry();
+    registry.register(
+      new FakeProvider('claude', {
+        id: 'claude',
+        name: 'Claude Code',
+        installed: true,
+        authenticated: 'authenticated',
+        capabilities: FAKE_PROVIDER_CAPABILITIES,
+        version: CLAUDE_LEGACY_COMPATIBILITY.providerVersion,
+      }),
+    );
+    const graphPath = join(cwd, 'execution-graph');
+    const firstManager = new SessionManager(registry, noopLogger, undefined, {
+      executionGraphStore: new FileExecutionGraphStore(graphPath),
+    });
+    const firstDaemon = buildServer({
+      registry,
+      sessionManager: firstManager,
+      token: TOKEN,
+      logger: noopLogger,
+    });
+    const created = await firstDaemon.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: { provider: 'claude', cwd, prompt: 'survive restart' },
+    });
+    const session = agentSessionV2Schema.parse(created.json());
+    await vi.waitFor(async () => {
+      const snapshot = await firstDaemon.inject({
+        method: 'GET',
+        url: `/v2/sessions/${session.id}`,
+        headers: auth(),
+      });
+      expect(agentSessionV2Schema.parse(snapshot.json()).status).toBe('completed');
+    });
+    await firstDaemon.close();
+
+    const recoveredManager = new SessionManager(registry, noopLogger, undefined, {
+      executionGraphStore: new FileExecutionGraphStore(graphPath),
+    });
+    const recoveredDaemon = buildServer({
+      registry,
+      sessionManager: recoveredManager,
+      token: TOKEN,
+      logger: noopLogger,
+    });
+    const recovered = await recoveredDaemon.inject({
+      method: 'GET',
+      url: `/v2/sessions/${session.id}`,
+      headers: auth(),
+    });
+    expect(recovered.statusCode, recovered.body).toBe(200);
+    expect(agentSessionV2Schema.parse(recovered.json())).toMatchObject({
+      id: session.id,
+      executionId: session.executionId,
+      status: 'completed',
+    });
+    const history = await recoveredDaemon.inject({
+      method: 'GET',
+      url: `/v2/sessions/${session.id}/history?limit=100`,
+      headers: auth(),
+    });
+    const events = sessionEventHistoryV2PageSchema.parse(history.json()).events;
+    expect(events[0]?.type).toBe('session.started');
+    expect(events.at(-1)?.type).toBe('session.completed');
+    await recoveredDaemon.close();
+  });
+
+  it('returns storage_full before provider dispatch when no lineage can make room', async () => {
+    const registry = new ProviderRegistry();
+    const provider = new FakeProvider('claude', {
+      id: 'claude',
+      name: 'Claude Code',
+      installed: true,
+      authenticated: 'authenticated',
+      capabilities: FAKE_PROVIDER_CAPABILITIES,
+      version: CLAUDE_LEGACY_COMPATIBILITY.providerVersion,
+    });
+    registry.register(provider);
+    const quotaPath = join(cwd, 'quota');
+    mkdirSync(quotaPath, { recursive: true });
+    writeFileSync(join(quotaPath, 'retained.bin'), Buffer.alloc(2_048));
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, {
+      executionGraphStore: new FileExecutionGraphStore(join(cwd, 'full-graph'), {
+        maxBytes: 1_024,
+        additionalQuotaPaths: [quotaPath],
+      }),
+    });
+    const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: { provider: 'claude', cwd, prompt: 'must not dispatch' },
+    });
+
+    expect(response.statusCode).toBe(507);
+    expect(response.json()).toMatchObject({ code: 'storage_full' });
+    expect(provider.startedOptions).toHaveLength(0);
+    await app.close();
   });
 
   it('dispatches unknown-version auto exec only through a trusted, pinned, authenticated scope', async () => {
@@ -1881,6 +2019,115 @@ describe('v2 event, cancellation, and deletion routes', () => {
     expect(events.some((event) => event.type === ('thread.started' as string))).toBe(false);
   });
 
+  it('persists a safe summary for non-persistable extensions and bounds terminal reasons', async () => {
+    const { app, provider } = setupInteractive();
+    const secret = 'NON_PERSISTABLE_EXTENSION_SECRET';
+    const longReason = 'é'.repeat(2_048);
+    vi.spyOn(provider, 'startInteractiveSession').mockImplementation(async (options) => {
+      provider.interactiveStartedOptions.push(options);
+      async function* events(): AsyncGenerator<AgentEventV2, void, void> {
+        yield {
+          type: 'session.started',
+          provider: 'claude',
+          transport: options.transport.id,
+          selection: options.selection,
+        };
+        yield { type: 'session.status', status: 'active' };
+        yield { type: 'turn.started', turnId: options.turnId };
+        yield {
+          type: 'content.completed',
+          turnId: options.turnId,
+          block: {
+            type: 'provider_extension',
+            id: randomUUID(),
+            extensionName: 'fixture.private',
+            representation: 'bounded_data',
+            safeSummary: 'private provider data omitted',
+            data: { secret },
+            safeToPersist: false,
+          },
+        };
+        yield { type: 'session.cancelled', reason: longReason };
+      }
+      return {
+        events: events(),
+        accepted: Promise.resolve('accepted' as const),
+        send: async () => undefined,
+        resolveInteraction: async () => undefined,
+        interrupt: async () => undefined,
+        close: async () => undefined,
+      };
+    });
+
+    const session = await createInteractiveSession(app, ['session.cancel']);
+    let terminal = session;
+    await vi.waitFor(async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/v2/sessions/${session.id}`,
+        headers: auth(),
+      });
+      expect(response.statusCode, response.body).toBe(200);
+      terminal = agentSessionV2Schema.parse(response.json());
+      expect(terminal.status).toBe('cancelled');
+    });
+    expect(Buffer.byteLength(terminal.terminalReason ?? '', 'utf8')).toBeLessThanOrEqual(256);
+    expect(terminal.terminalReason).toBe('é'.repeat(128));
+
+    const historyResponse = await app.inject({
+      method: 'GET',
+      url: `/v2/sessions/${session.id}/history?limit=100`,
+      headers: auth(),
+    });
+    expect(historyResponse.statusCode, historyResponse.body).toBe(200);
+    const history = sessionEventHistoryV2PageSchema.parse(historyResponse.json()).events;
+    const content = history.find((event) => event.type === 'content.completed');
+    expect(content).toMatchObject({
+      type: 'content.completed',
+      block: {
+        type: 'provider_extension',
+        extensionName: 'fixture.private',
+        representation: 'safe_summary',
+        safeSummary: 'private provider data omitted',
+        reason: 'persistence_disallowed',
+      },
+    });
+    expect(JSON.stringify(history)).not.toContain(secret);
+    const cancelled = history.at(-1);
+    expect(cancelled).toMatchObject({ type: 'session.cancelled', reason: 'é'.repeat(128) });
+  });
+
+  it('omits raw compatibility errors from durable v2 session metadata', async () => {
+    const { app } = setup('failure');
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: { provider: 'claude', cwd, prompt: 'fail without durable diagnostics' },
+    });
+    expect(created.statusCode, created.body).toBe(201);
+    const session = agentSessionV2Schema.parse(created.json());
+
+    let terminal = session;
+    await vi.waitFor(async () => {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/v2/sessions/${session.id}`,
+        headers: auth(),
+      });
+      terminal = agentSessionV2Schema.parse(response.json());
+      expect(terminal.status).toBe('failed');
+    });
+    expect(terminal).not.toHaveProperty('error');
+
+    const listed = await app.inject({ method: 'GET', url: '/v2/sessions', headers: auth() });
+    const stored = sessionListV2PageSchema
+      .parse(listed.json())
+      .sessions.find((candidate) => candidate.id === session.id);
+    expect(stored).toBeDefined();
+    expect(stored).not.toHaveProperty('error');
+  });
+
   it('keeps generated IDs stable on replay, closes an empty terminal suffix, and rejects unsafe Last-Event-ID', async () => {
     const { app } = setup();
     const created = await app.inject({
@@ -2046,6 +2293,52 @@ describe('v2 event, cancellation, and deletion routes', () => {
         })
       ).statusCode,
     ).toBe(404);
+  });
+
+  it('rejects active-lineage deletion without removing the session', async () => {
+    const { app } = setup('hang-until-cancelled');
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: { provider: 'claude', cwd, prompt: 'delete only when terminal' },
+    });
+    expect(created.statusCode, created.body).toBe(201);
+    const session = agentSessionV2Schema.parse(created.json());
+
+    const activeDelete = await app.inject({
+      method: 'DELETE',
+      url: `/v2/sessions/${session.id}`,
+      headers: auth(),
+    });
+    expect(activeDelete.statusCode).toBe(409);
+    expect(activeDelete.json()).toMatchObject({ code: 'active_lineage' });
+    expect(
+      (await app.inject({ method: 'GET', url: `/v2/sessions/${session.id}`, headers: auth() }))
+        .statusCode,
+    ).toBe(200);
+
+    const cancelled = await app.inject({
+      method: 'POST',
+      url: `/v2/sessions/${session.id}/cancel`,
+      headers: auth(),
+    });
+    expect(cancelled.statusCode, cancelled.body).toBe(202);
+    await vi.waitFor(async () => {
+      const snapshot = await app.inject({
+        method: 'GET',
+        url: `/v2/sessions/${session.id}`,
+        headers: auth(),
+      });
+      expect(agentSessionV2Schema.parse(snapshot.json()).status).toBe('cancelled');
+    });
+
+    const terminalDelete = await app.inject({
+      method: 'DELETE',
+      url: `/v2/sessions/${session.id}`,
+      headers: auth(),
+    });
+    expect(terminalDelete.statusCode).toBe(204);
   });
 
   it('deletes a terminal v2 session without exposing it through either v2 read route', async () => {

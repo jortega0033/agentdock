@@ -10,11 +10,42 @@ import {
   commandAcknowledgementV2Schema,
   createSessionV2RequestSchema,
   providersV2ResponseSchema,
+  sessionContinuationInputV2Schema,
+  sessionEventHistoryV2PageSchema,
+  sessionEventHistoryV2QuerySchema,
   sessionIdParamSchema,
+  sessionListV2PageSchema,
+  sessionListV2QuerySchema,
   utf8ByteLength,
   workspaceInspectRequestV2Schema,
   workspaceTrustUpdateRequestV2Schema,
   workspaceTrustViewV2Schema,
+  mcpCatalogRequestV2Schema,
+  mcpCatalogV2Schema,
+  mcpConfigureRequestV2Schema,
+  mcpListRequestV2Schema,
+  mcpOAuthStartRequestV2Schema,
+  mcpServerActionRequestV2Schema,
+  mcpServerListV2Schema,
+  mcpToolInvocationRequestV2Schema,
+  mcpToolInvocationResultV2Schema,
+  providerComponentInvokeRequestV2Schema,
+  providerComponentListRequestV2Schema,
+  providerComponentListV2Schema,
+  providerComponentManageRequestV2Schema,
+  providerComponentOperationResultV2Schema,
+  ownedWorktreeListV2Schema,
+  ownedWorktreeV2Schema,
+  subagentControlRequestV2Schema,
+  subagentControlResultV2Schema,
+  subagentGraphV2Schema,
+  worktreeCleanupRequestV2Schema,
+  worktreeCreateRequestV2Schema,
+  worktreePreviewRequestV2Schema,
+  worktreePreviewV2Schema,
+  attachmentListV2Schema,
+  structuredWorkflowRequestV2Schema,
+  structuredWorkflowResultV2Schema,
   type AgentCommandV2,
   type AgentEvent,
   type AgentEventV2Envelope,
@@ -29,8 +60,33 @@ import {
   type ProviderId,
   type ProviderStatus,
   type ProviderStatusV2,
+  type SessionContinuationInputV2,
+  type SessionEventHistoryV2Page,
+  type SessionEventHistoryV2Query,
+  type SessionListV2Page,
+  type SessionListV2Query,
   type WorkspaceTrustUpdateRequestV2,
   type WorkspaceTrustViewV2,
+  type McpCatalogV2,
+  type McpConfigureRequestV2,
+  type McpServerActionRequestV2,
+  type McpServerListV2,
+  type McpToolInvocationRequestV2,
+  type McpToolInvocationResultV2,
+  type ProviderComponentInvokeRequestV2,
+  type ProviderComponentListRequestV2,
+  type ProviderComponentListV2,
+  type ProviderComponentManageRequestV2,
+  type ProviderComponentOperationResultV2,
+  type OwnedWorktreeV2,
+  type SubagentControlRequestV2,
+  type SubagentGraphV2,
+  type WorktreeCreateRequestV2,
+  type WorktreePreviewRequestV2,
+  type WorktreePreviewV2,
+  type AttachmentMetadataV2,
+  type StructuredWorkflowRequestV2,
+  type StructuredWorkflowResultV2,
 } from '@agent-dock/shared';
 import type {
   RendererInteraction,
@@ -71,6 +127,13 @@ export interface AuditReadOptionsV2 {
   sessionId?: string;
 }
 
+export interface RendererMcpOAuthStatus {
+  serverId: string;
+  status: 'pending' | 'authenticated' | 'failed' | 'unsupported';
+  authorizationHost?: string;
+  safeSummary?: string;
+}
+
 type WithoutCommandId<T> = T extends unknown ? Omit<T, 'commandId'> : never;
 export type RendererSessionCommand = WithoutCommandId<
   Exclude<AgentCommandV2, { type: 'approval.respond' | 'question.respond' }>
@@ -81,10 +144,42 @@ export interface AgentDockBridge {
   onDaemonStatus(callback: (status: DaemonStatus) => void): () => void;
   listProviders(): Promise<ProviderStatus[]>;
   listProvidersV2(): Promise<ProviderStatusV2[]>;
+  listMcpServers(provider: ProviderId, cwd: string): Promise<McpServerListV2>;
+  configureMcpServer(input: McpConfigureRequestV2): Promise<McpServerListV2>;
+  actionMcpServer(input: McpServerActionRequestV2): Promise<McpServerListV2>;
+  getMcpCatalog(provider: ProviderId, serverId: string, cwd: string): Promise<McpCatalogV2>;
+  startMcpOAuth(provider: ProviderId, serverId: string, cwd: string): Promise<RendererMcpOAuthStatus>;
+  invokeMcpTool(input: McpToolInvocationRequestV2): Promise<McpToolInvocationResultV2>;
+  listProviderComponents(input: ProviderComponentListRequestV2): Promise<ProviderComponentListV2>;
+  manageProviderComponent(input: ProviderComponentManageRequestV2): Promise<ProviderComponentOperationResultV2>;
+  invokeProviderComponent(input: ProviderComponentInvokeRequestV2): Promise<ProviderComponentOperationResultV2>;
+  getSubagentGraph(sessionId: string): Promise<SubagentGraphV2>;
+  controlSubagent(input: SubagentControlRequestV2): Promise<{ sessionId: string; agentId: string; status: 'accepted' | 'unsupported' | 'not_found'; safeSummary?: string }>;
+  previewWorktree(input: WorktreePreviewRequestV2): Promise<WorktreePreviewV2>;
+  createWorktree(input: WorktreeCreateRequestV2): Promise<OwnedWorktreeV2>;
+  listWorktrees(): Promise<OwnedWorktreeV2[]>;
+  cleanupWorktree(worktreeId: string): Promise<OwnedWorktreeV2>;
+  selectAndUploadAttachments(sessionId?: string): Promise<AttachmentMetadataV2[]>;
+  validateStructuredOutput(input: StructuredWorkflowRequestV2): Promise<StructuredWorkflowResultV2>;
   createSession(input: CreateSessionInput): Promise<AgentSession>;
   cancelSession(sessionId: string): Promise<void>;
   onSessionEvent(callback: (sessionId: string, event: AgentEvent) => void): () => void;
   createInteractiveSession(input: CreateSessionV2Request): Promise<AgentSessionV2>;
+  listInteractiveSessions(options?: SessionListV2Query): Promise<SessionListV2Page>;
+  readInteractiveSessionHistory(
+    sessionId: string,
+    options?: SessionEventHistoryV2Query,
+  ): Promise<SessionEventHistoryV2Page>;
+  reconnectInteractiveSession(sessionId: string): Promise<AgentSessionV2>;
+  resumeInteractiveSession(
+    sessionId: string,
+    input: SessionContinuationInputV2,
+  ): Promise<AgentSessionV2>;
+  forkInteractiveSession(
+    sessionId: string,
+    input: SessionContinuationInputV2,
+  ): Promise<AgentSessionV2>;
+  deleteInteractiveSession(sessionId: string): Promise<void>;
   sendSessionCommand(command: RendererSessionCommand): Promise<CommandAcknowledgementV2>;
   respondApproval(
     interactionHandle: string,
@@ -101,8 +196,12 @@ export interface AgentDockBridge {
   onInteractiveSessionStreamNotice(
     callback: (sessionId: string, notice: InteractiveSessionStreamNotice) => void,
   ): () => void;
-  onInteractionRequested(callback: (interaction: RendererInteraction) => void): () => void;
-  onInteractionResolved(callback: (resolution: RendererInteractionResolution) => void): () => void;
+  onInteractionRequested(
+    callback: (sessionId: string, interaction: RendererInteraction) => void,
+  ): () => void;
+  onInteractionResolved(
+    callback: (sessionId: string, resolution: RendererInteractionResolution) => void,
+  ): () => void;
   inspectWorkspace(cwd: string): Promise<WorkspaceTrustViewV2>;
   setWorkspaceTrust(
     workspaceId: string,
@@ -291,7 +390,9 @@ function toRendererApprovalInteraction(
 }
 
 function toInteractionResolution(value: unknown): RendererInteractionResolution | undefined {
-  if (!isRecord(value) || !isHandle(value.interactionHandle)) return undefined;
+  if (!isRecord(value) || !isHandle(value.interactionHandle)) {
+    return undefined;
+  }
   switch (value.kind) {
     case 'approval_resolved':
       if (value.reason !== 'allowed' && value.reason !== 'denied') return undefined;
@@ -496,6 +597,10 @@ function isHandle(value: unknown): value is string {
   return typeof value === 'string' && HANDLE_PATTERN.test(value);
 }
 
+function isSessionId(value: unknown): value is string {
+  return sessionIdParamSchema.safeParse({ sessionId: value }).success;
+}
+
 function isByteBoundedString(value: unknown, maximum: number): value is string {
   return typeof value === 'string' && utf8ByteLength(value) <= maximum;
 }
@@ -531,6 +636,88 @@ const api: AgentDockBridge = {
     const providers: unknown = await ipcRenderer.invoke('daemon:list-providers-v2');
     return providersV2ResponseSchema.parse({ providers }).providers;
   },
+  async listMcpServers(provider, cwd) {
+    const input = mcpListRequestV2Schema.parse({ provider, cwd });
+    return mcpServerListV2Schema.parse(await ipcRenderer.invoke('daemon:list-mcp-servers', input));
+  },
+  async configureMcpServer(input) {
+    const parsed = mcpConfigureRequestV2Schema.parse(input);
+    return mcpServerListV2Schema.parse(await ipcRenderer.invoke('daemon:configure-mcp-server', parsed));
+  },
+  async actionMcpServer(input) {
+    const parsed = mcpServerActionRequestV2Schema.parse(input);
+    return mcpServerListV2Schema.parse(await ipcRenderer.invoke('daemon:action-mcp-server', parsed));
+  },
+  async getMcpCatalog(provider, serverId, cwd) {
+    const input = mcpCatalogRequestV2Schema.parse({ provider, serverId, cwd });
+    return mcpCatalogV2Schema.parse(await ipcRenderer.invoke('daemon:get-mcp-catalog', input));
+  },
+  async startMcpOAuth(provider, serverId, cwd) {
+    const input = mcpOAuthStartRequestV2Schema.parse({ provider, serverId, cwd });
+    const output: unknown = await ipcRenderer.invoke('daemon:start-mcp-oauth', input);
+    if (!isRecordWithAllowedKeys(output, ['serverId', 'status', 'authorizationHost', 'safeSummary']) || output.serverId !== serverId || !['pending', 'authenticated', 'failed', 'unsupported'].includes(String(output.status))) {
+      throw new Error('invalid MCP OAuth status');
+    }
+    if (output.authorizationHost !== undefined && (typeof output.authorizationHost !== 'string' || output.authorizationHost.length > 253 || !/^[A-Za-z0-9.-]+(?::\d{1,5})?$/.test(output.authorizationHost))) {
+      throw new Error('invalid MCP OAuth host');
+    }
+    if (output.safeSummary !== undefined && (typeof output.safeSummary !== 'string' || output.safeSummary.length > 1_024)) throw new Error('invalid MCP OAuth summary');
+    return {
+      serverId,
+      status: output.status as RendererMcpOAuthStatus['status'],
+      ...(typeof output.authorizationHost === 'string' ? { authorizationHost: output.authorizationHost } : {}),
+      ...(typeof output.safeSummary === 'string' ? { safeSummary: output.safeSummary } : {}),
+    };
+  },
+  async invokeMcpTool(input) {
+    const parsed = mcpToolInvocationRequestV2Schema.parse(input);
+    return mcpToolInvocationResultV2Schema.parse(await ipcRenderer.invoke('daemon:invoke-mcp-tool', parsed));
+  },
+  async listProviderComponents(input) {
+    const parsed = providerComponentListRequestV2Schema.parse(input);
+    return providerComponentListV2Schema.parse(await ipcRenderer.invoke('daemon:list-provider-components', parsed));
+  },
+  async manageProviderComponent(input) {
+    const parsed = providerComponentManageRequestV2Schema.parse(input);
+    return providerComponentOperationResultV2Schema.parse(await ipcRenderer.invoke('daemon:manage-provider-component', parsed));
+  },
+  async invokeProviderComponent(input) {
+    const parsed = providerComponentInvokeRequestV2Schema.parse(input);
+    return providerComponentOperationResultV2Schema.parse(await ipcRenderer.invoke('daemon:invoke-provider-component', parsed));
+  },
+  async getSubagentGraph(sessionId) {
+    const parsed = sessionIdParamSchema.parse({ sessionId }).sessionId;
+    return subagentGraphV2Schema.parse(await ipcRenderer.invoke('daemon:get-subagent-graph', parsed));
+  },
+  async controlSubagent(input) {
+    const parsed = subagentControlRequestV2Schema.parse(input);
+    return subagentControlResultV2Schema.parse(await ipcRenderer.invoke('daemon:control-subagent', parsed));
+  },
+  async previewWorktree(input) {
+    const parsed = worktreePreviewRequestV2Schema.parse(input);
+    return worktreePreviewV2Schema.parse(await ipcRenderer.invoke('daemon:preview-worktree', parsed));
+  },
+  async createWorktree(input) {
+    const parsed = worktreeCreateRequestV2Schema.parse(input);
+    return ownedWorktreeV2Schema.parse(await ipcRenderer.invoke('daemon:create-worktree', parsed));
+  },
+  async listWorktrees() {
+    const worktrees: unknown = await ipcRenderer.invoke('daemon:list-worktrees');
+    return ownedWorktreeListV2Schema.parse({ worktrees }).worktrees;
+  },
+  async cleanupWorktree(worktreeId) {
+    const parsed = worktreeCleanupRequestV2Schema.parse({ worktreeId });
+    return ownedWorktreeV2Schema.parse(await ipcRenderer.invoke('daemon:cleanup-worktree', parsed.worktreeId));
+  },
+  async selectAndUploadAttachments(sessionId) {
+    const parsedSessionId = sessionId === undefined ? undefined : sessionIdParamSchema.parse({ sessionId }).sessionId;
+    const attachments: unknown = await ipcRenderer.invoke('dialog:select-and-upload-attachments', parsedSessionId ? { sessionId: parsedSessionId } : {});
+    return attachmentListV2Schema.parse({ attachments }).attachments;
+  },
+  async validateStructuredOutput(input) {
+    const parsed = structuredWorkflowRequestV2Schema.parse(input);
+    return structuredWorkflowResultV2Schema.parse(await ipcRenderer.invoke('daemon:validate-structured-output', parsed));
+  },
   createSession(input) {
     return ipcRenderer.invoke('daemon:create-session', input);
   },
@@ -552,6 +739,56 @@ const api: AgentDockBridge = {
     return agentSessionV2Schema.parse(
       await ipcRenderer.invoke('daemon:create-interactive-session', parsedInput),
     );
+  },
+  async listInteractiveSessions(options = {}) {
+    const input = sessionListV2QuerySchema.parse(options);
+    return sessionListV2PageSchema.parse(
+      await ipcRenderer.invoke('daemon:list-interactive-sessions', input),
+    );
+  },
+  async readInteractiveSessionHistory(sessionId, options = {}) {
+    const parsedSessionId = sessionIdParamSchema.parse({ sessionId }).sessionId;
+    const query = sessionEventHistoryV2QuerySchema.parse(options);
+    const page = sessionEventHistoryV2PageSchema.parse(
+      await ipcRenderer.invoke('daemon:read-interactive-session-history', {
+        sessionId: parsedSessionId,
+        query,
+      }),
+    );
+    return {
+      ...page,
+      events: page.events.filter((event) => !INTERACTION_EVENT_TYPES.has(event.type)),
+    };
+  },
+  async reconnectInteractiveSession(sessionId) {
+    const parsedSessionId = sessionIdParamSchema.parse({ sessionId }).sessionId;
+    return agentSessionV2Schema.parse(
+      await ipcRenderer.invoke('daemon:reconnect-interactive-session', parsedSessionId),
+    );
+  },
+  async resumeInteractiveSession(sessionId, input) {
+    const parsedSessionId = sessionIdParamSchema.parse({ sessionId }).sessionId;
+    const parsedInput = sessionContinuationInputV2Schema.parse(input);
+    return agentSessionV2Schema.parse(
+      await ipcRenderer.invoke('daemon:resume-interactive-session', {
+        sessionId: parsedSessionId,
+        input: parsedInput,
+      }),
+    );
+  },
+  async forkInteractiveSession(sessionId, input) {
+    const parsedSessionId = sessionIdParamSchema.parse({ sessionId }).sessionId;
+    const parsedInput = sessionContinuationInputV2Schema.parse(input);
+    return agentSessionV2Schema.parse(
+      await ipcRenderer.invoke('daemon:fork-interactive-session', {
+        sessionId: parsedSessionId,
+        input: parsedInput,
+      }),
+    );
+  },
+  async deleteInteractiveSession(sessionId) {
+    const parsedSessionId = sessionIdParamSchema.parse({ sessionId }).sessionId;
+    await ipcRenderer.invoke('daemon:delete-interactive-session', parsedSessionId);
   },
   async sendSessionCommand(command) {
     const parsedCommand = parseRendererSessionCommand(command);
@@ -608,16 +845,18 @@ const api: AgentDockBridge = {
   },
   onInteractionRequested(callback) {
     const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => {
-      const interaction = toRendererInteraction(payload);
-      if (interaction) callback(interaction);
+      if (!isRecord(payload) || !isSessionId(payload.sessionId)) return;
+      const interaction = toRendererInteraction(payload.interaction);
+      if (interaction) callback(payload.sessionId, interaction);
     };
     ipcRenderer.on('daemon:interaction-requested', listener);
     return () => ipcRenderer.removeListener('daemon:interaction-requested', listener);
   },
   onInteractionResolved(callback) {
     const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => {
-      const resolution = toInteractionResolution(payload);
-      if (resolution) callback(resolution);
+      if (!isRecord(payload) || !isSessionId(payload.sessionId)) return;
+      const resolution = toInteractionResolution(payload.resolution);
+      if (resolution) callback(payload.sessionId, resolution);
     };
     ipcRenderer.on('daemon:interaction-resolved', listener);
     return () => ipcRenderer.removeListener('daemon:interaction-resolved', listener);

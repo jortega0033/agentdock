@@ -39,20 +39,20 @@ application.
 
 ## Compatibility boundary
 
-| Concern            | Protocol v1, current                                                  | Protocol v2, current implementation and planned controls                                       |
-| ------------------ | --------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| Provider transport | One short-lived Claude/Codex CLI process per session                  | Negotiation and a `legacy-one-shot` bridge exist; native rich provider transports are planned   |
-| Input              | One prompt, then stdin closes                                         | Correlated commands, turns, approvals, and questions are implemented for the interactive path   |
-| Capability shape   | Optional booleans; unknown boolean keys pass through                  | Scoped support records, validation, and frozen negotiation selection are implemented            |
-| Workspace trust    | No AgentDock trust state                                              | Default-untrusted records exist; trust identity and configuration gates are planned              |
-| Agent isolation    | Provider-owned behavior, not attested by AgentDock                    | Verified platform-specific enforcement reporting is planned                                     |
-| History            | Memory only; up to 5,000 events per session and 50 completed sessions | In-memory v2 replay bounds exist; durable persistence, deletion, and retention are planned      |
-| Credentials        | Full daemon environment inherited by the CLI; CLI owns login          | No credential vault; source-specific authentication boundaries remain planned                    |
-| Approval/audit     | Provider-owned, with no AgentDock approval channel or audit           | The interactive supervisor handles correlation; durable audit-before-allow is planned            |
+| Concern            | Protocol v1, current                                                                             | Protocol v2, current implementation and planned controls                                              |
+| ------------------ | ------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| Provider transport | One short-lived Claude/Codex CLI process per session                                             | Negotiation and a `legacy-one-shot` bridge exist; native rich provider transports are planned         |
+| Input              | One prompt, then stdin closes                                                                    | Correlated commands, turns, approvals, and questions are implemented for the interactive path         |
+| Capability shape   | Optional booleans; unknown boolean keys pass through                                             | Scoped support records, validation, and frozen negotiation selection are implemented                  |
+| Workspace trust    | No AgentDock trust state                                                                         | Default-untrusted records exist; trust identity and configuration gates are planned                   |
+| Agent isolation    | Provider-owned behavior, not attested by AgentDock                                               | Verified platform-specific enforcement reporting is planned                                           |
+| History            | Event replay remains memory-only; compatibility metadata omits prompts and raw error diagnostics | Durable normalized history, pagination, whole-lineage deletion, and bounded retention are implemented |
+| Credentials        | Full daemon environment inherited by the CLI; CLI owns login                                     | No credential vault; source-specific authentication boundaries remain planned                         |
+| Approval/audit     | Provider-owned, with no AgentDock approval channel or audit                                      | The interactive supervisor handles correlation; durable audit-before-allow is planned                 |
 
-Nothing in this decision retroactively adds workspace trust, approval enforcement, persistence, or
-sandboxing to v1. The unversioned v1 routes, schemas, runtime behavior, and tests remain unchanged.
-The additive v2 implementation does not yet provide those security controls.
+Nothing in this decision retroactively adds workspace trust, approval enforcement, durable event
+history, or sandboxing to v1. The additive v2 routes own the durable execution graph and its security
+controls without accepting renderer-selected provider-native IDs.
 
 ## Capability vocabulary
 
@@ -731,10 +731,12 @@ That compatibility behavior is not a v2 credential guarantee.
 
 ## Persistence, retention, and redaction
 
-V1 keeps `AgentSession` records and normalized event envelopes in memory. Those envelopes can
-contain arbitrary `tool.started.input` and `tool.completed.result` values; logger key redaction does
-not sanitize the in-memory/SSE event store. Restarting the daemon removes all v1 state. This fact
-must remain visible until v2 replaces it.
+V1 event envelopes remain memory-only and can contain arbitrary `tool.started.input` and
+`tool.completed.result` values; logger key redaction does not sanitize that replay buffer.
+Compatibility `AgentSession` metadata is filesystem-backed but omits prompts and raw error
+diagnostics. V2 persistence stores
+only strict normalized envelopes, so raw tool inputs/results and approval response payloads are
+rejected at the storage boundary.
 
 V2 uses a per-user state directory with restrictive OS permissions. It does not add
 application-layer encryption in this phase, so the UI and documentation must describe the local

@@ -9,9 +9,16 @@ import { registerV2ProviderRoutes } from './routes/v2-providers.js';
 import { registerV2SessionRoutes } from './routes/v2-sessions.js';
 import { registerV2AuditRoutes } from './routes/v2-audit.js';
 import { registerV2WorkspaceRoutes } from './routes/v2-workspaces.js';
+import { registerV2McpRoutes } from './routes/v2-mcp.js';
+import { registerV2ComponentRoutes } from './routes/v2-components.js';
 import type { AuditStore } from './audit-store.js';
 import type { SessionManager } from './session-manager.js';
 import type { WorkspaceTrustStore } from './workspace-trust-store.js';
+import type { SubagentGraphStore } from './subagent-graph-store.js';
+import type { OwnedWorktreeManager } from './worktree-manager.js';
+import { registerV2AgentWorktreeRoutes } from './routes/v2-agents-worktrees.js';
+import type { AttachmentStore } from './attachment-store.js';
+import { registerV2MultimodalRoutes } from './routes/v2-multimodal.js';
 
 export interface BuildServerOptions {
   registry: ProviderRegistry;
@@ -20,6 +27,9 @@ export interface BuildServerOptions {
   logger: Logger;
   auditStore?: AuditStore;
   trustStore?: WorkspaceTrustStore;
+  subagentStore?: SubagentGraphStore;
+  worktreeManager?: OwnedWorktreeManager;
+  attachmentStore?: AttachmentStore;
 }
 
 /**
@@ -78,6 +88,9 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
   });
 
   app.register(rateLimit, { global: false });
+  app.addContentTypeParser('application/octet-stream', (request, payload, done) =>
+    done(null, payload),
+  );
 
   registerHealthRoute(app, startedAt);
   registerProviderRoutes(app, opts.registry);
@@ -90,7 +103,12 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
     if (opts.auditStore) registerV2AuditRoutes(app, opts.auditStore);
     if (opts.trustStore) {
       registerV2WorkspaceRoutes(app, opts.trustStore, opts.sessionManager);
+      registerV2McpRoutes(app, opts.registry, opts.trustStore);
+      registerV2ComponentRoutes(app, opts.registry, opts.trustStore);
     }
+    registerV2AgentWorktreeRoutes(app, opts.subagentStore, opts.worktreeManager);
+    if (opts.attachmentStore)
+      registerV2MultimodalRoutes(app, opts.attachmentStore, opts.sessionManager);
   });
 
   app.setErrorHandler((err: FastifyError, req, reply) => {

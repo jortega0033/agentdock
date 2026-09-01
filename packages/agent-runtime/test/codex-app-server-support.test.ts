@@ -46,7 +46,10 @@ describe('Codex app-server compatibility selection', () => {
         import.meta.url,
       ),
     );
-    expect(createHash('sha256').update(schema).digest('hex').toUpperCase()).toBe(
+    // Git may materialize text fixtures with CRLF on Windows. Pin the provider schema content,
+    // while treating that checkout-only line-ending representation as equivalent.
+    const normalizedSchema = schema.toString('utf8').replaceAll('\r\n', '\n');
+    expect(createHash('sha256').update(normalizedSchema).digest('hex').toUpperCase()).toBe(
       CODEX_APP_SERVER_SCHEMA_SHA256,
     );
   });

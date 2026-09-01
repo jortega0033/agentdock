@@ -12,7 +12,12 @@ import {
 import { buildProviderRegistry } from './providers.js';
 import { buildServer } from './server.js';
 import { SessionManager } from './session-manager.js';
+import { FileSessionStore } from './session-store.js';
+import { FileExecutionGraphStore } from './execution-graph-store.js';
 import { stateDirectory } from './state-directory.js';
+import { SubagentGraphStore } from './subagent-graph-store.js';
+import { OwnedWorktreeManager } from './worktree-manager.js';
+import { AttachmentStore } from './attachment-store.js';
 import { WorkspaceTrustStore } from './workspace-trust-store.js';
 
 async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
@@ -38,14 +43,46 @@ async function main() {
   assertNoLiveDaemon(appId);
   const registry = buildProviderRegistry(logger);
   const durableStateDirectory = stateDirectory({ appId });
+  const subagentStore = new SubagentGraphStore(join(durableStateDirectory, 'subagents-v1.json'));
+  const worktreeManager = new OwnedWorktreeManager(join(durableStateDirectory, 'worktrees'), join(durableStateDirectory, 'worktrees-v1.json'));
+  await worktreeManager.load();
+  const attachmentStore = new AttachmentStore(join(durableStateDirectory, 'attachments-v1'), join(durableStateDirectory, 'attachments-v1.json'));
+  await attachmentStore.load();
   const auditStore = new AuditStore(join(durableStateDirectory, 'audit-v1.jsonl'));
   const trustStore = new WorkspaceTrustStore(
     join(durableStateDirectory, 'workspace-trust-v1.json'),
   );
-  const sessionManager = new SessionManager(registry, logger, undefined, {
+  const sessionStoreDirectory = join(durableStateDirectory, 'sessions-v1');
+  const sessionStore = new FileSessionStore(sessionStoreDirectory);
+  const executionGraphStore = new FileExecutionGraphStore(
+    join(durableStateDirectory, 'execution-graph-v1'),
+    {
+      additionalQuotaPaths: [sessionStoreDirectory],
+      onLineageRemoving: (records) => {
+        for (const record of records) sessionStore.delete(record.session.id);
+      },
+    },
+  );
+  const sessionRecovery = sessionStore.getRecoveryReport();
+  const graphRecovery = executionGraphStore.recoveryReport();
+  if (
+    sessionRecovery.quarantinedFiles.length > 0 ||
+    sessionRecovery.interruptedSessionIds.length > 0 ||
+    graphRecovery.quarantinedPaths.length > 0 ||
+    graphRecovery.interruptedSessionIds.length > 0
+  ) {
+    logger.warn('durable session recovery required repairs', {
+      quarantinedSessionRecords: sessionRecovery.quarantinedFiles.length,
+      quarantinedExecutionRecords: graphRecovery.quarantinedPaths.length,
+      interruptedCompatibilitySessions: sessionRecovery.interruptedSessionIds.length,
+      interruptedExecutions: graphRecovery.interruptedSessionIds.length,
+    });
+  }
+  const sessionManager = new SessionManager(registry, logger, sessionStore, {
     auditStore,
     trustStore,
     providerStateDirectory: durableStateDirectory,
+    executionGraphStore,
   });
   const token = generateToken();
 
@@ -56,6 +93,9 @@ async function main() {
     logger,
     auditStore,
     trustStore,
+    subagentStore,
+    worktreeManager,
+    attachmentStore,
   });
 
   const requestedPort = Number(process.env.AGENT_DOCK_PORT ?? '0');

@@ -15,6 +15,11 @@ import {
   type ProviderRuntimeMetadataV2,
   type ProviderStatus,
   type ProviderTransportV2,
+  type SessionContinuationInputV2,
+  type SessionEventHistoryV2Page,
+  type SessionEventHistoryV2Query,
+  type SessionListV2Page,
+  type SessionListV2Query,
 } from '@agent-dock/shared';
 import {
   ProviderTransportStartupError,
@@ -23,6 +28,11 @@ import {
   type WorkspaceTrustEvidence,
 } from '@agent-dock/agent-runtime';
 import type { DispatchResult, SessionManager } from './session-manager.js';
+import {
+  MemoryExecutionGraphStore,
+  type DurableExecutionRecord,
+  type ExecutionGraphStore,
+} from './execution-graph-store.js';
 import type { WorkspaceIdentity } from './workspace-identity.js';
 import {
   freezeProviderContinuationScope,
@@ -52,8 +62,13 @@ interface StoredV2Event {
 }
 
 interface V2SessionMetadata {
+  sessionId: string;
   selection: CapabilitySelection;
   executionId: string;
+  rootExecutionId: string;
+  parentSessionId?: string;
+  parentExecutionId?: string;
+  continuationKind: 'fresh' | 'resume' | 'fork';
   turnId: string;
   events: Map<number, StoredV2Event>;
   listeners: Set<(sequence: number, event: AgentEventV2Envelope) => void>;
@@ -63,13 +78,24 @@ interface V2SessionMetadata {
   nativeTools: Map<string, ToolCorrelation>;
   interactive: boolean;
   status: AgentSessionV2['status'];
+  branch?: string;
+  acceptedWork: AgentSessionV2['acceptedWork'];
+  terminalReason?: string;
   pendingInteractions: Map<string, { kind: 'approval' | 'question'; turnId: string }>;
   responderLease?: string;
   providerSessionId?: string;
   runtimeMetadata?: ProviderRuntimeMetadataV2;
   continuationScope?: ProviderContinuationScope;
-  continuationLease?: { providerSessionId: string; leaseId: string };
-  continuationTargetLease?: { providerSessionId: string; leaseId: string };
+  continuationLease?: {
+    provider: AgentSessionV2['provider'];
+    providerSessionId: string;
+    leaseId: string;
+  };
+  continuationTargetLease?: {
+    provider: AgentSessionV2['provider'];
+    providerSessionId: string;
+    leaseId: string;
+  };
 }
 
 export interface V2SessionCreateContext {
@@ -116,6 +142,23 @@ interface ProviderContinuationBinding {
   leaseId?: string;
 }
 
+export interface V2LineageContext {
+  rootExecutionId: string;
+  parentSessionId: string;
+  parentExecutionId: string;
+  continuationKind: 'resume' | 'fork';
+}
+
+export class V2ContinuationError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'V2ContinuationError';
+  }
+}
+
 function isTerminal(event: AgentEventV2Envelope): boolean {
   return (
     event.type === 'session.completed' ||
@@ -123,6 +166,19 @@ function isTerminal(event: AgentEventV2Envelope): boolean {
     event.type === 'session.cancelled' ||
     event.type === 'session.interrupted'
   );
+}
+
+function isTerminalStatus(status: AgentSessionV2['status']): boolean {
+  return (
+    status === 'completed' ||
+    status === 'failed' ||
+    status === 'cancelled' ||
+    status === 'interrupted'
+  );
+}
+
+function continuationKey(provider: AgentSessionV2['provider'], providerSessionId: string): string {
+  return `${provider}\0${providerSessionId}`;
 }
 
 function v2Status(status: AgentSession['status']): AgentSessionV2['status'] {
@@ -144,6 +200,10 @@ function truncateUtf8(value: string, maxBytes: number): string {
   }
   const truncated = value.slice(0, low);
   return /[\uD800-\uDBFF]$/.test(truncated) ? truncated.slice(0, -1) : truncated;
+}
+
+function boundedTerminalReason(value: string | undefined, fallback: string): string {
+  return truncateUtf8(value ?? '', MAX_WIRE_STRING_BYTES) || fallback;
 }
 
 function validTokenCount(value: number | undefined): boolean {
@@ -189,8 +249,15 @@ function safeRuntimeMetadata(value: unknown): ProviderRuntimeMetadataV2 | undefi
 export class V2SessionFacade {
   private readonly metadata = new Map<string, V2SessionMetadata>();
   private readonly continuationBindings = new Map<string, ProviderContinuationBinding>();
+  private readonly graph: ExecutionGraphStore;
 
-  constructor(private readonly sessions: SessionManager) {}
+  constructor(
+    private readonly sessions: SessionManager,
+    graph?: ExecutionGraphStore,
+  ) {
+    this.graph = graph ?? sessions.executionGraphStore ?? new MemoryExecutionGraphStore();
+    this.hydrate();
+  }
 
   async create(
     input: CreateSessionV2Request,
@@ -200,15 +267,28 @@ export class V2SessionFacade {
     signal?: AbortSignal,
     workspace?: WorkspaceIdentity,
     context?: V2SessionCreateContext,
+    lineage?: V2LineageContext,
   ): Promise<AgentSessionV2> {
     this.prune();
     const executionId = randomUUID();
     const turnId = randomUUID();
+    const rootExecutionId = lineage?.rootExecutionId ?? executionId;
+    const continuationKind = lineage?.continuationKind ?? 'fresh';
     let continuationBinding: ProviderContinuationBinding | undefined;
     const continuationLease = input.continuation
-      ? { providerSessionId: input.continuation.providerSessionId, leaseId: executionId }
+      ? {
+          provider: input.provider,
+          providerSessionId: input.continuation.providerSessionId,
+          leaseId: executionId,
+        }
       : undefined;
-    let continuationTargetLease: { providerSessionId: string; leaseId: string } | undefined;
+    let continuationTargetLease:
+      | {
+          provider: AgentSessionV2['provider'];
+          providerSessionId: string;
+          leaseId: string;
+        }
+      | undefined;
     if (input.continuation) {
       const requiredCapability =
         input.continuation.kind === 'resume' ? 'session.resume' : 'session.fork';
@@ -219,7 +299,9 @@ export class V2SessionFacade {
           'continuation_capability_not_selected',
         );
       }
-      continuationBinding = this.continuationBindings.get(input.continuation.providerSessionId);
+      continuationBinding = this.continuationBindings.get(
+        continuationKey(input.provider, input.continuation.providerSessionId),
+      );
       if (!continuationBinding) {
         throw new V2ProviderStartupError(
           'continuation_binding_not_found',
@@ -235,9 +317,44 @@ export class V2SessionFacade {
         );
       }
       // No await may occur between checking and taking this in-memory lease.
+      this.graph.acquireContinuation(
+        input.provider,
+        input.continuation.providerSessionId,
+        executionId,
+      );
       continuationBinding.leaseId = executionId;
     }
     let retainContinuationLease = false;
+    const reservedSessionIds = new Set<string>();
+    const reserve =
+      (
+        activeSelection: CapabilitySelection,
+        activeInteractive: boolean,
+        continuationScope?: ProviderContinuationScope,
+        runtimeMetadata?: ProviderRuntimeMetadataV2,
+      ) =>
+      (session: Readonly<AgentSession>): void => {
+        this.graph.reserve(
+          this.initialRecord(
+            session,
+            activeSelection,
+            activeInteractive,
+            executionId,
+            turnId,
+            rootExecutionId,
+            continuationKind,
+            lineage,
+            continuationScope,
+            runtimeMetadata,
+            workspace?.branch,
+          ),
+        );
+        reservedSessionIds.add(session.id);
+      };
+    const discardReservations = (): void => {
+      for (const sessionId of reservedSessionIds) this.graph.discard(sessionId);
+      reservedSessionIds.clear();
+    };
     try {
       let activeSelection = selection;
       let activeInteractive = interactive;
@@ -351,6 +468,7 @@ export class V2SessionFacade {
             input.continuation,
             expectedContinuationEvidence,
             beforeProviderThreadStart,
+            reserve(selection, true, continuationScope),
           );
         } else if (context?.legacyIntent && context.providerStatus) {
           const legacyIntent = context.legacyIntent;
@@ -396,6 +514,15 @@ export class V2SessionFacade {
             redetected,
             planning.dispatch.sandbox,
             planning.dispatch.frozenScope.model,
+            reserve(
+              selection,
+              false,
+              freezeProviderContinuationScope({
+                status: redetected,
+                cwd: input.cwd,
+                workspaceTrust: preSpawnTrust,
+              }),
+            ),
           );
           launchProviderStatus = redetected;
         } else if (context?.legacyDispatch) {
@@ -429,6 +556,15 @@ export class V2SessionFacade {
             redetected,
             context.legacyDispatch.sandbox,
             context.legacyDispatch.frozenScope.model,
+            reserve(
+              selection,
+              false,
+              freezeProviderContinuationScope({
+                status: redetected,
+                cwd: input.cwd,
+                workspaceTrust: preSpawnTrust,
+              }),
+            ),
           );
           launchProviderStatus = redetected;
         } else {
@@ -455,10 +591,25 @@ export class V2SessionFacade {
             2,
             workspace,
             context?.providerStatus,
+            undefined,
+            undefined,
+            reserve(
+              selection,
+              false,
+              continuationScope ??
+                (context?.providerStatus
+                  ? freezeProviderContinuationScope({
+                      status: context.providerStatus,
+                      cwd: input.cwd,
+                      workspaceTrust: preSpawnTrust,
+                    })
+                  : undefined),
+            ),
           );
         }
       } catch (error) {
         if (!(error instanceof ProviderTransportStartupError)) throw error;
+        discardReservations();
         const reasonCode = safeReasonCode(error.reasonCode);
         const candidateFallback = fallback;
         const candidatePrimaryScope = primaryScope;
@@ -535,6 +686,16 @@ export class V2SessionFacade {
           redetectedStatus,
           'workspace-write',
           candidateFallback.frozenScope.model,
+          reserve(
+            candidateFallback.selection,
+            false,
+            freezeProviderContinuationScope({
+              status: redetectedStatus,
+              cwd: input.cwd,
+              workspaceTrust: preFallbackTrust,
+            }),
+            safeRuntimeMetadata(candidateFallback.runtimeMetadata),
+          ),
         );
         launchProviderStatus = redetectedStatus;
         activeSelection = candidateFallback.selection;
@@ -581,8 +742,13 @@ export class V2SessionFacade {
           })
         : undefined;
       const metadata: V2SessionMetadata = {
+        sessionId: session.id,
         selection: activeSelection,
         executionId,
+        rootExecutionId,
+        ...(lineage ? { parentSessionId: lineage.parentSessionId } : {}),
+        ...(lineage ? { parentExecutionId: lineage.parentExecutionId } : {}),
+        continuationKind,
         turnId,
         events: new Map(),
         listeners: new Set(),
@@ -591,6 +757,8 @@ export class V2SessionFacade {
         nativeTools: new Map(),
         interactive: activeInteractive,
         status: v2Status(session.status),
+        ...(workspace?.branch ? { branch: workspace.branch } : {}),
+        acceptedWork: activeInteractive ? 'not_accepted' : 'unknown',
         pendingInteractions: new Map(),
         ...(providerMetadata?.providerSessionId
           ? { providerSessionId: providerMetadata.providerSessionId }
@@ -603,7 +771,26 @@ export class V2SessionFacade {
         const reuseResumedSource =
           input.continuation?.kind === 'resume' &&
           metadata.providerSessionId === input.continuation.providerSessionId;
+        if (metadata.providerSessionId !== continuationLease?.providerSessionId) {
+          try {
+            this.graph.acquireContinuation(
+              session.provider,
+              metadata.providerSessionId,
+              executionId,
+            );
+          } catch (error) {
+            await this.sessions.remove(session.id, 2);
+            throw error;
+          }
+          continuationTargetLease = {
+            provider: session.provider,
+            providerSessionId: metadata.providerSessionId,
+            leaseId: executionId,
+          };
+          metadata.continuationTargetLease = continuationTargetLease;
+        }
         const bound = this.bindContinuation(
+          session.provider,
           metadata.providerSessionId,
           session.id,
           continuationScope,
@@ -618,15 +805,16 @@ export class V2SessionFacade {
             'continuation_binding_collision',
           );
         }
-        if (metadata.providerSessionId !== continuationLease?.providerSessionId) {
-          continuationTargetLease = {
-            providerSessionId: metadata.providerSessionId,
-            leaseId: executionId,
-          };
-          metadata.continuationTargetLease = continuationTargetLease;
-        }
       }
       this.metadata.set(session.id, metadata);
+      try {
+        this.graph.update(this.durableRecord(session, metadata));
+      } catch (error) {
+        this.metadata.delete(session.id);
+        await this.sessions.remove(session.id);
+        throw error;
+      }
+      reservedSessionIds.delete(session.id);
       if (activeInteractive) this.attachInteractiveSource(session.id, metadata);
       else this.attachSource(session.id, metadata);
       retainContinuationLease = true;
@@ -634,23 +822,91 @@ export class V2SessionFacade {
     } finally {
       if (continuationLease && !retainContinuationLease) {
         this.releaseContinuationLease(
+          continuationLease.provider,
           continuationLease.providerSessionId,
           continuationLease.leaseId,
         );
       }
       if (continuationTargetLease && !retainContinuationLease) {
         this.releaseContinuationLease(
+          continuationTargetLease.provider,
           continuationTargetLease.providerSessionId,
           continuationTargetLease.leaseId,
         );
       }
+      if (!retainContinuationLease) discardReservations();
     }
   }
 
   get(id: string): AgentSessionV2 | undefined {
     this.prune();
-    const session = this.sessions.get(id, 2);
-    return session && this.metadata.has(id) ? this.project(session) : undefined;
+    return this.graph.get(id)?.session;
+  }
+
+  list(query: SessionListV2Query = {}): SessionListV2Page {
+    return this.graph.list(query);
+  }
+
+  history(
+    id: string,
+    query: SessionEventHistoryV2Query = {},
+  ): SessionEventHistoryV2Page | undefined {
+    return this.graph.history(id, query);
+  }
+
+  buildContinuation(
+    parentSessionId: string,
+    kind: 'resume' | 'fork',
+    input: SessionContinuationInputV2,
+  ): { request: CreateSessionV2Request; lineage: V2LineageContext } {
+    const parent = this.get(parentSessionId);
+    if (!parent) throw new V2ContinuationError('session_not_found', 'session not found');
+    if (!isTerminalStatus(parent.status)) {
+      throw new V2ContinuationError(
+        'continuation_parent_active',
+        'continuation requires a terminal parent session',
+      );
+    }
+    if (!parent.providerSessionId) {
+      throw new V2ContinuationError(
+        'continuation_not_found',
+        'parent has no provider-native session identifier',
+      );
+    }
+    const record = this.graph.get(parentSessionId);
+    if (!record?.continuationScope) {
+      throw new V2ContinuationError(
+        'continuation_binding_not_found',
+        'parent has no durable continuation binding',
+      );
+    }
+    const binding = this.continuationBindings.get(
+      continuationKey(parent.provider, parent.providerSessionId),
+    );
+    if (!binding || binding.sessionId !== parentSessionId) {
+      throw new V2ContinuationError(
+        'continuation_binding_not_found',
+        'parent no longer owns the provider-native continuation',
+      );
+    }
+    return {
+      request: {
+        provider: parent.provider,
+        cwd: parent.cwd,
+        prompt: input.prompt,
+        ...(input.capabilities ? { capabilities: input.capabilities } : {}),
+        ...(input.allowDirtyWorkspaceShare === undefined
+          ? {}
+          : { allowDirtyWorkspaceShare: input.allowDirtyWorkspaceShare }),
+        continuation: { kind, providerSessionId: parent.providerSessionId },
+      },
+      lineage: {
+        rootExecutionId: parent.rootExecutionId ?? parent.executionId,
+        parentSessionId,
+        parentExecutionId: parent.executionId,
+        continuationKind: kind,
+      },
+    };
   }
 
   hasCapability(id: string, capabilityId: string): boolean {
@@ -706,15 +962,21 @@ export class V2SessionFacade {
   }
 
   async remove(id: string): Promise<boolean> {
-    if (!this.metadata.has(id)) return false;
-    const removed = await this.sessions.remove(id, 2);
-    if (removed) {
-      const metadata = this.metadata.get(id);
+    const target = this.graph.get(id);
+    if (!target) return false;
+    const rootExecutionId = target.session.rootExecutionId ?? target.session.executionId;
+    const lineageIds = this.storedSessions()
+      .filter((session) => (session.rootExecutionId ?? session.executionId) === rootExecutionId)
+      .map((session) => session.id);
+    if (!this.graph.deleteLineage(id)) return false;
+    for (const sessionId of lineageIds) {
+      await this.sessions.remove(sessionId, 2);
+      const metadata = this.metadata.get(sessionId);
       this.releaseMetadataContinuationLeases(metadata);
       metadata?.sourceUnsubscribe?.();
-      this.metadata.delete(id);
+      this.metadata.delete(sessionId);
     }
-    return removed;
+    return true;
   }
 
   /** Replays the bounded normalized v2 window, then delivers live normalized events. */
@@ -758,22 +1020,159 @@ export class V2SessionFacade {
     return this.sessions.markInteractionPublished(id, requestId);
   }
 
+  private initialRecord(
+    session: Readonly<AgentSession>,
+    selection: CapabilitySelection,
+    interactive: boolean,
+    executionId: string,
+    turnId: string,
+    rootExecutionId: string,
+    continuationKind: 'fresh' | 'resume' | 'fork',
+    lineage?: V2LineageContext,
+    continuationScope?: ProviderContinuationScope,
+    runtimeMetadata?: ProviderRuntimeMetadataV2,
+    branch?: string,
+  ): DurableExecutionRecord {
+    const projected = agentSessionV2Schema.parse({
+      id: session.id,
+      provider: session.provider,
+      transport: selection.transport,
+      cwd: session.cwd,
+      ...(branch ? { branch } : {}),
+      status: 'starting',
+      selection,
+      executionId,
+      rootExecutionId,
+      ...(lineage ? { parentSessionId: lineage.parentSessionId } : {}),
+      ...(lineage ? { parentExecutionId: lineage.parentExecutionId } : {}),
+      continuationKind,
+      currentTurnId: turnId,
+      acceptedWork: interactive ? 'not_accepted' : 'unknown',
+      startedAt: session.startedAt,
+      ...(runtimeMetadata ? { runtimeMetadata } : {}),
+      earliestSequence: 0,
+    });
+    return {
+      session: projected,
+      interactive,
+      ...(continuationScope ? { continuationScope } : {}),
+    };
+  }
+
+  private durableRecord(
+    session: AgentSession,
+    metadata: V2SessionMetadata,
+  ): DurableExecutionRecord {
+    return {
+      session: this.project(session),
+      interactive: metadata.interactive,
+      ...(metadata.continuationScope ? { continuationScope: metadata.continuationScope } : {}),
+    };
+  }
+
+  private hydrate(): void {
+    for (const storedSession of this.storedSessions().sort((left, right) =>
+      left.startedAt.localeCompare(right.startedAt),
+    )) {
+      const record = this.graph.get(storedSession.id);
+      if (!record) continue;
+      const metadata: V2SessionMetadata = {
+        sessionId: storedSession.id,
+        selection: storedSession.selection,
+        executionId: storedSession.executionId,
+        rootExecutionId: storedSession.rootExecutionId ?? storedSession.executionId,
+        ...(storedSession.parentSessionId
+          ? { parentSessionId: storedSession.parentSessionId }
+          : {}),
+        ...(storedSession.parentExecutionId
+          ? { parentExecutionId: storedSession.parentExecutionId }
+          : {}),
+        continuationKind: storedSession.continuationKind ?? 'fresh',
+        turnId: storedSession.currentTurnId ?? storedSession.executionId,
+        events: new Map(),
+        listeners: new Set(),
+        replayBytes: 0,
+        nextSequence: storedSession.earliestSequence,
+        nativeTools: new Map(),
+        interactive: record.interactive,
+        status: storedSession.status,
+        ...(storedSession.branch ? { branch: storedSession.branch } : {}),
+        acceptedWork: storedSession.acceptedWork,
+        ...(storedSession.terminalReason ? { terminalReason: storedSession.terminalReason } : {}),
+        pendingInteractions: new Map(),
+        ...(storedSession.providerSessionId
+          ? { providerSessionId: storedSession.providerSessionId }
+          : {}),
+        ...(storedSession.runtimeMetadata
+          ? { runtimeMetadata: storedSession.runtimeMetadata }
+          : {}),
+        ...(record.continuationScope ? { continuationScope: record.continuationScope } : {}),
+      };
+      let cursor: string | undefined;
+      do {
+        const page = this.graph.history(storedSession.id, {
+          ...(cursor ? { cursor } : {}),
+          limit: 100,
+        });
+        if (!page) break;
+        for (const event of page.events) {
+          this.retainReplayEvent(metadata, event);
+          this.applyEventState(metadata, event);
+        }
+        cursor = page.nextCursor;
+      } while (cursor);
+      metadata.status = storedSession.status;
+      metadata.acceptedWork = storedSession.acceptedWork;
+      if (storedSession.terminalReason) metadata.terminalReason = storedSession.terminalReason;
+      this.metadata.set(storedSession.id, metadata);
+      if (metadata.providerSessionId && metadata.continuationScope) {
+        this.bindContinuation(
+          storedSession.provider,
+          metadata.providerSessionId,
+          storedSession.id,
+          metadata.continuationScope,
+          undefined,
+          true,
+        );
+      }
+    }
+  }
+
+  private storedSessions(): AgentSessionV2[] {
+    const sessions: AgentSessionV2[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = this.graph.list({ ...(cursor ? { cursor } : {}), limit: 100 });
+      sessions.push(...page.sessions);
+      cursor = page.nextCursor;
+    } while (cursor);
+    return sessions;
+  }
+
   private project(session: AgentSession): AgentSessionV2 {
     const metadata = this.metadata.get(session.id);
     if (!metadata) throw new Error(`missing v2 metadata for session: ${session.id}`);
+    if (metadata.interactive && this.sessions.isInteractive(session.id)) {
+      metadata.acceptedWork = this.sessions.acceptedWork(session.id);
+    }
     return agentSessionV2Schema.parse({
       id: session.id,
       provider: session.provider,
       transport: metadata.selection.transport,
       cwd: session.cwd,
+      ...(metadata.branch ? { branch: metadata.branch } : {}),
       status: metadata.status,
       selection: metadata.selection,
       executionId: metadata.executionId,
+      rootExecutionId: metadata.rootExecutionId,
+      ...(metadata.parentSessionId ? { parentSessionId: metadata.parentSessionId } : {}),
+      ...(metadata.parentExecutionId ? { parentExecutionId: metadata.parentExecutionId } : {}),
+      continuationKind: metadata.continuationKind,
       currentTurnId: metadata.turnId,
-      acceptedWork: metadata.interactive ? this.sessions.acceptedWork(session.id) : 'unknown',
+      acceptedWork: metadata.acceptedWork,
       startedAt: session.startedAt,
       ...(session.completedAt === undefined ? {} : { completedAt: session.completedAt }),
-      ...(session.error === undefined ? {} : { error: session.error }),
+      ...(metadata.terminalReason === undefined ? {} : { terminalReason: metadata.terminalReason }),
       ...(metadata.providerSessionId === undefined
         ? {}
         : { providerSessionId: metadata.providerSessionId }),
@@ -785,13 +1184,15 @@ export class V2SessionFacade {
   }
 
   private bindContinuation(
+    provider: AgentSessionV2['provider'],
     providerSessionId: string,
     sessionId: string,
     scope: ProviderContinuationScope,
     leaseId?: string,
     allowExisting = false,
   ): boolean {
-    const existing = this.continuationBindings.get(providerSessionId);
+    const key = continuationKey(provider, providerSessionId);
+    const existing = this.continuationBindings.get(key);
     if (existing && !providerContinuationScopesEqual(existing.scope, scope)) return false;
     if (existing && !allowExisting) return false;
     if (leaseId && existing?.leaseId && existing.leaseId !== leaseId) return false;
@@ -799,31 +1200,38 @@ export class V2SessionFacade {
     next.sessionId = sessionId;
     next.scope = scope;
     if (leaseId) next.leaseId = leaseId;
-    this.continuationBindings.delete(providerSessionId);
+    this.continuationBindings.delete(key);
     while (!existing && this.continuationBindings.size >= MAX_CONTINUATION_BINDINGS) {
       const oldest = [...this.continuationBindings].find(([, binding]) => !binding.leaseId)?.[0];
       if (!oldest) return false;
       this.continuationBindings.delete(oldest);
     }
-    this.continuationBindings.set(providerSessionId, next);
+    this.continuationBindings.set(key, next);
     return true;
   }
 
-  private releaseContinuationLease(providerSessionId: string, leaseId: string): void {
-    const binding = this.continuationBindings.get(providerSessionId);
+  private releaseContinuationLease(
+    provider: AgentSessionV2['provider'],
+    providerSessionId: string,
+    leaseId: string,
+  ): void {
+    const binding = this.continuationBindings.get(continuationKey(provider, providerSessionId));
     if (binding?.leaseId === leaseId) delete binding.leaseId;
+    this.graph.releaseContinuation(provider, providerSessionId, leaseId);
   }
 
   private releaseMetadataContinuationLeases(metadata: V2SessionMetadata | undefined): void {
     if (!metadata) return;
     if (metadata.continuationLease) {
       this.releaseContinuationLease(
+        metadata.continuationLease.provider,
         metadata.continuationLease.providerSessionId,
         metadata.continuationLease.leaseId,
       );
     }
     if (metadata.continuationTargetLease) {
       this.releaseContinuationLease(
+        metadata.continuationTargetLease.provider,
         metadata.continuationTargetLease.providerSessionId,
         metadata.continuationTargetLease.leaseId,
       );
@@ -847,17 +1255,31 @@ export class V2SessionFacade {
           if (providerSessionId.success) {
             metadata.providerSessionId = providerSessionId.data;
             if (metadata.continuationScope) {
-              this.bindContinuation(providerSessionId.data, id, metadata.continuationScope);
+              const provider =
+                this.sessions.get(id, 2)?.provider ?? this.graph.get(id)?.session.provider;
+              if (!provider) throw new Error(`missing provider for session: ${id}`);
+              this.bindContinuation(
+                provider,
+                providerSessionId.data,
+                id,
+                metadata.continuationScope,
+              );
             }
           }
         }
         for (const event of this.convert(id, metadata, sourceEvent)) {
-          this.publish(metadata, event);
-          if (isTerminal(event)) {
-            ended = true;
-            this.releaseMetadataContinuationLeases(metadata);
-            metadata.sourceUnsubscribe?.();
-            metadata.sourceUnsubscribe = undefined;
+          try {
+            this.publish(metadata, event);
+          } catch (error) {
+            if (!isTerminal(event)) void this.sessions.cancel(id).catch(() => undefined);
+            throw error;
+          } finally {
+            if (isTerminal(event)) {
+              ended = true;
+              this.releaseMetadataContinuationLeases(metadata);
+              metadata.sourceUnsubscribe?.();
+              metadata.sourceUnsubscribe = undefined;
+            }
           }
         }
       },
@@ -889,17 +1311,26 @@ export class V2SessionFacade {
           : sourceEvent),
         sessionId: id,
         executionId: metadata.executionId,
+        ...(metadata.parentExecutionId === undefined
+          ? {}
+          : { parentExecutionId: metadata.parentExecutionId }),
         // SessionManager indices remain absolute across its own sliding retention window. If a
         // provider burst raced creation, preserve that gap instead of renumbering retained events.
         sequence: sourceIndex,
         timestamp: new Date().toISOString(),
       });
-      this.publish(metadata, event);
-      if (isTerminal(event)) {
-        ended = true;
-        this.releaseMetadataContinuationLeases(metadata);
-        metadata.sourceUnsubscribe?.();
-        metadata.sourceUnsubscribe = undefined;
+      try {
+        this.publish(metadata, event);
+      } catch (error) {
+        if (!isTerminal(event)) void this.sessions.cancel(id).catch(() => undefined);
+        throw error;
+      } finally {
+        if (isTerminal(event)) {
+          ended = true;
+          this.releaseMetadataContinuationLeases(metadata);
+          metadata.sourceUnsubscribe?.();
+          metadata.sourceUnsubscribe = undefined;
+        }
       }
     });
     if (!unsubscribe) throw new Error(`missing interactive v2 runtime for session: ${id}`);
@@ -911,7 +1342,7 @@ export class V2SessionFacade {
   }
 
   private publish(metadata: V2SessionMetadata, event: AgentEventV2Envelope): void {
-    this.record(metadata, event);
+    this.record(metadata, this.eventForPersistence(event));
     for (const listener of [...metadata.listeners]) {
       try {
         listener(event.sequence, event);
@@ -921,7 +1352,49 @@ export class V2SessionFacade {
     }
   }
 
+  private eventForPersistence(event: AgentEventV2Envelope): AgentEventV2Envelope {
+    if (event.type === 'session.cancelled' || event.type === 'session.interrupted') {
+      return agentEventV2EnvelopeSchema.parse({
+        ...event,
+        reason: boundedTerminalReason(
+          event.reason,
+          event.type === 'session.cancelled' ? 'cancelled' : 'interrupted',
+        ),
+      }) as AgentEventV2Envelope;
+    }
+    if (
+      event.type === 'content.completed' &&
+      event.block.type === 'provider_extension' &&
+      event.block.representation === 'bounded_data' &&
+      !event.block.safeToPersist
+    ) {
+      return agentEventV2EnvelopeSchema.parse({
+        ...event,
+        block: {
+          type: 'provider_extension',
+          id: event.block.id,
+          extensionName: event.block.extensionName,
+          ...(event.block.extensionVersion === undefined
+            ? {}
+            : { extensionVersion: event.block.extensionVersion }),
+          representation: 'safe_summary',
+          safeSummary: event.block.safeSummary,
+          reason: 'persistence_disallowed',
+        },
+      }) as AgentEventV2Envelope;
+    }
+    return event;
+  }
+
   private record(metadata: V2SessionMetadata, event: AgentEventV2Envelope): void {
+    this.graph.appendEvent(metadata.sessionId, event);
+    this.retainReplayEvent(metadata, event);
+    this.applyEventState(metadata, event);
+    const session = this.sessions.get(metadata.sessionId, 2);
+    if (session) this.graph.update(this.durableRecord(session, metadata));
+  }
+
+  private retainReplayEvent(metadata: V2SessionMetadata, event: AgentEventV2Envelope): void {
     const bytes = utf8ByteLength(JSON.stringify(event));
     while (
       metadata.events.size > 0 &&
@@ -934,8 +1407,7 @@ export class V2SessionFacade {
     }
     metadata.events.set(event.sequence, { event, bytes });
     metadata.replayBytes += bytes;
-    metadata.nextSequence = event.sequence + 1;
-    this.applyEventState(metadata, event);
+    metadata.nextSequence = Math.max(metadata.nextSequence, event.sequence + 1);
   }
 
   private applyEventState(metadata: V2SessionMetadata, event: AgentEventV2Envelope): void {
@@ -945,15 +1417,23 @@ export class V2SessionFacade {
         break;
       case 'session.completed':
         metadata.status = 'completed';
+        metadata.terminalReason = 'completed';
+        metadata.pendingInteractions.clear();
         break;
       case 'session.failed':
         metadata.status = 'failed';
+        metadata.terminalReason = event.code ?? 'failed';
+        metadata.pendingInteractions.clear();
         break;
       case 'session.cancelled':
         metadata.status = 'cancelled';
+        metadata.terminalReason = boundedTerminalReason(event.reason, 'cancelled');
+        metadata.pendingInteractions.clear();
         break;
       case 'session.interrupted':
         metadata.status = 'interrupted';
+        metadata.terminalReason = boundedTerminalReason(event.reason, 'interrupted');
+        metadata.pendingInteractions.clear();
         break;
       case 'turn.started':
         metadata.turnId = event.turnId;
@@ -1055,6 +1535,9 @@ export class V2SessionFacade {
     const common = {
       sessionId: id,
       executionId: metadata.executionId,
+      ...(metadata.parentExecutionId === undefined
+        ? {}
+        : { parentExecutionId: metadata.parentExecutionId }),
       sequence: metadata.nextSequence,
       timestamp: event.timestamp,
     };
@@ -1298,9 +1781,8 @@ export class V2SessionFacade {
   }
 
   private prune(): void {
-    const retained = new Set(this.sessions.list(2).map((session) => session.id));
     for (const [id, metadata] of this.metadata) {
-      if (!retained.has(id)) {
+      if (!this.graph.get(id)) {
         this.releaseMetadataContinuationLeases(metadata);
         metadata.sourceUnsubscribe?.();
         this.metadata.delete(id);

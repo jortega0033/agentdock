@@ -22,6 +22,8 @@ export interface WorkspaceIdentity {
   displayName: string;
   /** Kept only in daemon memory so providers can receive the canonical worktree/directory. */
   canonicalPath: string;
+  /** Launch-time Git branch label for display; `detached` when HEAD is detached. */
+  branch?: string;
   /** False when this resolution could not prove a stable filesystem/repository incarnation. */
   reusable: boolean;
   /** Filesystem identity of the canonical Git worktree root, or the non-Git workspace directory. */
@@ -223,6 +225,66 @@ async function resolveGitPaths(
   };
 }
 
+async function resolveGitBranch(
+  cwd: string,
+  options: ReturnType<typeof normalizeOptions>,
+): Promise<string | undefined> {
+  try {
+    const result = await options.runGit(
+      options.gitExecutable,
+      ['symbolic-ref', '--quiet', '--short', 'HEAD'],
+      {
+        cwd,
+        encoding: 'utf8',
+        env: gitEnvironment(),
+        killSignal: 'SIGKILL',
+        maxBuffer: options.gitMaxOutputBytes,
+        shell: false,
+        timeout: options.gitTimeoutMs,
+        windowsHide: true,
+      },
+    );
+    if (
+      Buffer.byteLength(result.stdout, 'utf8') > options.gitMaxOutputBytes ||
+      Buffer.byteLength(result.stderr, 'utf8') > options.gitMaxOutputBytes
+    ) {
+      return undefined;
+    }
+    const branch = result.stdout.trim();
+    if (
+      !branch ||
+      branch.length > 1024 ||
+      [...branch].some((character) => {
+        const codePoint = character.codePointAt(0) ?? 0;
+        return codePoint <= 31 || codePoint === 127;
+      })
+    ) {
+      return undefined;
+    }
+    return branch;
+  } catch {
+    try {
+      const detached = await options.runGit(
+        options.gitExecutable,
+        ['rev-parse', '--verify', 'HEAD'],
+        {
+          cwd,
+          encoding: 'utf8',
+          env: gitEnvironment(),
+          killSignal: 'SIGKILL',
+          maxBuffer: options.gitMaxOutputBytes,
+          shell: false,
+          timeout: options.gitTimeoutMs,
+          windowsHide: true,
+        },
+      );
+      return /^[a-f0-9]+\r?\n?$/i.test(detached.stdout) ? 'detached' : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+}
+
 function nonReusableIncarnation(canonicalKey: string): string {
   return digest(
     `workspace-incarnation-unproven-v1\0${canonicalKey}\0${randomBytes(32).toString('hex')}`,
@@ -277,10 +339,12 @@ export async function resolveWorkspaceIdentity(
 
   let worktree: DirectoryIdentityResult;
   let common: DirectoryIdentityResult;
+  let branch: string | undefined;
   try {
-    [worktree, common] = await Promise.all([
+    [worktree, common, branch] = await Promise.all([
       directoryIdentity(gitPaths.worktreeRoot),
       directoryIdentity(gitPaths.commonDirectory),
+      resolveGitBranch(gitPaths.worktreeRoot, options),
     ]);
   } catch {
     const canonicalKey = pathIdentity(requested.identity.canonicalPath, options.platform);
@@ -306,6 +370,7 @@ export async function resolveWorkspaceIdentity(
       : nonReusableIncarnation(`${worktreeKey}\0${commonKey}`),
     displayName: basename(worktree.identity.canonicalPath) || 'workspace',
     canonicalPath: worktree.identity.canonicalPath,
+    ...(branch ? { branch } : {}),
     reusable,
     worktreeRoot: worktree.identity,
     gitCommonDirectory: common.identity,

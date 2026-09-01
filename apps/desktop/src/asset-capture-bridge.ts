@@ -103,6 +103,23 @@ export function installAssetCaptureBridge(): void {
     onDaemonStatus: () => () => {},
     listProviders: async () => providers,
     listProvidersV2: async () => providersV2,
+    listMcpServers: async () => ({ servers: [], revision: 'asset-capture-1' }),
+    configureMcpServer: async () => ({ servers: [], revision: 'asset-capture-1' }),
+    actionMcpServer: async () => ({ servers: [], revision: 'asset-capture-1' }),
+    getMcpCatalog: async (_provider, serverId) => ({ serverId, items: [], revision: 'asset-capture-1' }),
+    startMcpOAuth: async (_provider, serverId) => ({ serverId, status: 'unsupported' }),
+    invokeMcpTool: async (input) => ({ serverId: input.serverId, toolId: input.toolId, status: 'failed', safeSummary: 'Unavailable in asset capture' }),
+    listProviderComponents: async () => ({ items: [], revision: 'asset-capture-1' }),
+    manageProviderComponent: async (input) => ({ componentId: input.componentId, status: 'unsupported' }),
+    invokeProviderComponent: async (input) => ({ componentId: input.componentId, status: 'unsupported' }),
+    getSubagentGraph: async (sessionId) => ({ sessionId, nodes: [] }),
+    controlSubagent: async (input) => ({ sessionId: input.sessionId, agentId: input.agentId, status: 'unsupported' }),
+    previewWorktree: async (input) => ({ workspaceId: 'a'.repeat(64), name: input.name, displayTarget: input.name, includeFiles: [], ignoredFiles: [], secretRisk: false, requiresConfirmation: true }),
+    createWorktree: async (input) => ({ id: '123e4567-e89b-42d3-a456-426614174099', workspaceId: 'a'.repeat(64), name: input.name, displayPath: input.name, status: 'ready', createdAt: '2026-01-01T00:00:00.000Z' }),
+    listWorktrees: async () => [],
+    cleanupWorktree: async (worktreeId) => ({ id: worktreeId, workspaceId: 'a'.repeat(64), name: 'worktree', displayPath: 'worktree', status: 'missing', createdAt: '2026-01-01T00:00:00.000Z' }),
+    selectAndUploadAttachments: async () => [],
+    validateStructuredOutput: async (input) => ({ valid: true, normalizedOutput: input.output, errors: [] }),
     createSession: async () => {
       window.setTimeout(() => {
         eventCallback?.(session.id, {
@@ -297,6 +314,24 @@ export function installAssetCaptureBridge(): void {
         earliestSequence: 0,
       };
     },
+    listInteractiveSessions: async () => ({ sessions: [] }),
+    readInteractiveSessionHistory: async () => ({ events: [] }),
+    reconnectInteractiveSession: async () => {
+      throw new Error('asset capture has no persisted session');
+    },
+    resumeInteractiveSession: async (_sessionId, input) =>
+      bridge.createInteractiveSession({
+        provider: 'claude',
+        cwd: 'C:\\workspace\\agent-dock',
+        ...input,
+      }),
+    forkInteractiveSession: async (_sessionId, input) =>
+      bridge.createInteractiveSession({
+        provider: 'claude',
+        cwd: 'C:\\workspace\\agent-dock',
+        ...input,
+      }),
+    deleteInteractiveSession: async () => {},
     sendSessionCommand: async (command) => ({
       status: 'accepted',
       commandId: '123e4567-e89b-42d3-a456-426614174004',

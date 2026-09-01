@@ -72,15 +72,13 @@ textarea {
   height: 54px;
   display: grid;
   place-items: center;
-  color: #f8fafc;
-  background: #0b1020;
-  border-radius: 15px;
-  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.16);
 }
 
-.brand__mark svg {
-  width: 37px;
-  height: 37px;
+.brand__mark img {
+  display: block;
+  width: 54px;
+  height: 54px;
+  user-select: none;
 }
 
 h1,

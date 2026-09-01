@@ -1,8 +1,19 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 360" role="img" aria-label="AgentDock">
-  <defs><linearGradient id="b" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#454545"/><stop offset=".5" stop-color="#242424"/><stop offset="1" stop-color="#080808"/></linearGradient></defs>
-  <g transform="translate(80 22) scale(1.8)">
-    <path d="M56 2c6 0 40 20 44 27 4 8 4 47 0 55-4 7-38 27-44 27S16 91 12 84c-4-8-4-47 0-55C16 22 50 2 56 2Z" fill="url(#b)" stroke="#696969"/>
-    <g fill="#fafafa"><path d="M56 28 78 69H65L56 51l-9 18H34l22-41Z"/><path d="M34 78h44l7 13H27l7-13Z"/></g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 260" role="img" aria-labelledby="title desc">
+  <title id="title">AgentDock</title>
+  <desc id="desc">AgentDock stacked logo for light backgrounds.</desc>
+  <defs>
+    <linearGradient id="badge" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#4A4A4A"/><stop offset="0.16" stop-color="#343434"/><stop offset="0.58" stop-color="#1D1D1D"/><stop offset="1" stop-color="#090909"/></linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#E6E6E6" stop-opacity="0.72"/><stop offset="0.28" stop-color="#9A9A9A" stop-opacity="0.34"/><stop offset="0.72" stop-color="#585858" stop-opacity="0.18"/><stop offset="1" stop-color="#D7D7D7" stop-opacity="0.34"/></linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFFFFF"/><stop offset="0.7" stop-color="#F4F4F4"/><stop offset="1" stop-color="#DEDEDE"/></linearGradient>
+    <clipPath id="badge-clip"><path d="M512 76C553 76 814 226 844 278C874 330 874 694 844 746C814 798 553 948 512 948C471 948 210 798 180 746C150 694 150 330 180 278C210 226 471 76 512 76Z"/></clipPath>
+  </defs>
+  <g transform="translate(130 4) scale(0.15625)">
+    <path d="M512 76C553 76 814 226 844 278C874 330 874 694 844 746C814 798 553 948 512 948C471 948 210 798 180 746C150 694 150 330 180 278C210 226 471 76 512 76Z" transform="translate(0 18)" fill="#000000" opacity="0.5"/>
+    <path d="M512 76C553 76 814 226 844 278C874 330 874 694 844 746C814 798 553 948 512 948C471 948 210 798 180 746C150 694 150 330 180 278C210 226 471 76 512 76Z" fill="url(#badge)"/>
+    <path d="M512 76C553 76 814 226 844 278C874 330 874 694 844 746C814 798 553 948 512 948C471 948 210 798 180 746C150 694 150 330 180 278C210 226 471 76 512 76Z" fill="none" stroke="url(#rim)" stroke-width="12"/>
+    <ellipse cx="512" cy="142" rx="255" ry="96" fill="#FFFFFF" opacity="0.075" clip-path="url(#badge-clip)"/>
+    <g transform="translate(0 10)" fill="#000000" opacity="0.45"><path d="M512 270L694 610C704 630 691 652 669 652H603L512 474L421 652H355C333 652 320 630 330 610L512 270Z"/><path d="M352 690H672C684 690 695 696 702 708L735 760C746 778 733 800 712 800H312C291 800 278 778 289 760L322 708C329 696 340 690 352 690Z"/></g>
+    <g fill="url(#mark)"><path d="M512 270L694 610C704 630 691 652 669 652H603L512 474L421 652H355C333 652 320 630 330 610L512 270Z"/><path d="M352 690H672C684 690 695 696 702 708L735 760C746 778 733 800 712 800H312C291 800 278 778 289 760L322 708C329 696 340 690 352 690Z"/></g>
   </g>
-  <text x="180" y="322" text-anchor="middle" fill="#111111" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="48" font-weight="700" letter-spacing="-1.6">AgentDock</text>
+  <text x="210" y="238" text-anchor="middle" fill="#111111" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif" font-size="46" font-weight="700" letter-spacing="-1.4">AgentDock</text>
 </svg>

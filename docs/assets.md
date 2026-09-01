@@ -47,7 +47,7 @@ committed as source, not exported from an opaque design file.
 
 ## Generated app icons
 
-`scripts/assets/generate_assets.py` rasterizes the canonical SVG into:
+`scripts/assets/generate_assets.py` rasterizes `agent-dock-app-icon.svg` into:
 
 - PNG icons at 16, 24, 32, 44, 48, 64, 128, 256, 512, and 1024 pixels;
 - `agent-dock.ico`, with Windows frames from 16 through 256 pixels;
@@ -110,6 +110,10 @@ cross-platform visual check. Visible raster text still requires human review.
 
 The root aliases `pnpm assets:generate` and `pnpm assets:validate` use the active `python`
 interpreter; activate the environment first if preferred.
+
+With the pinned dependencies installed, the committed checkout passes validation. Treat any future
+failure as a release blocker and reconcile the asset, generator, and validator contracts before
+distribution.
 
 The compositor uses Segoe UI on Windows and DejaVu Sans as its POSIX fallback; lockup SVGs use a
 system UI font stack. Text rasterization can vary slightly between operating systems. Regenerate

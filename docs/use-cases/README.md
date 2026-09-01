@@ -1,8 +1,11 @@
-# Product concept directory
+# Product ideas for AgentDock forks
 
 > Research snapshot: 2026-09-01. This is a set of product hypotheses, not a claim that every
 > concept has product-market fit. The concepts below are inferences from current workflow and
 > product signals; validate a narrow customer problem before building a full product.
+
+This catalog is for downstream products built from AgentDock. It is not AgentDock's feature list or
+delivery roadmap.
 
 AgentDock is most useful as the supervised runtime inside a focused workflow product: inspect a
 real workspace, show progress and evidence, pause before consequential actions, produce a
@@ -11,19 +14,21 @@ boilerplate to be a strong product wedge.
 
 ## How to read the directory
 
-The **Profile** column shows which part of AgentDock makes a concept stronger. These are
-architecture-fit tags, not release guarantees. Verify the selected branch, provider, platform,
-and fixture-backed capability before promising it in a downstream product.
+The **Profile** column shows which part of AgentDock makes a concept stronger. The **Current
+checkout** column names the implemented subset or downstream responsibility. Linked issues
+[#15](https://github.com/jortega0033/agentdock/issues/15)-[#18](https://github.com/jortega0033/agentdock/issues/18)
+are closed implementation tickets, not maturity or provider-parity guarantees. Verify the selected
+branch, provider, platform, and fixture-backed capability before promising it downstream.
 
-| Tag                  | Meaning                                                                                                                                                                                                                                   |
-| -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Core**             | Epic #4 phases 0-3 as represented in this checkout: provider-neutral v2 sessions, native rich provider paths, streaming activity, approvals and questions, workspace trust, audit, durable history, resume/fork, and concurrent sessions. |
-| **MCP**              | Stronger with the provider-neutral external-tool control plane in [#15](https://github.com/jortega0033/agentdock/issues/15).                                                                                                              |
-| **Extensions**       | Stronger with trusted discovery and control of skills, plugins, hooks, commands, and agents in [#16](https://github.com/jortega0033/agentdock/issues/16).                                                                                 |
-| **Agents**           | Stronger with visible subagents and isolated Git worktrees in [#17](https://github.com/jortega0033/agentdock/issues/17).                                                                                                                  |
-| **Files**            | Stronger with secure attachments and schema-validated structured output in [#18](https://github.com/jortega0033/agentdock/issues/18).                                                                                                     |
-| **App layer**        | Product-specific work that AgentDock does not supply: accounts, cloud sync, domain data, licensed content, connectors, evaluations, billing, and distribution.                                                                            |
-| **Regulated review** | A qualified domain reviewer, documented evaluations, and stricter release/action gates are required; AgentDock does not provide the compliance program.                                                                                   |
+| Profile              | Current checkout                            | Meaning                                                                                                                                                                                                                                                                                                                                                   |
+| -------------------- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Core**             | Implemented; provider-scoped                | Provider-neutral v2 session lifecycle, streams, interaction routing, workspace trust, audit, durable history, and concurrency exist. Native execution, resume/fork, and interaction support are negotiated capabilities, not universal guarantees.                                                                                                        |
+| **MCP**              | Control plane implemented; provider-limited | Daemon routes and normalized control-plane contracts exist. Current production CLI adapters expose only the configuration subset their providers support; live tool/resource/prompt catalogs, provider-owned OAuth, and direct invocation remain unavailable. See closed implementation ticket [#15](https://github.com/jortega0033/agentdock/issues/15). |
+| **Extensions**       | Read-only discovery                         | Filesystem discovery can inspect supported skills, plugins, hooks, commands, and agents. The production adapter does not perform management actions or invocation. See closed implementation ticket [#16](https://github.com/jortega0033/agentdock/issues/16).                                                                                            |
+| **Agents**           | Worktrees current; subagents scaffolded     | Worktree preview, create, list, and cleanup are implemented. Subagent graph storage and routes exist, but production provider events do not populate the graph and graph controls remain unsupported. See closed implementation ticket [#17](https://github.com/jortega0033/agentdock/issues/17).                                                         |
+| **Files**            | Staging and validation only                 | File picking, upload staging, references, and standalone structured-output validation exist. Session creation has no attachment or output-schema field, so neither is dispatched to provider execution. See closed implementation ticket [#18](https://github.com/jortega0033/agentdock/issues/18).                                                       |
+| **App layer**        | Downstream-only                             | Product-specific work that AgentDock does not supply: accounts, cloud sync, domain data, licensed content, connectors, evaluations, billing, and distribution.                                                                                                                                                                                            |
+| **Regulated review** | Downstream-only                             | A qualified domain reviewer, documented evaluations, and stricter release/action gates are required; AgentDock does not provide the compliance program.                                                                                                                                                                                                   |
 
 Important boundaries:
 
@@ -245,7 +250,10 @@ autonomy only after measured reliability justifies a narrower approval policy.
 ## Keeping the directory current
 
 - Recheck the linked sources and product landscape every 6-12 months.
-- Update capability tags when [Epic #4](https://github.com/jortega0033/agentdock/issues/4) changes.
+- Update capability tags and statuses when runtime behavior or capability manifests change. Treat
+  [Epic #4](https://github.com/jortega0033/agentdock/issues/4) and closed implementation tickets
+  [#15](https://github.com/jortega0033/agentdock/issues/15)-[#18](https://github.com/jortega0033/agentdock/issues/18)
+  as historical implementation context, not the current maturity source.
 - Add customer-interview evidence separately from vendor product evidence.
 - Promote a concept into its own page only after it has a named persona, repeated job, first
   integration, evaluation set, approval policy, and explicit non-goals.

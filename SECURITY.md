@@ -12,8 +12,10 @@ actually demonstrated versus what follows from the design.
 - A malicious or compromised **webpage running in an ordinary browser tab** (anywhere, not just
   inside this app) issuing requests to the daemon's `127.0.0.1` port and getting Claude/Codex to
   read or modify local files.
-- The **renderer process** (React UI) reading the daemon's bearer token or base URL, or reaching
-  any daemon route beyond the seven narrow IPC capabilities the preload bridge exposes.
+- The **renderer process** (React UI) reading the daemon's bearer token or reaching daemon
+  functionality outside the explicit, typed IPC capabilities the preload bridge exposes. The
+  bridge has no base-URL property, but forwarded client network-error text can include that URL; it
+  is connection metadata, not an authentication secret.
 - A request choosing **which executable runs**: `POST /sessions` only ever accepts a `provider`
   id from a closed enum; the actual binary path is always resolved internally.
 - **Shell interpolation**: every provider CLI is spawned with `shell: false` and an argv array;
@@ -46,12 +48,11 @@ logs credentials, and does not fall back from accepted SDK work to the legacy CL
 auth source. The `BrowserWindow` renderer sandbox described later in this file is unrelated to
 isolation of an agent's shell, filesystem, or network access.
 
-The accepted v2 design adds evidence-backed capability negotiation, default-untrusted workspaces,
-platform-specific sandbox states, approval/audit rules, credential boundaries, data retention, and
-safe transport fallback. See
-[Capability and security model for protocol v2](docs/capability-security-v2.md). Those protections
-become claims only as their dependent implementation tickets and fixtures land; they must not be
-attributed to today's CLI adapters.
+The implemented v2 path adds evidence-backed capability negotiation, default-untrusted workspaces,
+platform-specific sandbox states, approval/audit rules, credential boundaries, durable normalized
+history, and guarded transport fallback. The exact guarantees are bound to the negotiated transport
+and its evidence; the Claude SDK policy above must not be attributed to a legacy CLI transport. See
+[Capability and security model for protocol v2](docs/capability-security-v2.md).
 
 ## Renderer never talks to the daemon directly
 
@@ -72,17 +73,18 @@ main process** (`apps/desktop/electron/main.ts`, via `@agent-dock/client`), whic
 networking stack. CORS is a browser/fetch-spec concept enforced by Chromium's renderer process,
 not by the `fetch` function itself, so main-process fetch was never subject to it. **Verified**: the
 same request that failed from a real browser tab succeeds immediately from plain Node `fetch()`
-against the same daemon. The renderer currently talks to main through seven narrow, typed IPC
-capabilities (`electron/preload.ts`): `getDaemonStatus()`, `onDaemonStatus()`, `listProviders()`,
-`createSession()`, `cancelSession()`, `onSessionEvent()`, `selectDirectory()`. **The daemon's
-bearer token and base URL never cross into the renderer at all** (they live only in main-process
-memory), which closes off "token leaks into the DOM/renderer console/a crash report" by
-construction rather than by convention. The two status-reporting functions
+against the same daemon. The renderer talks to main through the explicit, typed operations declared
+by `AgentDockBridge` in `electron/preload.ts`; these cover daemon status, provider and integration
+controls, legacy and interactive sessions, interactions, workspace trust/audit, worktrees,
+attachments/structured workflows, and native pickers. There is no generic IPC invoke tunnel.
+**The daemon's bearer token never crosses into the renderer.** The token and base URL exist in the
+per-user discovery file for local clients and in daemon/main-process memory while running, but the
+preload bridge exposes neither as a property. The two status-reporting functions
 (`getDaemonStatus`/`onDaemonStatus`) reconstruct a clean `{ state, error? }` object from whatever
-main sends rather than passing the IPC payload through unvalidated, specifically so an accidental
-extra field on the main-process side (a token, a base URL) can never cross into the renderer even
-by mistake. See `apps/desktop/test/preload.test.ts` for the regression test against the real
-module, not a mock of it.
+main sends, so extra token/base-URL fields cannot ride along. One narrower limitation remains:
+`AgentDockClient` includes its base URL in some network-error messages, and IPC handlers that forward
+those errors can expose that non-secret URL text to the renderer. See
+`apps/desktop/test/preload.test.ts` for the status-object regression tests.
 
 One consequence: the daemon no longer needs _any_ browser origin allowlisted, in dev or production.
 There is no configuration knob for this at all: the daemon rejects every request that carries an
@@ -182,12 +184,11 @@ correct for what this daemon actually needs to be reachable by.
   spawned with `shell: false` and an argv array (`packages/agent-runtime/src/process/spawn-process.ts`).
 - Listen on any interface other than `127.0.0.1` by default. **Verified**: `http://[::1]:<port>`
   (IPv6 loopback) gets no response: the daemon binds IPv4-only, not dual-stack.
-- Log a complete environment, a raw auth-status response, or a full prompt at the default log
-  level (`packages/agent-runtime/src/logger.ts` redacts any meta key matching
-  `/token|secret|password|authorization|api[-_]?key|credential/i`). A non-zero process exit _does_
-  log a bounded (2000-char) stderr snippet at `warn`: that's the CLI's own diagnostic output, not
-  daemon secrets, and a failure with zero visible reason is undebuggable; see
-  [docs/providers.md](docs/providers.md) for why this exists.
+- Log a complete environment, a raw auth-status response, a full prompt, or provider stderr
+  contents. `packages/agent-runtime/src/logger.ts` redacts any meta key matching
+  `/token|secret|password|authorization|api[-_]?key|credential/i`; legacy provider stderr is counted
+  without being decoded, persisted, logged, or surfaced. A non-zero exit logs only bounded numeric
+  metadata such as exit code, signal, and `stderrBytes`.
 - Leak the token back through any API response, even an error body. **Verified** by regression
   test (`apps/daemon/test/server.test.ts`).
 
@@ -200,28 +201,25 @@ can still contain user-supplied secrets and follow the documented content-retent
 
 ## Request validation
 
-Every request body and path/query parameter that reaches a route handler is validated with Zod
-(`packages/shared/src/schemas.ts`) before touching any business logic. Invalid input (an unknown
-provider, a non-UUID session id, a prompt over the size cap, a wrong-typed field, malformed JSON,
-an oversized body) gets a sanitized `4xx` with a short error message, never a stack trace
-(`app.setErrorHandler` in `apps/daemon/src/server.ts` preserves Fastify's own `4xx` status codes
-for genuine client errors like "malformed JSON" but flattens anything without one to a generic
-`500`, so an unexpected internal error never leaks implementation detail while a bad request still
-gets an accurate, actionable status).
+Structured request bodies and identifiers are checked with shared Zod schemas or narrow explicit
+validators before dispatch. Raw attachment streams use route-specific byte, MIME, and quota checks.
+Invalid input (an unknown provider, a non-UUID session id, a prompt over the size cap, a wrong-typed
+field, malformed JSON, or an oversized body) gets a sanitized `4xx` with a short error message,
+never a stack trace. `app.setErrorHandler` in `apps/daemon/src/server.ts` preserves Fastify's own
+`4xx` status codes for genuine client errors but flattens anything without one to a generic `500`,
+so an unexpected internal error never leaks implementation detail while a bad request still gets an
+accurate, actionable status.
 
 ## Process hygiene
 
 See [docs/architecture.md](docs/architecture.md#dependency-graph) and
-`packages/agent-runtime/src/process/spawn-process.ts` for the full detail; the security-relevant
-summary is that every provider CLI is spawned detached from the daemon (its own process group on
-POSIX) and killed as a whole tree on cancellation (`taskkill /pid <pid> /T /F` on Windows, a
-negative-pid `SIGTERM`→`SIGKILL` escalation on POSIX). **Verified on Windows**: a test fixture that
-spawns a real grandchild process (simulating a CLI that itself launches a tool subprocess)
-confirmed the grandchild stops running within ~1s of cancellation, not just the direct child
-(`packages/agent-runtime/test/run-session.test.ts`). The POSIX path uses the equivalent,
-well-established process-group mechanism but was not independently re-verified on macOS/Linux in
-this audit (no such machine was available). Treat it as documented behavior, not empirically
-re-confirmed on every platform.
+`packages/agent-runtime/src/process/spawn-process.ts` for the full detail. On Windows, the shipped
+Job Object host starts the provider inside a `KILL_ON_JOB_CLOSE` job; closing its sole job handle
+terminates the owned descendants, and cancellation resolves only after the host is reaped. On
+POSIX, the provider is detached into its own process group; cancellation sends group `SIGTERM`,
+then `SIGKILL` after a short grace period, and verifies the group disappeared within the bounded
+termination window. The Windows Job Object ownership/command-launch path is exercised in the
+Windows packaging workflow; focused unit tests cover both platform branches.
 
 ## Environment inheritance (a deliberate tradeoff, not an oversight)
 
@@ -238,32 +236,34 @@ providers (e.g. it's started from a shell profile that also exports cloud creden
 reason to start the daemon from a more minimal environment yourself, not something this codebase
 currently does for you.
 
-Protocol v2 narrows this default: adapters pass a documented provider-specific environment and
-report only a non-secret auth-source label. The exact credential and OAuth boundary is fixed in
-[Credentials and OAuth](docs/capability-security-v2.md#credentials-and-oauth). The current full
-environment inheritance remains documented here because v1 still behaves this way.
+Environment handling is transport-specific. The Claude Agent SDK child receives an allowlisted
+environment for its reviewed auth source. Codex app-server and the legacy one-shot CLI paths inherit
+the daemon's full environment today because no production caller supplies the optional per-session
+environment override. Public status still reports only a non-secret auth-source label. The exact
+credential and OAuth boundary is fixed in
+[Credentials and OAuth](docs/capability-security-v2.md#credentials-and-oauth).
 
 ## Single daemon instance
 
 Every client discovers a given application's daemon through one fixed, namespaced discovery-file
 path (`os.tmpdir()/agent-dock/<app-id>.json`, `<app-id>` defaulting to `agent-dock`, see
-`apps/daemon/src/discovery-file.ts`), so two daemons _sharing the same app id_ running at once
-would silently race over it: whichever started last "wins" the file, leaving the other alive but
-unreachable through discovery. Rather than accept that ambiguity, the daemon refuses to start if
-the discovery file's recorded pid is still alive, and treats a stale file (dead pid, or corrupt
-from an interrupted write) as safe to overwrite. **Verified**: starting a second `pnpm daemon`
-while the first is still running fails fast with an explicit "already running (pid ...)" error
-instead of silently binding a second instance.
+`apps/daemon/src/discovery-file.ts`). Before listening, the daemon refuses to start if that file's
+recorded pid is still alive and treats a stale/corrupt file as safe to overwrite. **Verified**:
+starting a second `pnpm daemon` after the first is ready fails fast with an explicit "already
+running (pid ...)" error.
 
-This is a per-app-id guarantee, not a machine-global one: two different products built on this
-boilerplate, each launched with its own `AGENT_DOCK_APP_ID`, run their own daemons (and their own
-independent single-instance locks) side by side without colliding. The app id itself is validated
-before it's ever used to build a path (`sanitizeAppId()`: letters, digits, `-`, `_` only, 1–64
-characters, must start with a letter or digit), rejected outright rather than sanitized-by-best-
-effort, so it can't be used for path traversal (`../../etc/passwd`) or to escape the discovery
-directory entirely (an absolute path). Electron's desktop app passes its app id to the daemon via
-that same environment variable at spawn time, and computes the matching discovery path itself to
-read the file back. See `apps/desktop/electron/main.ts`.
+This is a best-effort duplicate-start check, not an atomic single-instance lock. Two simultaneous
+starts can both check before either writes the discovery file, then coexist while the later writer
+wins discovery. The packaged Electron app separately uses its atomic
+`app.requestSingleInstanceLock()` to prevent that normal desktop path. Different products with
+different `AGENT_DOCK_APP_ID` values intentionally run side by side. Discovery and state-directory
+validation both run, so the effective accepted app-id set is 1–64 characters: a lowercase ASCII
+letter or digit first, followed only by lowercase ASCII letters, digits, `-`, or `_`. Invalid values
+are rejected outright rather than sanitized-by-best-effort, so they cannot be used for path traversal
+(`../../etc/passwd`) or to escape the discovery directory entirely (an absolute path). Electron's
+desktop app passes its app id to the daemon via that same environment variable at spawn time, and
+computes the matching discovery path itself to read the file back. See
+`apps/desktop/electron/main.ts`.
 
 ## Electron hardening
 
@@ -287,20 +287,19 @@ check, which a URL like `http://localhost:5173.evil.example` would have passed a
 `dist/index.html`, not any local file path); anything else opens in the OS's default browser
 instead via `shell.openExternal`. A `session.setPermissionRequestHandler` denies every permission
 request (camera, microphone, geolocation, notifications, etc.) by default, since nothing in this UI
-asks for any of them. None of this is load-bearing for the _current_ UI (it renders no untrusted
-content or links, and requests no permissions), but it's cheap defense in depth for forks of this
-boilerplate that later add either.
+asks for any of them. The current UI renders normalized provider/user content as inert React text,
+not raw HTML or remote pages, and requests no browser permissions. These controls remain defense in
+depth for that content and for forks that add links or native features.
 
-The preload script (`electron/preload.ts`) currently exposes exactly seven narrow, single-purpose, typed
-operations via `contextBridge`: daemon status (queried once, and pushed on change), list
-providers, create a session, cancel a session, subscribe to session events, open a native directory
-picker, never a generic "invoke this IPC channel with this payload" tunnel, and never the
-daemon's connection info (see "Renderer never talks to the daemon directly" above). The two
-daemon-status functions reconstruct a clean status object from the IPC payload rather than passing
-it through once its shape looks roughly right, so an accidental extra field on the main-process
-side can't ride along. There is no `remote` module, no `eval`, and no path by which the renderer
-can execute an arbitrary shell command, read an arbitrary file, or reach any daemon route this
-bridge doesn't explicitly expose. The page's `Content-Security-Policy` is
+The preload script (`electron/preload.ts`) exposes narrow, single-purpose, typed operations via
+`contextBridge`, never a generic "invoke this IPC channel with this payload" tunnel and never the
+daemon's bearer token or a callable connection object. The bridge is still a powerful surface: it
+can start agents and invoke explicit integration, worktree, trust, and approval operations, all of
+which remain subject to main/daemon validation and policy. The two daemon-status functions
+reconstruct a clean status object from the IPC payload, so accidental extra fields cannot ride
+along. Client network-error messages can still contain the daemon base URL as noted above. There is
+no `remote` module or `eval`, and no generic direct shell, filesystem, or daemon-route passthrough.
+The page's `Content-Security-Policy` is
 `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'`: no
 `unsafe-eval`, and `connect-src` is just same-origin now that the renderer makes no network calls
 of its own.

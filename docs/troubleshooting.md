@@ -12,11 +12,22 @@ legacy CLI before any SDK work is accepted; there is no cross-auth fallback afte
 SDK settings, MCP, hooks, plugins, skills, agents, and Bash are intentionally disabled. If SDK mode
 fails closed, use `auto` or `cli` after checking the auth source, trust state, and packaged asset.
 
+## Codex transport mode is unavailable
+
+`AGENT_DOCK_CODEX_TRANSPORT` must be exactly `auto`, `app-server`, or `exec`; it defaults to `auto`.
+The app-server path requires the exact validated Codex CLI version, authenticated status, and a
+trusted workspace. Forced `app-server` mode fails closed if a gate does not pass. In `auto`, a safe
+startup failure may fall back to the legacy exec bridge only before work is delivered; accepted or
+ambiguous work is never replayed. See
+[providers.md#historical-v02-decision-and-current-v2-transport](providers.md#historical-v02-decision-and-current-v2-transport).
+
 ## Claude/Codex not detected (`installed: false`)
 
-`GET /providers` reports `installed: false` when `findExecutable()` couldn't locate the CLI binary
-at all: see [providers.md#executable-discovery](providers.md#executable-discovery) for exactly how
-it searches (a real `where`/`which` lookup, then a curated list of common install directories).
+For a CLI-backed path, `GET /providers` reports `installed: false` when `findExecutable()` cannot
+locate the binary. See [providers.md#executable-discovery](providers.md#executable-discovery):
+Windows scans absolute PATH entries directly, POSIX uses `which` without a shell, and both then
+check a curated list of common install directories. An eligible Claude SDK asset is detected
+separately and does not require a PATH-installed `claude` binary.
 
 - Confirm the CLI actually works from a terminal: `claude --version` / `codex --version`.
 - If it works in a terminal but the daemon still reports `installed: false`, the daemon's process
@@ -43,21 +54,37 @@ CLI output format that changed, see the relevant `parser.ts` and its test fixtur
 
 ## Daemon fails to start
 
-**"another agent-dock daemon is already running (pid ..., discovery file ...)"**: see
-[daemon.md#single-instance-behavior](daemon.md#single-instance-behavior). Either a daemon really is
+**`another agent-dock daemon (app id "...") is already running (pid ..., discovery file ...)`**: see
+[daemon.md#duplicate-start-behavior](daemon.md#duplicate-start-behavior). Either a daemon really is
 already running (check the pid with your OS's task manager / `ps`), or a previous run left a
 discovery file whose pid happens to be reused by an unrelated process now running (rare, but
 possible on a long-lived machine). If you're sure nothing is actually using it, deleting the
-discovery file lets the daemon start fresh; its path is `os.tmpdir()/agent-dock/daemon.json` (do
-not treat this as a workaround to reach for by default; understand why the lock exists first, in
-[daemon.md](daemon.md#single-instance-behavior)).
+discovery file lets the daemon start fresh. Its default path is
+`os.tmpdir()/agent-dock/agent-dock.json`; with `AGENT_DOCK_APP_ID=<app-id>`, it is
+`os.tmpdir()/agent-dock/<app-id>.json`. Do not treat deletion as a workaround to reach for by
+default; understand the live-pid check and simultaneous-start race first in
+[daemon.md](daemon.md#duplicate-start-behavior).
 
 **Port already in use**: only relevant if you set `AGENT_DOCK_PORT` to a fixed value; the default
 (`0`, an OS-assigned ephemeral port) can't collide. Either free the port or unset
 `AGENT_DOCK_PORT`.
 
-**No visible error at all**: run with `AGENT_DOCK_LOG_LEVEL=debug pnpm daemon` for more detail; see
-[daemon.md#logging](daemon.md#logging).
+**No visible error at all**: enable debug logging for the current shell, then start the daemon.
+
+PowerShell:
+
+```powershell
+$env:AGENT_DOCK_LOG_LEVEL = 'debug'
+pnpm daemon
+```
+
+POSIX shells:
+
+```bash
+AGENT_DOCK_LOG_LEVEL=debug pnpm daemon
+```
+
+See [daemon.md#logging](daemon.md#logging).
 
 ## Protocol mismatch
 
@@ -74,10 +101,11 @@ change.
 
 1. Confirm the session actually started: `GET /sessions/:id` should show `status: "running"` (or
    `"failed"` with an `error` message, which is your actual answer).
-2. Check the daemon's own log output: a non-zero CLI exit logs a bounded stderr snippet at `warn`
-   (see [SECURITY.md#what-the-daemon-will-never-do](../SECURITY.md#what-the-daemon-will-never-do)
-   for exactly what is and isn't logged). This is usually the fastest way to see what actually went
-   wrong inside the CLI itself, since a bare `session.failed` message is deliberately generic.
+2. Check the daemon log for session start and exit state. A non-zero legacy CLI exit records the
+   exit code, signal, and stderr byte count only; raw stderr is intentionally not decoded, logged,
+   persisted, or surfaced. Run the provider CLI directly in the same working directory for its own
+   diagnostic output. See
+   [SECURITY.md#what-the-daemon-will-never-do](../SECURITY.md#what-the-daemon-will-never-do).
 3. If you're calling the SSE endpoint directly (not through `@agent-dock/client`), confirm you're
    reading the stream incrementally, not buffering the whole response, some HTTP clients (and some
    `curl` flag combinations) don't stream by default.
@@ -89,9 +117,8 @@ change.
 Cancellation kills the provider CLI's whole process tree, not just the direct child, see
 [daemon.md#cancellation-and-process-tree-kill](daemon.md#cancellation-and-process-tree-kill) for the
 exact mechanism per platform. This was empirically verified on Windows (a real grandchild process
-was confirmed killed within ~1s). The POSIX path uses the standard, well-documented process-group
-mechanism but hasn't been independently re-verified on macOS/Linux in this project; if you find a
-case where a POSIX grandchild survives cancellation, that's a real gap worth reporting with
+was confirmed killed within ~1s). Linux CI exercises the POSIX process-group descendant-kill path;
+macOS remains unverified. If you find a POSIX grandchild that survives cancellation, report it with
 reproduction steps.
 
 ## Windows SmartScreen warning on the installed app

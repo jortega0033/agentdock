@@ -4,27 +4,57 @@
 
 <p align="center">Electron · Fastify · React · TypeScript · Apache-2.0</p>
 
-AgentDock is built for fork-based reuse. Fork the repository, replace the reference workflow and
-visual identity, and keep the local runtime pieces your product needs. Users provide credentials
-through the Claude Agent SDK, the legacy Claude CLI, or [Codex CLI](https://github.com/openai/codex).
-Credentials remain in the user's environment; AgentDock does not collect, store, or proxy provider
-API keys.
+## What AgentDock is
 
-## What AgentDock is not
+AgentDock is fork-first runtime boilerplate for building focused desktop products on top of Claude
+Agent, the legacy Claude CLI, or Codex CLI. It supplies reusable Electron and local-daemon
+infrastructure; your fork supplies the domain workflow and product layer.
 
-AgentDock includes a working reference desktop, but it is not a finished chat product. It has no
-accounts, cloud backend, or fixed end-user workflow. Those decisions belong in the product you
-build from the boilerplate.
+Users authenticate through the Claude Agent SDK, the legacy Claude CLI, or
+[Codex CLI](https://github.com/openai/codex). Credentials remain under the provider runtime's
+control on the user's machine; AgentDock does not collect, store, or proxy provider API keys. The
+included desktop is a reference implementation: run it to understand the flow, then replace its
+generic workflow, product copy, and visual identity.
 
-## Build your product with AgentDock
+### Use AgentDock when
 
-1. Fork the repository and replace the reference UI with your product workflow.
-2. Keep daemon access in a trusted process. Never expose the daemon token to a renderer.
-3. Add accounts, cloud sync, and product data in your own layer. AgentDock's local session and
-   history stores are runtime infrastructure, not a product database.
-4. Replace `appId`, `productName`, and the default assets by following
-   [the asset guide](docs/assets.md).
-5. Run the build, test, and packaging checks, and review the security boundaries before
+- You are building a desktop workflow where an agent inspects a real workspace, streams evidence,
+  pauses for approval, and produces a reviewable result.
+- You want provider-neutral Claude and Codex integration without exposing daemon credentials to a
+  renderer.
+- You plan to fork the codebase and own the downstream product.
+
+### Choose another starting point when
+
+- You need a finished chat application, hosted multi-user backend, credential vault, cloud sync, or
+  marketplace.
+- You need a drop-in UI component or public npm SDK without maintaining a fork.
+- You need a verified installer for a platform other than Windows.
+
+## Boilerplate contract
+
+| AgentDock provides                                                 | Your product owns                                            |
+| ------------------------------------------------------------------ | ------------------------------------------------------------ |
+| Electron shell and replaceable reference UI                        | Final workflow, domain UX, and product behavior              |
+| Authenticated loopback daemon, typed IPC, and trusted client       | Accounts, hosted backend, cloud sync, and product database   |
+| Provider adapters, normalized events, sessions, approvals, history | Domain data, policies, integrations, and evaluation criteria |
+| Windows packaging base and replaceable assets                      | Brand identity, signing, distribution, and support           |
+
+AgentDock's local session and history stores are runtime infrastructure, not a product database.
+Capability surfaces such as MCP controls, provider components, subagents, worktrees, attachments,
+and structured output can vary by provider, transport, platform, and checkout. Verify the relevant
+fixtures and tests before promising support in a downstream product.
+
+## Start your fork
+
+1. Fork the repository, install dependencies, and run the reference desktop.
+2. Define one focused workflow, or review the
+   [product ideas for AgentDock forks](docs/use-cases/README.md).
+3. Choose the provider transports and capabilities that workflow requires; verify their support.
+4. Replace the reference workflow, `appId`, `productName`, copy, and assets.
+5. Preserve the trust boundary: renderer code never receives daemon credentials or calls the daemon
+   directly.
+6. Run `pnpm test`, `pnpm typecheck`, `pnpm lint`, `pnpm build`, and the packaging checks before
    distribution.
 
 ### Downstream example
@@ -32,24 +62,6 @@ build from the boilerplate.
 Open Vacancy Radar is a downstream product built from AgentDock. It keeps the Electron shell,
 local daemon, and connection to Claude Agent, the legacy Claude CLI, or Codex CLI, then adds a
 vacancy-focused workflow and its own product behavior.
-
-### Product concept directory
-
-Looking for a focused product wedge? The research-backed
-[product concept directory](docs/use-cases/README.md) expands validated workflow families into 45
-concrete app concepts, with MVP suggestions, human-approval boundaries, and Epic #4 dependency
-tags.
-
-## What the boilerplate provides
-
-- **Provider authentication stays local.** AgentDock never stores or logs credentials. Claude Agent
-  SDK mode accepts only a user-provided Anthropic API key or supported Bedrock, Vertex, or Foundry
-  configuration; Claude.ai/subscription OAuth is not accepted.
-- **One provider-neutral protocol.** Claude and Codex output becomes a typed, ordered event stream.
-- **A deliberate trust boundary.** The sandboxed renderer talks only to Electron main over IPC;
-  only the trusted main process can reach the authenticated loopback daemon.
-- **Windows packaging.** The repository builds an NSIS installer with the daemon and AgentDock's
-  default visual identity included.
 
 ## Quick start
 
@@ -61,7 +73,10 @@ pnpm install
 pnpm dev:desktop
 ```
 
-Install and authenticate at least one supported CLI separately:
+Configure at least one provider path. The Claude Agent SDK path uses the pinned Windows asset plus
+an eligible Anthropic API key, Bedrock, Vertex, or Foundry environment and does not require a
+separate `claude` CLI install. For the legacy Claude path or either Codex transport, install and
+authenticate the provider CLI separately:
 
 ```bash
 # Claude (legacy CLI)
@@ -94,7 +109,7 @@ incremental SSE parsing.
 React renderer → typed IPC → Electron main → @agent-dock/client → local Fastify daemon
                                                                └→ agent runtime
                                                                   ├→ Claude Agent SDK or legacy Claude CLI
-                                                                  └→ Codex adapter  → codex CLI
+                                                                  └→ Codex adapter  → app-server or `codex exec`
 ```
 
 Read [the architecture guide](docs/architecture.md) for component ownership and
@@ -102,12 +117,25 @@ Read [the architecture guide](docs/architecture.md) for component ownership and
 
 ### Claude transport modes
 
-Set `AGENT_DOCK_CLAUDE_TRANSPORT` to `auto` (the default), `sdk`, or `cli`. `auto` selects the
-Claude Agent SDK only when a user-provided `ANTHROPIC_API_KEY` or exactly one of the supported
-Bedrock, Vertex, or Foundry modes is present; it never uses Claude.ai/subscription OAuth or
-`CLAUDE_CODE_OAUTH_TOKEN`. `sdk` requires those same conditions and fails closed when they are not
-met. `cli` keeps the existing legacy Claude CLI path unchanged. There is no SDK-to-CLI fallback
-after SDK work has been accepted.
+Set `AGENT_DOCK_CLAUDE_TRANSPORT` to `auto` (the default), `sdk`, or `cli`. SDK eligibility has
+multiple gates: the daemon must run on Windows, resolve the pinned SDK asset, and find either a
+user-provided `ANTHROPIC_API_KEY` or exactly one supported Bedrock, Vertex, or Foundry mode. It
+never treats Claude.ai/subscription OAuth or `CLAUDE_CODE_OAUTH_TOKEN` as SDK credentials. Each SDK
+session also requires a trusted workspace. `auto` uses the legacy Claude CLI when an SDK gate is
+unmet before transport selection; `sdk` fails closed. After the SDK is selected, an import, startup,
+or query failure does not replay the session through the CLI. See
+[the provider guide](docs/providers.md#claude-transport-modes) for the full gate and credential
+rules.
+
+### Codex transport modes
+
+Set `AGENT_DOCK_CODEX_TRANSPORT` to `auto` (the default), `app-server`, or `exec`. Protocol v1 uses
+`codex exec --json`. For protocol v2, `auto` selects app-server only for the exact validated Codex
+CLI version, an authenticated detection snapshot, and a trusted workspace. When app-server is not
+selected, `auto` may use the legacy exec bridge only if that fallback scope also passes; otherwise
+it fails closed. Forced `app-server` mode fails closed when its gates do not pass, and AgentDock
+never replays accepted work through another transport. See
+[the provider guide](docs/providers.md#historical-v02-decision-and-current-v2-transport).
 
 ## Repository map
 
@@ -136,7 +164,9 @@ pnpm assets:validate   # validate dimensions, formats, and SVG safety
 
 The asset commands require Python 3.11+ and the pinned packages in
 [`scripts/assets/requirements.txt`](scripts/assets/requirements.txt). See
-[the asset guide](docs/assets.md) before changing the identity or regenerating images.
+[the asset guide](docs/assets.md) before changing the identity or regenerating images. With those
+dependencies installed, the committed checkout passes `pnpm assets:validate`; treat any failure as
+a release blocker.
 
 ## Production and packaging
 
@@ -172,16 +202,35 @@ const client = new AgentDockClient({
   token,
 });
 
-const session = await client.sessions.create({
+const cwd = '/path/to/project';
+const workspace = await client.v2.workspaces.inspect(cwd);
+
+if (workspace.state !== 'trusted') {
+  // Show this workspace identity to the user and obtain explicit consent first.
+  await client.v2.workspaces.setTrust(workspace.workspaceId, {
+    cwd,
+    incarnation: workspace.incarnation,
+    state: 'trusted',
+  });
+}
+
+const session = await client.v2.sessions.create({
   provider: 'claude',
-  cwd: '/path/to/project',
+  cwd,
   prompt: 'Inspect this repository',
 });
 
-for await (const event of client.sessions.events(session.id)) {
+for await (const event of client.v2.sessions.events(session.id)) {
   console.log(event);
 }
 ```
+
+The explicit `v2` namespace is intentional: it can negotiate an eligible Claude SDK or Codex
+app-server transport. The client's top-level `sessions` namespace is protocol v1 and always uses a
+legacy one-shot CLI transport.
+
+Production v1 and v2 session creation both require the workspace to be trusted before the daemon
+accepts the session.
 
 Failures are typed (`DaemonUnavailableError`, `UnauthorizedError`,
 `ProtocolMismatchError`, `ProviderUnavailableError`, and others), so consumers can branch without
@@ -201,7 +250,7 @@ Follow [the provider guide](docs/providers.md#adding-a-new-provider) for the com
 
 - [Development](DEVELOPMENT.md): setup, code map, and architectural rules
 - [Architecture](docs/architecture.md): runtime flow, responsibilities, and trust boundaries
-- [Product concepts](docs/use-cases/README.md): researched app directory, MVP wedges, and roadmap dependencies
+- [Product ideas for AgentDock forks](docs/use-cases/README.md): researched app directory, MVP wedges, and current implementation caveats
 - [Security](SECURITY.md): threat model, loopback auth, and process hygiene
 - [Protocol v1](docs/protocol-v1.md): normalized events and wire guarantees
 - [Protocol v2](docs/protocol-v2.md): capability negotiation, correlated content, and versioned routes

@@ -21,8 +21,8 @@ those.
 
 ```
 ┌─────────────────────────┐
-│   Renderer (React)        │   window.agentDock.*: currently seven narrow IPC capabilities.
-│                            │   Never sees the daemon's token or base URL.
+│   Renderer (React)        │   window.agentDock.*: explicit narrow IPC capabilities.
+│                            │   Never sees the token; errors may name the base URL.
 └─────────────┬────────────┘
               │ Electron IPC (contextBridge, same machine, no network)
               ▼
@@ -37,7 +37,7 @@ those.
 │   (packages/client)        │   version compatibility check. No Electron dependency;
 │                             │   usable from any Node process. See docs/client-sdk.md.
 └─────────────┬────────────┘
-              │ HTTP + SSE, http://127.0.0.1:<port>, Bearer token, protocol v1
+              │ HTTP + SSE, http://127.0.0.1:<port>, Bearer token, protocols v1 + v2
               ▼
 ┌─────────────────────────┐
 │   Local Daemon             │   Fastify HTTP server. Provider discovery, session
@@ -82,18 +82,17 @@ Nothing depends "sideways" or "up": `apps/daemon` never imports from `apps/deskt
 
 ## Trust boundaries
 
-For the current protocol v1 implementation, three boundaries matter, in decreasing order of "who
-might be hostile":
+Three boundaries matter, in decreasing order of "who might be hostile":
 
 1. **The public internet / an arbitrary webpage → the daemon.** This is the one the whole
    architecture is built around, see [SECURITY.md](../SECURITY.md). The daemon binds
    `127.0.0.1` only, requires a bearer token unknown to any webpage, and never answers a CORS
    preflight, so a malicious page cannot complete a request against it even knowing the token.
 2. **The renderer → Electron main.** The renderer is this repo's own code, not adversarial, but
-   it's still validated as if it might send something malformed: every IPC input is re-checked
-   against the Zod schemas at the `ipcMain.handle` boundary (see [electron.md](electron.md)), and
-   it structurally cannot reach the daemon's token or make an arbitrary daemon call, only the seven
-   functions the preload bridge exposes.
+   it's still validated as if it might send something malformed: IPC inputs are re-checked with
+   shared Zod schemas or narrow explicit validators at the `ipcMain.handle` boundary (see
+   [electron.md](electron.md)), and it structurally cannot reach the daemon's token or make an
+   arbitrary daemon call, only the explicit functions the preload bridge exposes.
 3. **The daemon → the provider host.** Local CLI executables are resolved internally, never from
    request input. The Claude Agent SDK path instead uses the exact packaged, version-checked SDK
    executable outside ASAR. Both paths use argv arrays and the daemon-owned process-tree host,
@@ -102,11 +101,11 @@ might be hostile":
 Explicitly **not** a trust boundary this project defends: another process running as the same OS
 user. See [SECURITY.md](../SECURITY.md#what-this-does-not-claim-to-protect-against).
 
-Protocol v2 adds workspace files, provider SDK/app-server transports, MCP servers, OAuth browser
-flows, and persisted history as explicit boundaries. It also keeps provider permissions, OS
+Protocol v2 makes workspace files, provider SDK/app-server transports, MCP servers, OAuth browser
+flows, and persisted history explicit boundaries. It also keeps provider permissions, OS
 sandboxing, approvals, and worktree isolation as separate states. See the complete
-[v2 boundary inventory](capability-security-v2.md#execution-and-data-boundaries). This is an
-implementation gate, not a claim that v1 already enforces those controls.
+[v2 boundary inventory](capability-security-v2.md#execution-and-data-boundaries). These controls
+apply according to the negotiated v2 transport and evidence; they are not guarantees of legacy v1.
 
 ## Why a separate daemon instead of running the CLI logic in Electron's main process
 
@@ -115,44 +114,35 @@ Three reasons, in order of importance:
 1. **A malicious webpage should never be able to run a coding agent on your machine.** Keeping
    agent execution behind an HTTP+token boundary (see [SECURITY.md](../SECURITY.md)) is a much
    smaller, more auditable surface than "whatever the renderer/main process can reach."
-2. **The daemon has to outlive one specific UI.** A VS Code extension, a CLI client, or a second
-   desktop shell should all be able to talk to the same daemon over the same HTTP+SSE API without
-   re-implementing process management.
+2. **The daemon can run independently of Electron.** The reference desktop owns and stops its
+   sidecar, while a CLI client, VS Code extension, or another shell can run the standalone daemon
+   and use the same HTTP+SSE API without re-implementing process management.
 3. **Testability.** `pnpm daemon` runs and can be curled directly, with no Electron, no display
    server, and no GUI test harness required.
 
 ## Runtime flow: what happens when a user presses "Run"
 
-This is the protocol v1 one-shot flow. The desktop uses protocol v2's interactive supervisor for
-the pinned Claude Agent SDK and Codex app-server when their exact runtime/authentication gates pass;
-the local CLI compatibility paths retain this v1 bridge.
+The reference desktop uses protocol v2:
 
-1. Renderer calls `window.agentDock.createSession({ provider, cwd, prompt })`.
-2. Preload forwards it over IPC to `ipcMain.handle('daemon:create-session', ...)` in `main.ts`.
-3. Main re-validates the input against `createSessionRequestSchema` (a second, independent check;
-   see [electron.md#renderer-trust-assumptions](electron.md#renderer-trust-assumptions)) and calls
-   `client.sessions.create(...)`.
-4. `AgentDockClient` runs its lazy protocol-compatibility check (if not already cached), then
-   `POST /sessions` with the bearer token.
-5. The daemon validates the body again (Zod, server-side; the client's own validation is a
-   different concern, see [client-sdk.md](client-sdk.md)), checks the provider exists and the `cwd`
-   is real, and calls `SessionManager.create()`.
-6. `SessionManager` asks the provider registry for the right `AgentProvider`, generates a session
-   `id`, and calls `providerImpl.startSession(...)`, which resolves the CLI executable and spawns
-   it with an argv array (see [Process management](#process-management) below).
-7. The daemon responds `201` with the initial `AgentSession` record; `main.ts` immediately starts
-   forwarding that session's SSE stream via `forwardSessionEvents()`.
-8. The provider CLI's stdout is parsed line-by-line and normalized into `AgentEvent`s (see
-   [protocol-v1.md](protocol-v1.md)) by the adapter's `parser.ts`.
-9. `SessionManager` stamps each event with `sequence`/`timestamp`, updates the `AgentSession`'s
-   `status`, and broadcasts it to every subscriber of that session's SSE stream.
-10. Main receives each event over its own SSE connection and pushes it to the renderer via
-    `sendToRenderer(mainWindow, 'daemon:session-event', ...)`.
-11. The renderer projects the forwarded envelopes into stable, bounded activity items and renders
-    them in `ActivityTimeline.tsx`, never branching on provider id.
-12. Exactly one of `session.completed` / `session.failed` / `session.cancelled` ends the stream;
-    both the daemon's SSE response and `@agent-dock/client`'s async generator close at that point,
-    with nothing emitted after it.
+1. The renderer calls `window.agentDock.createInteractiveSession(...)` with the provider, working
+   directory, prompt, and requested capabilities.
+2. Preload validates the request, main validates it again at the privileged IPC boundary, and
+   `AgentDockClient` sends authenticated `POST /v2/sessions`.
+3. The daemon resolves the canonical workspace identity, requires current trust, detects the exact
+   provider/auth/runtime scope, negotiates capabilities, and revalidates trust before dispatch.
+4. `SessionManager` records compatibility metadata and the v2 execution graph before provider work.
+   Claude SDK and Codex app-server use the interactive supervisor when their transport gates pass;
+   the v2 compatibility path can wrap a legacy one-shot CLI transport conservatively.
+5. After the provider startup handshake, the daemon returns `AgentSessionV2`. Electron main tracks
+   the session and relays its validated SSE envelopes through the narrow preload bridge.
+6. Approval and question requests go through the interaction broker; command IDs, session IDs, and
+   response correlations are validated before provider dispatch.
+7. The renderer projects provider-neutral envelopes into bounded activity items. Terminal events
+   close the live stream, while normalized v2 history and lineage remain available through the
+   durable execution graph.
+
+The unversioned `POST /sessions` and v1 SSE flow remain as the legacy compatibility API; see
+[protocol-v1.md](protocol-v1.md).
 
 ## Sessions
 
@@ -169,13 +159,14 @@ type AgentSession = {
 };
 ```
 
-A session's `AgentSession` record lives behind a `SessionStore` interface, while its live process
-handle and buffered event history are kept as separate, non-persistable runtime state inside
-`SessionManager`. **Persistence is deliberately out of scope**, see
-[daemon.md#session-lifecycle-sessionmanager-sessionstore](daemon.md#session-lifecycle-sessionmanager-sessionstore)
-for the full interface and rationale. Restarting the daemon loses every session and its event
-history: `resumeProviderSessionId` lets you continue a provider-native thread, but only within the
-same daemon process's lifetime.
+A session's compatibility `AgentSession` record lives behind a `SessionStore` interface. Production
+uses `FileSessionStore`; active records recovered after a restart are marked failed. Live provider
+handles and bounded SSE replay windows remain non-persistable runtime state inside `SessionManager`.
+Protocol v2 stores normalized history, lineage, tombstones, and continuation locks separately in
+`FileExecutionGraphStore`, recovering active executions as interrupted. Legacy v1 replay history is
+not durable. A v1 caller may still supply a provider-native `resumeProviderSessionId` after a
+restart; whether it resumes is determined by the provider, not by an in-process AgentDock record.
+See [daemon.md#session-lifecycle-sessionmanager-sessionstore](daemon.md#session-lifecycle-sessionmanager-sessionstore).
 
 ## Provider capabilities
 
@@ -209,7 +200,8 @@ spawn/parse/normalize lifecycle happens. It:
 - reads stdout through `readLines` (`process/line-reader.ts`), which tolerates a JSON line split
   across chunk boundaries and multiple JSON lines arriving in one chunk, and caps a single line at
   10MB to bound memory
-- captures stderr separately, capped at 200KB, and only surfaces it on a non-zero exit
+- counts stderr bytes without decoding, persisting, logging, or surfacing their contents; a
+  non-zero exit logs only bounded numeric exit metadata
 - kills the whole process tree on cancellation, never just the direct child, see
   [daemon.md#cancellation-and-process-tree-kill](daemon.md#cancellation-and-process-tree-kill)
 - always terminates the event stream with exactly one of `session.completed` / `session.failed` /
@@ -228,7 +220,7 @@ validated app-server transport. Both retain their local one-shot CLI compatibili
 Electron spawns the daemon as a sidecar child process and reads its port + token from a discovery
 file the daemon writes once it's listening; see [SECURITY.md](../SECURITY.md#local-auth-token) for
 why a file handoff instead of a network one, and [daemon.md](daemon.md) for the full operational
-detail (routes, single-instance enforcement, shutdown behavior).
+detail (routes, duplicate-start check and race caveat, shutdown behavior).
 
 This is explicitly **not** the only way to run it: `pnpm daemon` starts the exact same server
 standalone, and nothing in the daemon's code depends on Electron being present. A future
@@ -236,19 +228,19 @@ standalone, and nothing in the daemon's code depends on Electron being present. 
 service/launch agent) is a pure lifecycle change: the HTTP API and desktop client would not need
 to change at all.
 
-## Deliberate omissions (v0.2)
+## Deliberate scope boundaries
 
-These aren't gaps the project failed to notice: each was considered and left out on purpose, and
-each is also listed as out of scope in [CONTRIBUTING.md](../CONTRIBUTING.md#scope):
+These boundaries are intentional and are also reflected in
+[CONTRIBUTING.md](../CONTRIBUTING.md#scope):
 
-- **No persistence.** Sessions and their event history are lost on daemon restart (see
-  [Sessions](#sessions) above), adding it means designing a schema, migrations, and "what happens
-  to a resumed session after a crash," none of which this milestone needed to answer.
-- **One daemon per app id, enforced** (see [Project identity](#project-identity) and
-  [daemon.md#single-instance-behavior](daemon.md#single-instance-behavior)): two different
-  products built on this boilerplate coexist by using different app ids, but two instances of the
-  _same_ product still can't run side by side. A richer scheme (e.g. a random per-launch id) isn't
-  needed for what this boilerplate currently supports.
+- **Local, bounded persistence only.** AgentDock persists redacted compatibility metadata,
+  normalized v2 execution history/lineage, audit and trust state, and selected workflow metadata.
+  It does not provide a hosted database, account sync, or a product backend.
+- **Best-effort duplicate-daemon rejection per app id** (see [Project identity](#project-identity)
+  and [daemon.md#duplicate-start-behavior](daemon.md#duplicate-start-behavior)): a later sequential
+  start sees the live pid and fails, but simultaneous daemon starts are not excluded by an atomic
+  lock. The packaged Electron app has its own single-instance lock; standalone hosts that require a
+  hard guarantee must add equivalent coordination.
 - **No hosted credential UI.** Claude API/cloud credentials come only from the daemon environment;
   AgentDock never collects, stores, or displays them. Claude subscription OAuth remains on the
   separately installed local CLI path and is never admitted to the SDK transport.
@@ -262,17 +254,17 @@ each is also listed as out of scope in [CONTRIBUTING.md](../CONTRIBUTING.md#scop
 **AgentDock is an open-source boilerplate containing a reusable local runtime and internal typed
 workspace SDK boundaries. It is intended to be forked/customized today**, not consumed as a set of
 independently-installable npm packages. This is a decision, written down here so it doesn't have to
-be inferred (AD-03): every workspace package (`shared`, `agent-runtime`, `client`, plus the two
-apps) is `private: true` with `main`/`types` pointing at raw TypeScript source, not a built `dist/`
-with a `files` allowlist: nothing here is set up to be `npm install`-ed from outside this
-workspace.
+be inferred (AD-03): every workspace package is `private: true`. The three library packages point
+`main`/`types` at raw TypeScript for workspace use; the desktop app instead points `main` at its
+built `dist-electron/main.js` and has no `types` field. None has a publish-oriented `files` contract,
+so nothing here is set up to be `npm install`-ed from outside this workspace.
 
 That doesn't make the internal boundaries decorative. `packages/shared`'s types and Zod schemas,
 `AGENT_DOCK_PROTOCOL_VERSION`, and `@agent-dock/client`'s typed surface exist to keep the daemon,
 the client, and the desktop app honest with each other _inside_ this repo (and inside a fork of
 it), a change to the wire format has to go through one shared definition, not get silently
-duplicated three ways. Protocol v1 currently governs the daemon/client pair as shipped together in
-this repository; it is not (yet) a promise to arbitrary external consumers.
+duplicated three ways. Protocols v1 and v2 govern the daemon/client pair as shipped together in this
+repository; they are not yet a package-versioned promise to arbitrary external consumers.
 
 External npm publication is a real option later, but a deliberately deferred one: see
 [client-sdk.md](client-sdk.md#using-it-from-a-workspacefork-not-from-outside-the-repo) for exactly
@@ -284,7 +276,8 @@ package" as an invitation to publish it without that work.
 
 - **Electron's own graceful-shutdown path is best-effort on Windows**, see
   [daemon.md#shutdown](daemon.md#shutdown).
-- **Process-tree cancellation was empirically verified on Windows only**, see
+- **Windows Job Object behavior is exercised in the Windows workflow; POSIX process-group behavior
+  is exercised in Linux CI, while macOS remains unverified**, see
   [SECURITY.md](../SECURITY.md#process-hygiene).
 
 If you're extending this project, [DEVELOPMENT.md](../DEVELOPMENT.md) is the practical

@@ -6,7 +6,8 @@ unversioned protocol v1 routes and types remain available unchanged; see
 [Protocol v1](protocol-v1.md).
 
 The TypeScript types and Zod schemas in `packages/shared/src` are the executable definition of this
-document. Every client request and every daemon response is validated at runtime.
+document. Structured v2 inputs and successful payloads are validated at runtime; raw attachment
+streams and bounded error bodies use route-specific validators.
 
 ## Version discovery
 
@@ -52,6 +53,41 @@ All routes are relative to `http://127.0.0.1:<port>`. Every route except `GET /h
 | `POST /v2/sessions/:sessionId/cancel`   |   `202` | Return `{ status: 'cancelling', sessionId }` when `session.cancel` was selected           |
 | `DELETE /v2/sessions/:sessionId`        |   `204` | Delete an entire terminal lineage                                                         |
 
+The following v2 route families expose the currently implemented trust, audit, integration, and
+workflow control surfaces. Their request and response schemas live in the correspondingly named
+files under `packages/shared/src`; provider-backed operations may return `unsupported` or a
+provider-control error when the selected provider does not implement the operation.
+
+| Route                                                    | Success | Purpose                                                                         |
+| -------------------------------------------------------- | ------: | ------------------------------------------------------------------------------- |
+| `POST /v2/workspaces/inspect`                            |   `200` | Resolve canonical workspace identity and current trust state                    |
+| `PUT /v2/workspaces/:workspaceId/trust`                  |   `200` | Set or revoke trust for the exact workspace incarnation                         |
+| `GET /v2/audit`                                          |   `200` | Read one cursor-paginated page of normalized approval audit entries             |
+| `GET /v2/integrations/mcp`                               |   `200` | Inspect configured MCP servers; see the command/argument warning below          |
+| `POST /v2/integrations/mcp/configure`                    |   `200` | Request one typed MCP configuration action                                      |
+| `POST /v2/integrations/mcp/action`                       |   `200` | Request connect, disconnect, or reload when supported                           |
+| `GET /v2/integrations/mcp/:providerId/:serverId/catalog` |   `200` | Read a bounded MCP tools/resources/prompts catalog                              |
+| `POST /v2/integrations/mcp/oauth`                        |   `200` | Start a token-opaque provider OAuth flow when supported                         |
+| `POST /v2/integrations/mcp/invoke`                       |   `200` | Invoke an exact catalogued tool; current production controls report unsupported |
+| `GET /v2/integrations/components`                        |   `200` | Inspect installed provider skills, plugins, hooks, commands, or agents          |
+| `POST /v2/integrations/components/manage`                |   `200` | Enable or disable an exact installed component when supported                   |
+| `POST /v2/integrations/components/invoke`                |   `200` | Invoke an exact component when its manifest and provider permit it              |
+| `GET /v2/sessions/:sessionId/agents`                     |   `200` | Read the stored provider-neutral subagent graph                                 |
+| `POST /v2/sessions/:sessionId/agents/control`            |   `200` | Request an exact child-agent control action                                     |
+| `POST /v2/worktrees/preview`                             |   `200` | Preview a bounded AgentDock-owned worktree operation                            |
+| `POST /v2/worktrees`                                     |   `201` | Create an AgentDock-owned worktree after explicit copy confirmation             |
+| `GET /v2/worktrees`                                      |   `200` | List AgentDock-owned worktrees                                                  |
+| `POST /v2/worktrees/cleanup`                             |   `200` | Clean up an owned worktree only when its current state is safe                  |
+| `POST /v2/attachments`                                   |   `201` | Stage one bounded attachment from an authenticated byte stream                  |
+| `GET /v2/attachments`                                    |   `200` | List staged attachment metadata                                                 |
+| `POST /v2/attachments/reference`                         |   `200` | Bind staged attachments to an existing session                                  |
+| `POST /v2/workflows/structured/validate`                 |   `200` | Validate caller-supplied output against a bounded JSON Schema                   |
+
+MCP inspection withholds environment, header, bearer-token, and URL values, exposing only their
+presence/classification. The current adapter returns configured stdio `command` and `args` values
+verbatim as public fields without scanning embedded secrets. Do not put credentials in those
+fields, and treat the inspection response as sensitive configuration data.
+
 Protocol v2 has no `cancel-all` route. The unversioned v1 endpoint remains a narrow desktop-shutdown
 mechanism. Command dispatch is available only when the frozen selection includes the command's
 capability and the selected provider transport exposes an interactive session. A legacy one-shot
@@ -64,11 +100,13 @@ has a protocol-specific reason. Important statuses are:
 | -----: | --------------------------------------------------------------------------------------- |
 |  `400` | Malformed body, identifier, provider, directory, cursor, or route/body session mismatch |
 |  `401` | Missing or incorrect bearer token                                                       |
+|  `403` | A trust- or responder-bound operation is not authorized                                 |
 |  `404` | Provider or session does not exist; cancellation also uses this for a terminal session  |
 |  `409` | The operation conflicts with frozen selection, command identity, or session state       |
 |  `413` | Request exceeds the v2 payload bound                                                    |
 |  `422` | A required capability is unavailable; no provider work has started                      |
 |  `429` | Session creation or command limit; client also maps `stream_overflow` here              |
+|  `502` | Provider session startup or a provider-owned integration control operation failed       |
 |  `507` | Durable storage is full and no eligible terminal lineage can make room                  |
 
 ## Durable execution graph
@@ -288,7 +326,9 @@ turn/request correlation for its variant:
 
 Every command carries `commandId`, `sessionId`, and `turnId`. Input commands carry a nonempty
 `content` array; an interrupt has no additional payload. Approval responses carry `requestId` and
-`decision: 'allow_once' | 'deny'`. Question responses carry `requestId` and up to three correlated
+`decision: 'allow_once' | 'allow_session' | 'deny'`. `allow_session` is accepted only for a normal,
+fully classified action eligible for a session-scoped grant; providers still receive a one-shot
+native allow for each request. Question responses carry `requestId` and up to three correlated
 answers.
 
 Interrupt is never an alias for session cancellation. Approval and question responses are accepted
@@ -302,6 +342,13 @@ canonical payload shares the original in-flight or settled result without redisp
 retry therefore receives the same acknowledgement. Reusing it with a different payload returns
 `409 command_id_conflict`. A command outside the frozen selected constraints returns
 `409 command_out_of_bounds` before provider dispatch.
+
+Approval and question responses also require the lease held by the sole live responder stream.
+Open that stream with `X-AgentDock-Responder: 1`, or with
+`client.v2.sessions.events(id, { responder: true })`. The daemon returns the private lease in a
+response header; `@agent-dock/client` retains it in memory and attaches it only to correlated
+approval/question commands. Observer streams receive no lease. A missing, stale, or competing
+lease is rejected before provider dispatch.
 
 The daemon admits at most 64 pending commands or 1 MiB of pending canonical command JSON per
 session; exceeding either limit returns `429 session_backpressure`. It retains up to 1,024 settled
@@ -336,8 +383,9 @@ Provider-native type names are data, never normalized core discriminants. A clie
 
 Events are ordered per session. Exactly one terminal session event is emitted and it is always last.
 `Last-Event-ID: n` resumes at `n + 1`. When a requested sequence is older than
-`earliestSequence`, the daemon returns `409 replay_gap`; the client reloads the current snapshot and
-does not infer omitted events.
+`earliestSequence`, the daemon returns `409 replay_gap`. `@agent-dock/client` surfaces that response
+as `DaemonError` with status `409`; the caller must reload the current snapshot and must not infer
+omitted events.
 
 Each v2 SSE connection has an independent 256-event / 4 MiB queue. A slow subscriber therefore
 cannot stall provider event production or another subscriber. A terminal event closes the
@@ -365,7 +413,6 @@ Limits enforced by the shared schemas, compatibility bridge, and interactive sup
 | Client request/command JSON       |                         1 MiB, depth 16, 1,024 aggregate keys/items |
 | Provider frame / normalized event |                                                               1 MiB |
 | Provider event queue              |                                              5,000 events or 16 MiB |
-| Provider stderr diagnostics       |                                                             200 KiB |
 | Per-subscriber SSE queue          |                                                 256 events or 4 MiB |
 | Pending commands                  |                                                64 commands or 1 MiB |
 | Settled command ledger            |                                                       1,024 entries |
@@ -386,21 +433,30 @@ compatibility bridge retains its v1 process-runner limits.
 ## Current implementation boundary
 
 The current v2 implementation provides shared schemas and negotiation, provider discovery,
-versioned session routes, client APIs, a provider-neutral supervisor, bounded SSE delivery, and a
-narrow Electron bridge. `FakeProvider` exercises the rich interactive path in deterministic tests.
-Compatibility fixtures pin the legacy Claude and Codex CLI paths, plus the fake interactive path,
-to exact provider versions, transports, and fixture sets.
+durable sessions/history, trust and audit stores, versioned routes and client APIs, a
+provider-neutral supervisor, bounded SSE delivery, and narrow Electron/preload methods.
+`FakeProvider` exercises deterministic rich-interaction fixtures. Legacy Claude/Codex replay
+fixtures remain pinned separately from the native-transport conformance harnesses.
 
-The Claude Agent SDK transport is now available when its pinned Windows asset, reviewed
+The Claude Agent SDK transport is available only when its pinned Windows asset, approved
 authentication source, and trusted-workspace requirements are satisfied; the legacy Claude CLI
-compatibility path remains `legacy-one-shot`. Codex app-server is available for its exact validated
-runtime and trust scope, with `legacy-one-shot` retained as its compatibility path. SDK settings,
-MCP, hooks, plugins, skills, agents, and Bash are disabled. The existing React
-renderer still uses the v1 flow. A rich interactive timeline and multi-session UI remain separate work in
-[issues #12](https://github.com/jortega0033/agentdock/issues/12) and
-[#14](https://github.com/jortega0033/agentdock/issues/14).
+compatibility path remains `legacy-one-shot`. Codex app-server is available only for its exact
+validated runtime, authentication, and trusted-workspace scope, with `legacy-one-shot` retained as
+the compatibility path. The Claude SDK launch profile disables project settings, MCP, hooks,
+plugins, skills, agents, and Bash.
+
+The React renderer now uses the v2 flow for provider discovery, durable multi-session history,
+resume/fork/delete, the interactive timeline, approvals/questions, workspace trust, and the exposed
+integration/worktree/subagent panels. Those control surfaces are intentionally uneven: production
+MCP catalog/OAuth/direct invocation and several component or child-agent actions report unsupported;
+attachments can be staged and structured output can be validated, but neither is wired into a
+provider execution request yet.
 
 ## Client example
+
+This example assumes `cwd` was already inspected through `client.v2.workspaces.inspect(cwd)` and
+the user explicitly trusted its current incarnation with `setTrust`; otherwise creation returns
+`409 workspace_untrusted`.
 
 ```ts
 import { AgentDockClient } from '@agent-dock/client';
@@ -415,7 +471,7 @@ const session = await client.v2.sessions.create({
   // Omitting capabilities selects the safe one-shot-compatible default.
 });
 
-for await (const event of client.v2.sessions.events(session.id)) {
+for await (const event of client.v2.sessions.events(session.id, { responder: true })) {
   console.log(event.type, event.sequence);
 }
 ```

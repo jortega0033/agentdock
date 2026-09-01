@@ -23,8 +23,8 @@ directly: it delegates to the shared `runProviderSession()` helper (see
 [architecture.md#process-management](architecture.md#process-management)) and supplies only
 `buildArgs()` and `parseLine()`, the two genuinely provider-specific pure functions.
 
-That paragraph describes the current protocol v1 one-shot adapters. The planned bidirectional
-provider contract and its security gates are defined in
+That paragraph describes the current protocol v1 one-shot adapters. The bidirectional provider
+contract and its security gates are defined in
 [Capability and security model for protocol v2](capability-security-v2.md).
 
 ## Executable discovery
@@ -138,10 +138,11 @@ without provider-specific branches and remain unselected by default.
 
 The complete catalog, legacy mapping, sandbox matrix, workspace trust rules, credential posture,
 retention limits, and fallback boundary live in
-[capability-security-v2.md](capability-security-v2.md). None of those records are advertised by
-the current adapters yet.
+[capability-security-v2.md](capability-security-v2.md). Claude Agent SDK support records are
+advertised only for their exact pinned Windows/auth/trust scope; Codex native support remains gated
+by its conformance evidence.
 
-## Claude Code adapter
+## Claude adapter
 
 `packages/agent-runtime/src/providers/claude/`
 
@@ -168,7 +169,7 @@ the current adapters yet.
   produces several `usage` events, not one; see [Protocol v1](protocol-v1.md) for why a consumer
   should never treat a single `usage` event as a session total.
 - This project intentionally does **not** pass `--include-partial-messages`: without it, Claude
-  Code emits one complete `assistant` message per turn instead of a token-by-token delta stream,
+  CLI emits one complete `assistant` message per turn instead of a token-by-token delta stream,
   which is simpler and more robust to parse for an MVP. Protocol v1 has no token-streaming event
   variant today (an earlier `assistant.delta` placeholder was removed before anything emitted it,
   see [Protocol v1](protocol-v1.md)); a future adapter or CLI flag that wants real token streaming
@@ -178,6 +179,25 @@ Verified manually against a real, already-authenticated `claude` CLI during deve
 project's technical report / commit history for the transcript): the daemon started a session,
 Claude's response and token usage came back as normalized events, and the session reached
 `session.completed` with no API key ever requested.
+
+### Claude transport modes
+
+`AGENT_DOCK_CLAUDE_TRANSPORT` accepts `auto` (default), `sdk`, or `cli`. The `cli` mode is the
+legacy path documented above and remains unchanged. `auto` selects the Claude Agent SDK only for a
+user-provided `ANTHROPIC_API_KEY` or exactly one of the supported Bedrock, Vertex, or Foundry
+configurations. Claude.ai/subscription OAuth and `CLAUDE_CODE_OAUTH_TOKEN` are never eligible for
+the SDK. `sdk` fails closed if its eligibility checks do not pass; there is no cross-auth SDK-to-CLI
+fallback after SDK work is accepted.
+
+The SDK and its Windows executable are pinned to `@anthropic-ai/claude-agent-sdk` **0.3.251** and
+the embedded Claude executable **2.1.251**. Windows packaging stages the executable and notices
+outside Electron's ASAR archive and passes its absolute path to the SDK; it never substitutes a
+PATH-discovered CLI binary.
+
+SDK sessions require a trusted workspace. Settings, MCP, hooks, plugins, skills, and agents are
+disabled, and `Bash` is disabled. AgentDock does not store or log credentials, and only passes
+reviewed local auth configuration to the SDK. Product-facing release branding must use **Claude
+Agent**; distribution and commercial-terms review gates any release packaging change.
 
 ## Codex adapter
 
@@ -247,11 +267,8 @@ functions.
 The runtime now has those provider-neutral additions: an optional `ProviderV2Support` manifest,
 an optional `startInteractiveSession()` factory, a bidirectional transport contract, and a common
 session supervisor for commands, interactions, bounds, accepted-work state, teardown, and terminal
-events. `FakeProvider` exercises this path. `ClaudeProvider` and `CodexProvider` intentionally do
-not implement either optional hook yet, so discovery and session negotiation keep both production
-adapters on `legacy-one-shot`. Issue #8 remains the conformance gate; native Codex and Claude work
-is tracked separately in [issue #10](https://github.com/jortega0033/agentdock/issues/10) and
-[#11](https://github.com/jortega0033/agentdock/issues/11). Rich renderer UI is not part of the
+events. `FakeProvider` and `ClaudeProvider` exercise this path; `CodexProvider` remains on
+`legacy-one-shot` pending its conformance evidence. Rich renderer UI is not part of the
 provider contract or issue #7.
 
 ## Provider contract tests

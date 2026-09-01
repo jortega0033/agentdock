@@ -15,12 +15,30 @@ import {
   providerStatusSchema,
   providerStatusV2Schema,
   providersV2ResponseSchema,
+  sessionContinuationInputV2Schema,
+  sessionEventHistoryV2PageSchema,
+  sessionEventHistoryV2QuerySchema,
   sessionIdParamSchema,
+  sessionListV2PageSchema,
+  sessionListV2QuerySchema,
+  auditReadResponseV2Schema,
+  workspaceInspectRequestV2Schema,
+  workspaceTrustUpdateRequestV2Schema,
+  workspaceTrustViewV2Schema,
+  mcpCatalogV2Schema,
+  mcpConfigureRequestV2Schema,
+  mcpOAuthStartRequestV2Schema,
+  mcpOAuthStatusV2Schema,
+  mcpServerActionRequestV2Schema,
+  mcpServerListV2Schema,
+  mcpToolInvocationRequestV2Schema,
+  mcpToolInvocationResultV2Schema,
   type AgentEventEnvelope,
   type AgentEventV2Envelope,
   type AgentCommandV2,
   type AgentSession,
   type AgentSessionV2,
+  type AuditReadResponseV2,
   type CancelSessionV2Response,
   type CommandAcknowledgementV2,
   type CreateSessionRequest,
@@ -29,6 +47,54 @@ import {
   type ProviderStatus,
   type ProviderStatusV2,
   type ProvidersV2Response,
+  type SessionContinuationInputV2,
+  type SessionEventHistoryV2Page,
+  type SessionEventHistoryV2Query,
+  type SessionListV2Page,
+  type SessionListV2Query,
+  type WorkspaceTrustUpdateRequestV2,
+  type WorkspaceTrustViewV2,
+  type McpCatalogV2,
+  type McpConfigureRequestV2,
+  type McpOAuthStatusV2,
+  type McpServerActionRequestV2,
+  type McpServerListV2,
+  type McpToolInvocationRequestV2,
+  type McpToolInvocationResultV2,
+  providerComponentInvokeRequestV2Schema,
+  providerComponentListRequestV2Schema,
+  providerComponentListV2Schema,
+  providerComponentManageRequestV2Schema,
+  providerComponentOperationResultV2Schema,
+  type ProviderComponentInvokeRequestV2,
+  type ProviderComponentListRequestV2,
+  type ProviderComponentListV2,
+  type ProviderComponentManageRequestV2,
+  type ProviderComponentOperationResultV2,
+  ownedWorktreeListV2Schema,
+  ownedWorktreeV2Schema,
+  subagentControlRequestV2Schema,
+  subagentControlResultV2Schema,
+  subagentGraphV2Schema,
+  worktreeCleanupRequestV2Schema,
+  worktreeCreateRequestV2Schema,
+  worktreePreviewRequestV2Schema,
+  worktreePreviewV2Schema,
+  type OwnedWorktreeV2,
+  type SubagentControlRequestV2,
+  type SubagentGraphV2,
+  type WorktreeCreateRequestV2,
+  type WorktreePreviewRequestV2,
+  type WorktreePreviewV2,
+  ATTACHMENT_LIMITS_V2,
+  attachmentListV2Schema,
+  attachmentMetadataV2Schema,
+  attachmentReferenceRequestV2Schema,
+  structuredWorkflowRequestV2Schema,
+  structuredWorkflowResultV2Schema,
+  type AttachmentMetadataV2,
+  type StructuredWorkflowRequestV2,
+  type StructuredWorkflowResultV2,
 } from '@agent-dock/shared';
 import {
   DaemonError,
@@ -61,11 +127,29 @@ export interface SessionEventsOptions {
   signal?: AbortSignal;
   /** Resume from the SSE `id:` after this value, instead of a full replay from the start. */
   lastEventId?: string;
+  /** Claims the sole interaction-responder stream for this session. Observers should omit it. */
+  responder?: boolean;
 }
 
 export interface SessionRequestOptions {
   signal?: AbortSignal;
 }
+
+export interface AuditReadOptions {
+  cursor?: string;
+  limit?: number;
+  sessionId?: string;
+}
+
+export interface AttachmentUploadInput {
+  fileName: string;
+  size: number;
+  stream: unknown;
+  sessionId?: string;
+}
+
+export type SessionListV2Options = SessionListV2Query;
+export type SessionEventHistoryV2Options = SessionEventHistoryV2Query;
 
 interface CompatibilityResult {
   health: HealthResponse;
@@ -75,6 +159,7 @@ interface CompatibilityResult {
 
 const PROTOCOL_V2 = 2;
 const MAX_V2_SSE_FRAME_BYTES = 1024 * 1024;
+const RESPONDER_LEASE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const CLIENT_SUPPORTED_PROTOCOL_VERSIONS: readonly number[] =
   AGENT_DOCK_SUPPORTED_PROTOCOL_VERSIONS;
 
@@ -96,6 +181,7 @@ export class AgentDockClient {
   private readonly token: string;
   private readonly fetchImpl: typeof fetch;
   private compatibilityCheck: Promise<CompatibilityResult> | undefined;
+  private readonly responderLeases = new Map<string, string>();
 
   readonly providers = {
     list: (): Promise<ProviderStatus[]> => this.listProviders(),
@@ -128,7 +214,24 @@ export class AgentDockClient {
         input: CreateSessionV2Request,
         options?: SessionRequestOptions,
       ): Promise<AgentSessionV2> => this.createSessionV2(input, options),
+      list: (options?: SessionListV2Options): Promise<SessionListV2Page> =>
+        this.listSessionsV2(options),
       get: (id: string): Promise<AgentSessionV2> => this.getSessionV2(id),
+      history: (
+        id: string,
+        options?: SessionEventHistoryV2Options,
+      ): Promise<SessionEventHistoryV2Page> => this.getSessionEventHistoryV2(id, options),
+      resume: (
+        parentSessionId: string,
+        input: SessionContinuationInputV2,
+        options?: SessionRequestOptions,
+      ): Promise<AgentSessionV2> =>
+        this.continueSessionV2(parentSessionId, 'resume', input, options),
+      fork: (
+        parentSessionId: string,
+        input: SessionContinuationInputV2,
+        options?: SessionRequestOptions,
+      ): Promise<AgentSessionV2> => this.continueSessionV2(parentSessionId, 'fork', input, options),
       events: (
         id: string,
         options?: SessionEventsOptions,
@@ -139,6 +242,58 @@ export class AgentDockClient {
       cancel: (id: string, options?: SessionRequestOptions): Promise<CancelSessionV2Response> =>
         this.cancelSessionV2(id, options),
       delete: (id: string): Promise<void> => this.deleteSessionV2(id),
+    },
+    workspaces: {
+      inspect: (cwd: string): Promise<WorkspaceTrustViewV2> => this.inspectWorkspaceV2(cwd),
+      setTrust: (
+        workspaceId: string,
+        input: WorkspaceTrustUpdateRequestV2,
+      ): Promise<WorkspaceTrustViewV2> => this.setWorkspaceTrustV2(workspaceId, input),
+    },
+    audit: {
+      list: (options?: AuditReadOptions): Promise<AuditReadResponseV2> => this.readAuditV2(options),
+    },
+    agents: {
+      graph: (sessionId: string): Promise<SubagentGraphV2> => this.getSubagentGraphV2(sessionId),
+      control: (input: SubagentControlRequestV2) => this.controlSubagentV2(input),
+    },
+    worktrees: {
+      preview: (input: WorktreePreviewRequestV2): Promise<WorktreePreviewV2> => this.previewWorktreeV2(input),
+      create: (input: WorktreeCreateRequestV2): Promise<OwnedWorktreeV2> => this.createWorktreeV2(input),
+      list: (): Promise<OwnedWorktreeV2[]> => this.listWorktreesV2(),
+      cleanup: (worktreeId: string): Promise<OwnedWorktreeV2> => this.cleanupWorktreeV2(worktreeId),
+    },
+    attachments: {
+      upload: (input: AttachmentUploadInput): Promise<AttachmentMetadataV2> => this.uploadAttachmentV2(input),
+      list: (): Promise<AttachmentMetadataV2[]> => this.listAttachmentsV2(),
+      reference: (attachmentIds: string[], sessionId: string): Promise<AttachmentMetadataV2[]> => this.referenceAttachmentsV2(attachmentIds, sessionId),
+    },
+    structured: {
+      validate: (input: StructuredWorkflowRequestV2): Promise<StructuredWorkflowResultV2> => this.validateStructuredWorkflowV2(input),
+    },
+    integrations: {
+      mcp: {
+        list: (provider: ProviderId, cwd: string): Promise<McpServerListV2> =>
+          this.listMcpServersV2(provider, cwd),
+        configure: (input: McpConfigureRequestV2): Promise<McpServerListV2> =>
+          this.configureMcpV2(input),
+        action: (input: McpServerActionRequestV2): Promise<McpServerListV2> =>
+          this.actionMcpV2(input),
+        catalog: (provider: ProviderId, serverId: string, cwd: string): Promise<McpCatalogV2> =>
+          this.getMcpCatalogV2(provider, serverId, cwd),
+        oauth: (provider: ProviderId, serverId: string, cwd: string): Promise<McpOAuthStatusV2> =>
+          this.startMcpOAuthV2(provider, serverId, cwd),
+        invoke: (input: McpToolInvocationRequestV2): Promise<McpToolInvocationResultV2> =>
+          this.invokeMcpToolV2(input),
+      },
+      components: {
+        list: (input: ProviderComponentListRequestV2): Promise<ProviderComponentListV2> =>
+          this.listProviderComponentsV2(input),
+        manage: (input: ProviderComponentManageRequestV2): Promise<ProviderComponentOperationResultV2> =>
+          this.manageProviderComponentV2(input),
+        invoke: (input: ProviderComponentInvokeRequestV2): Promise<ProviderComponentOperationResultV2> =>
+          this.invokeProviderComponentV2(input),
+      },
     },
   };
 
@@ -231,7 +386,7 @@ export class AgentDockClient {
     protocolVersion: number,
     path: string,
     init: RequestInit = {},
-    opts: { notFound?: () => AgentDockClientError } = {},
+    opts: { notFound?: () => AgentDockClientError; notFoundCode?: string } = {},
   ): Promise<Response> {
     await this.ensureProtocolVersion(protocolVersion);
 
@@ -251,13 +406,21 @@ export class AgentDockClient {
     }
 
     if (res.status === 401) throw new UnauthorizedError();
-    if (res.status === 404 && opts.notFound) throw opts.notFound();
+
+    let body: unknown;
+    let bodyRead = false;
+    if (res.status === 404 && opts.notFound) {
+      if (opts.notFoundCode === undefined) throw opts.notFound();
+      body = await res.json().catch(() => undefined);
+      bodyRead = true;
+      if (daemonErrorCode(body) === opts.notFoundCode) throw opts.notFound();
+    }
 
     if (!res.ok) {
-      const body = await res.json().catch(() => undefined);
+      if (!bodyRead) body = await res.json().catch(() => undefined);
       const message = daemonErrorMessage(body) ?? `daemon request failed with status ${res.status}`;
       if (res.status === 400) throw new ValidationError(message);
-      throw new DaemonError(message, res.status);
+      throw new DaemonError(message, res.status, daemonErrorCode(body));
     }
     return res;
   }
@@ -361,7 +524,11 @@ export class AgentDockClient {
     schema: RuntimeSchema<T>,
     label: string,
     init: RequestInit = {},
-    opts: { expectedStatus: number; notFound?: () => AgentDockClientError },
+    opts: {
+      expectedStatus: number;
+      notFound?: () => AgentDockClientError;
+      notFoundCode?: string;
+    },
   ): Promise<T> {
     const res = await this.fetchAuthenticated(PROTOCOL_V2, path, init, opts);
     if (res.status !== opts.expectedStatus) {
@@ -419,6 +586,129 @@ export class AgentDockClient {
     );
   }
 
+  private async listMcpServersV2(provider: ProviderId, cwd: string): Promise<McpServerListV2> {
+    const providerId = validateInput(providerIdSchema, provider, 'MCP provider id');
+    if (typeof cwd !== 'string' || cwd.length === 0 || cwd.length > 32_768) {
+      throw new ValidationError('MCP workspace path is invalid');
+    }
+    const query = new URLSearchParams({ provider: providerId, cwd });
+    return this.requestV2(
+      `/v2/integrations/mcp?${query.toString()}`,
+      mcpServerListV2Schema,
+      'protocol-v2 MCP server list',
+      {},
+      { expectedStatus: 200 },
+    );
+  }
+
+  private async configureMcpV2(input: McpConfigureRequestV2): Promise<McpServerListV2> {
+    const parsed = validateInput(mcpConfigureRequestV2Schema, input, 'MCP configuration request');
+    return this.requestV2('/v2/integrations/mcp/configure', mcpServerListV2Schema, 'protocol-v2 MCP server list', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed),
+    }, { expectedStatus: 200 });
+  }
+
+  private async actionMcpV2(input: McpServerActionRequestV2): Promise<McpServerListV2> {
+    const parsed = validateInput(mcpServerActionRequestV2Schema, input, 'MCP server action');
+    return this.requestV2('/v2/integrations/mcp/action', mcpServerListV2Schema, 'protocol-v2 MCP server list', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed),
+    }, { expectedStatus: 200 });
+  }
+
+  private async getMcpCatalogV2(provider: ProviderId, serverId: string, cwd: string): Promise<McpCatalogV2> {
+    const providerId = validateInput(providerIdSchema, provider, 'MCP provider id');
+    if (!/^[A-Za-z0-9._:-]{1,256}$/.test(serverId) || !cwd || cwd.length > 32_768) {
+      throw new ValidationError('MCP catalog request is invalid');
+    }
+    return this.requestV2(`/v2/integrations/mcp/${encodeURIComponent(providerId)}/${encodeURIComponent(serverId)}/catalog?${new URLSearchParams({ cwd }).toString()}`, mcpCatalogV2Schema, 'protocol-v2 MCP catalog', {}, { expectedStatus: 200 });
+  }
+
+  private async startMcpOAuthV2(provider: ProviderId, serverId: string, cwd: string): Promise<McpOAuthStatusV2> {
+    const parsed = validateInput(mcpOAuthStartRequestV2Schema, { provider, serverId, cwd }, 'MCP OAuth request');
+    return this.requestV2('/v2/integrations/mcp/oauth', mcpOAuthStatusV2Schema, 'protocol-v2 MCP OAuth status', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed),
+    }, { expectedStatus: 200 });
+  }
+
+  private async invokeMcpToolV2(input: McpToolInvocationRequestV2): Promise<McpToolInvocationResultV2> {
+    const parsed = validateInput(mcpToolInvocationRequestV2Schema, input, 'MCP tool invocation');
+    return this.requestV2('/v2/integrations/mcp/invoke', mcpToolInvocationResultV2Schema, 'protocol-v2 MCP tool result', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed),
+    }, { expectedStatus: 200 });
+  }
+
+  private async listProviderComponentsV2(input: ProviderComponentListRequestV2): Promise<ProviderComponentListV2> {
+    const parsed = validateInput(providerComponentListRequestV2Schema, input, 'provider component inspection');
+    const query = new URLSearchParams({ provider: parsed.provider, cwd: parsed.cwd });
+    if (parsed.kind) query.set('kind', parsed.kind);
+    return this.requestV2(`/v2/integrations/components?${query.toString()}`, providerComponentListV2Schema, 'protocol-v2 provider component list', {}, { expectedStatus: 200 });
+  }
+
+  private async manageProviderComponentV2(input: ProviderComponentManageRequestV2): Promise<ProviderComponentOperationResultV2> {
+    const parsed = validateInput(providerComponentManageRequestV2Schema, input, 'provider component management');
+    return this.requestV2('/v2/integrations/components/manage', providerComponentOperationResultV2Schema, 'protocol-v2 provider component result', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }, { expectedStatus: 200 });
+  }
+
+  private async invokeProviderComponentV2(input: ProviderComponentInvokeRequestV2): Promise<ProviderComponentOperationResultV2> {
+    const parsed = validateInput(providerComponentInvokeRequestV2Schema, input, 'provider component invocation');
+    return this.requestV2('/v2/integrations/components/invoke', providerComponentOperationResultV2Schema, 'protocol-v2 provider component result', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }, { expectedStatus: 200 });
+  }
+
+  private async getSubagentGraphV2(id: string): Promise<SubagentGraphV2> {
+    const sessionId = validateSessionIdV2(id);
+    return this.requestV2(`/v2/sessions/${encodeURIComponent(sessionId)}/agents`, subagentGraphV2Schema, 'protocol-v2 subagent graph', {}, { expectedStatus: 200 });
+  }
+
+  private async controlSubagentV2(input: SubagentControlRequestV2) {
+    const parsed = validateInput(subagentControlRequestV2Schema, input, 'subagent control request');
+    return this.requestV2(`/v2/sessions/${encodeURIComponent(parsed.sessionId)}/agents/control`, subagentControlResultV2Schema, 'protocol-v2 subagent control result', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }, { expectedStatus: 200 });
+  }
+
+  private async previewWorktreeV2(input: WorktreePreviewRequestV2): Promise<WorktreePreviewV2> {
+    const parsed = validateInput(worktreePreviewRequestV2Schema, input, 'worktree preview request');
+    return this.requestV2('/v2/worktrees/preview', worktreePreviewV2Schema, 'protocol-v2 worktree preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }, { expectedStatus: 200 });
+  }
+
+  private async createWorktreeV2(input: WorktreeCreateRequestV2): Promise<OwnedWorktreeV2> {
+    const parsed = validateInput(worktreeCreateRequestV2Schema, input, 'worktree create request');
+    return this.requestV2('/v2/worktrees', ownedWorktreeV2Schema, 'protocol-v2 owned worktree', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }, { expectedStatus: 201 });
+  }
+
+  private async listWorktreesV2(): Promise<OwnedWorktreeV2[]> {
+    return (await this.requestV2('/v2/worktrees', ownedWorktreeListV2Schema, 'protocol-v2 owned worktrees', {}, { expectedStatus: 200 })).worktrees;
+  }
+
+  private async cleanupWorktreeV2(worktreeId: string): Promise<OwnedWorktreeV2> {
+    const parsed = validateInput(worktreeCleanupRequestV2Schema, { worktreeId }, 'worktree cleanup request');
+    return this.requestV2('/v2/worktrees/cleanup', ownedWorktreeV2Schema, 'protocol-v2 owned worktree', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }, { expectedStatus: 200 });
+  }
+
+  private async uploadAttachmentV2(input: AttachmentUploadInput): Promise<AttachmentMetadataV2> {
+    if (!input.fileName || input.fileName.length > 255 || !Number.isInteger(input.size) || input.size < 0 || input.size > ATTACHMENT_LIMITS_V2.maxFileBytes) throw new ValidationError('Attachment selection is invalid');
+    const res = await this.fetchAuthenticated(PROTOCOL_V2, '/v2/attachments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(input.size), 'X-AgentDock-Filename': encodeURIComponent(input.fileName), ...(input.sessionId ? { 'X-AgentDock-Session-Id': validateSessionIdV2(input.sessionId) } : {}) },
+      body: input.stream as RequestInit['body'],
+      duplex: 'half',
+    } as RequestInit);
+    if (res.status !== 201) throw new ValidationError(`daemon returned status ${res.status} for attachment upload`);
+    return validate(attachmentMetadataV2Schema, await res.json().catch(() => undefined), 'attachment metadata');
+  }
+
+  private async listAttachmentsV2(): Promise<AttachmentMetadataV2[]> {
+    return (await this.requestV2('/v2/attachments', attachmentListV2Schema, 'protocol-v2 attachments', {}, { expectedStatus: 200 })).attachments;
+  }
+
+  private async referenceAttachmentsV2(attachmentIds: string[], sessionId: string): Promise<AttachmentMetadataV2[]> {
+    const parsed = validateInput(attachmentReferenceRequestV2Schema, { attachmentIds, sessionId }, 'attachment reference request');
+    return (await this.requestV2('/v2/attachments/reference', attachmentListV2Schema, 'protocol-v2 attachments', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }, { expectedStatus: 200 })).attachments;
+  }
+
+  private async validateStructuredWorkflowV2(input: StructuredWorkflowRequestV2): Promise<StructuredWorkflowResultV2> {
+    const parsed = validateInput(structuredWorkflowRequestV2Schema, input, 'structured workflow request');
+    return this.requestV2('/v2/workflows/structured/validate', structuredWorkflowResultV2Schema, 'protocol-v2 structured workflow result', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }, { expectedStatus: 200 });
+  }
+
   private async createSessionV2(
     input: CreateSessionV2Request,
     options: SessionRequestOptions = {},
@@ -453,6 +743,78 @@ export class AgentDockClient {
     );
   }
 
+  private async listSessionsV2(options: SessionListV2Options = {}): Promise<SessionListV2Page> {
+    const parsed = validateInput(
+      sessionListV2QuerySchema,
+      options,
+      'protocol-v2 session list query',
+    );
+    const query = new URLSearchParams();
+    if (parsed.cursor !== undefined) query.set('cursor', parsed.cursor);
+    if (parsed.limit !== undefined) query.set('limit', String(parsed.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : '';
+    return this.requestV2(
+      `/v2/sessions${suffix}`,
+      sessionListV2PageSchema,
+      'protocol-v2 session page',
+      {},
+      { expectedStatus: 200 },
+    );
+  }
+
+  private async getSessionEventHistoryV2(
+    id: string,
+    options: SessionEventHistoryV2Options = {},
+  ): Promise<SessionEventHistoryV2Page> {
+    const sessionId = validateSessionIdV2(id);
+    const parsed = validateInput(
+      sessionEventHistoryV2QuerySchema,
+      options,
+      'protocol-v2 session event history query',
+    );
+    const query = new URLSearchParams();
+    if (parsed.cursor !== undefined) query.set('cursor', parsed.cursor);
+    if (parsed.limit !== undefined) query.set('limit', String(parsed.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : '';
+    return this.requestV2(
+      `/v2/sessions/${encodeURIComponent(sessionId)}/history${suffix}`,
+      sessionEventHistoryV2PageSchema,
+      'protocol-v2 session event history page',
+      {},
+      { expectedStatus: 200, notFound: () => new SessionNotFoundError(sessionId) },
+    );
+  }
+
+  private async continueSessionV2(
+    parentSessionId: string,
+    kind: 'resume' | 'fork',
+    input: SessionContinuationInputV2,
+    options: SessionRequestOptions = {},
+  ): Promise<AgentSessionV2> {
+    const sessionId = validateSessionIdV2(parentSessionId);
+    const parsed = validateInput(
+      sessionContinuationInputV2Schema,
+      input,
+      `protocol-v2 session ${kind} request`,
+    );
+    return this.requestV2(
+      `/v2/sessions/${encodeURIComponent(sessionId)}/${kind}`,
+      agentSessionV2Schema,
+      'protocol-v2 session',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsed),
+        signal: options.signal,
+      },
+      {
+        expectedStatus: 201,
+        notFound: () => new SessionNotFoundError(sessionId),
+        notFoundCode: 'session_not_found',
+      },
+    );
+  }
+
   private async *streamSessionEventsV2(
     id: string,
     options: SessionEventsOptions = {},
@@ -465,6 +827,7 @@ export class AgentDockClient {
 
     const headers: Record<string, string> = { Authorization: `Bearer ${this.token}` };
     if (options.lastEventId) headers['Last-Event-ID'] = options.lastEventId;
+    if (options.responder) headers['X-AgentDock-Responder'] = '1';
 
     let res: Response;
     try {
@@ -505,42 +868,57 @@ export class AgentDockClient {
       );
     }
 
-    for await (const event of parseSseStream(res.body, {
-      schema: agentEventOrStreamErrorV2Schema,
-      label: 'AgentEvent v2',
-      signal: options.signal,
-      maxFrameBytes: MAX_V2_SSE_FRAME_BYTES,
-      fatalUtf8: true,
-      rejectUnterminatedFrame: true,
-      validateEvent: (event, frame) => {
-        if (event.type === 'stream.error') return;
-        if (event.sessionId !== sessionId) {
-          throw new ValidationError(
-            `received an AgentEvent v2 for session ${event.sessionId} on the ${sessionId} stream`,
-          );
+    const responderLease = options.responder
+      ? res.headers.get('X-AgentDock-Responder-Lease')
+      : null;
+    if (options.responder && (!responderLease || !RESPONDER_LEASE_PATTERN.test(responderLease))) {
+      await res.body.cancel().catch(() => undefined);
+      throw new ValidationError('daemon returned an invalid protocol-v2 responder lease');
+    }
+    if (responderLease) this.responderLeases.set(sessionId, responderLease);
+
+    try {
+      for await (const event of parseSseStream(res.body, {
+        schema: agentEventOrStreamErrorV2Schema,
+        label: 'AgentEvent v2',
+        signal: options.signal,
+        maxFrameBytes: MAX_V2_SSE_FRAME_BYTES,
+        fatalUtf8: true,
+        rejectUnterminatedFrame: true,
+        validateEvent: (event, frame) => {
+          if (event.type === 'stream.error') return;
+          if (event.sessionId !== sessionId) {
+            throw new ValidationError(
+              `received an AgentEvent v2 for session ${event.sessionId} on the ${sessionId} stream`,
+            );
+          }
+          if (frame.id === undefined) {
+            throw new ValidationError('received an AgentEvent v2 SSE frame without an id');
+          }
+          if (frame.id !== String(event.sequence)) {
+            throw new ValidationError(
+              `received AgentEvent v2 SSE id ${frame.id} for sequence ${event.sequence}`,
+            );
+          }
+          if (previousSequence !== undefined && event.sequence <= previousSequence) {
+            throw new ValidationError(
+              `received non-monotonic AgentEvent v2 sequence ${event.sequence} after ${previousSequence}`,
+            );
+          }
+          previousSequence = event.sequence;
+        },
+      })) {
+        if (event.type === 'stream.error') {
+          const cursor =
+            event.lastSequence === undefined ? '' : ` after sequence ${event.lastSequence}`;
+          throw new DaemonError(`protocol-v2 event stream overflowed${cursor}`, 429);
         }
-        if (frame.id === undefined) {
-          throw new ValidationError('received an AgentEvent v2 SSE frame without an id');
-        }
-        if (frame.id !== String(event.sequence)) {
-          throw new ValidationError(
-            `received AgentEvent v2 SSE id ${frame.id} for sequence ${event.sequence}`,
-          );
-        }
-        if (previousSequence !== undefined && event.sequence <= previousSequence) {
-          throw new ValidationError(
-            `received non-monotonic AgentEvent v2 sequence ${event.sequence} after ${previousSequence}`,
-          );
-        }
-        previousSequence = event.sequence;
-      },
-    })) {
-      if (event.type === 'stream.error') {
-        const cursor =
-          event.lastSequence === undefined ? '' : ` after sequence ${event.lastSequence}`;
-        throw new DaemonError(`protocol-v2 event stream overflowed${cursor}`, 429);
+        yield event;
       }
-      yield event;
+    } finally {
+      if (responderLease && this.responderLeases.get(sessionId) === responderLease) {
+        this.responderLeases.delete(sessionId);
+      }
     }
   }
 
@@ -552,7 +930,16 @@ export class AgentDockClient {
       'protocol-v2 command acknowledgement',
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...((parsedCommand.type === 'approval.respond' ||
+            parsedCommand.type === 'question.respond') &&
+          this.responderLeases.has(parsedCommand.sessionId)
+            ? {
+                'X-AgentDock-Responder-Lease': this.responderLeases.get(parsedCommand.sessionId)!,
+              }
+            : {}),
+        },
         body: JSON.stringify(parsedCommand),
       },
       {
@@ -593,6 +980,75 @@ export class AgentDockClient {
       `/v2/sessions/${encodeURIComponent(sessionId)}`,
       { method: 'DELETE' },
       { notFound: () => new SessionNotFoundError(sessionId) },
+    );
+  }
+
+  private async inspectWorkspaceV2(cwd: string): Promise<WorkspaceTrustViewV2> {
+    const input = validateInput(
+      workspaceInspectRequestV2Schema,
+      { cwd },
+      'protocol-v2 workspace inspection',
+    );
+    return this.requestV2(
+      '/v2/workspaces/inspect',
+      workspaceTrustViewV2Schema,
+      'protocol-v2 workspace trust view',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      },
+      { expectedStatus: 200 },
+    );
+  }
+
+  private async setWorkspaceTrustV2(
+    workspaceId: string,
+    input: WorkspaceTrustUpdateRequestV2,
+  ): Promise<WorkspaceTrustViewV2> {
+    if (!/^[a-f0-9]{64}$/.test(workspaceId)) {
+      throw new ValidationError('invalid protocol-v2 workspace id');
+    }
+    const parsed = validateInput(
+      workspaceTrustUpdateRequestV2Schema,
+      input,
+      'protocol-v2 workspace trust update',
+    );
+    return this.requestV2(
+      `/v2/workspaces/${workspaceId}/trust`,
+      workspaceTrustViewV2Schema,
+      'protocol-v2 workspace trust view',
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsed),
+      },
+      { expectedStatus: 200 },
+    );
+  }
+
+  private async readAuditV2(options: AuditReadOptions = {}): Promise<AuditReadResponseV2> {
+    if (
+      options.limit !== undefined &&
+      (!Number.isInteger(options.limit) || options.limit < 1 || options.limit > 100)
+    ) {
+      throw new ValidationError('protocol-v2 audit limit must be between 1 and 100');
+    }
+    if (options.cursor !== undefined && !/^[A-Za-z0-9_-]{1,256}$/.test(options.cursor)) {
+      throw new ValidationError('invalid protocol-v2 audit cursor');
+    }
+    if (options.sessionId !== undefined) validateSessionIdV2(options.sessionId);
+    const query = new URLSearchParams();
+    if (options.cursor !== undefined) query.set('cursor', options.cursor);
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    if (options.sessionId !== undefined) query.set('sessionId', options.sessionId);
+    const suffix = query.size > 0 ? `?${query.toString()}` : '';
+    return this.requestV2(
+      `/v2/audit${suffix}`,
+      auditReadResponseV2Schema,
+      'protocol-v2 audit page',
+      {},
+      { expectedStatus: 200 },
     );
   }
 }
@@ -645,6 +1101,16 @@ function daemonErrorMessage(body: unknown): string | undefined {
     if (typeof message === 'string') return message;
   }
   return undefined;
+}
+
+function daemonErrorCode(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const code = (body as { code?: unknown }).code;
+  if (typeof code === 'string') return code;
+  const error = (body as { error?: unknown }).error;
+  if (!error || typeof error !== 'object') return undefined;
+  const nestedCode = (error as { code?: unknown }).code;
+  return typeof nestedCode === 'string' ? nestedCode : undefined;
 }
 
 function errorMessage(err: unknown): string {

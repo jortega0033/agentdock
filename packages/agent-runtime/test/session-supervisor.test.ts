@@ -11,6 +11,7 @@ import {
   InteractiveSessionError,
   superviseInteractiveSession,
 } from '../src/providers/common/session-supervisor.js';
+import { ProviderCommandRejectedError } from '../src/types.js';
 import type {
   AcceptedWorkState,
   InteractiveProviderTransport,
@@ -595,6 +596,147 @@ describe('interactive session supervisor', () => {
     ).toHaveLength(1);
   });
 
+  it('ignores provider confirmation data during daemon-owned response dispatch', async () => {
+    const accepted = deferred<void>();
+    const transport = new MemoryTransport({
+      send: async () => {
+        transport.emit({
+          type: 'question.resolved',
+          turnId: TURN_ID,
+          requestId: REQUEST_ID,
+          answers: [{ questionId: QUESTION_ID, value: 'provider answer' }],
+        });
+        await accepted.promise;
+      },
+    });
+    const handle = await superviseInteractiveSession(transport, {
+      ...START_OPTIONS,
+      interactionOwner: 'daemon',
+    });
+    await startActiveSession(transport, handle);
+    transport.emit(questionRequest());
+    await nextEvent(handle.events);
+
+    const sending = handle.send({
+      type: 'question.respond',
+      commandId: COMMAND_ID,
+      sessionId: SESSION_ID,
+      turnId: TURN_ID,
+      requestId: REQUEST_ID,
+      answers: [{ questionId: QUESTION_ID, value: 'daemon answer' }],
+    });
+
+    accepted.resolve();
+    await sending;
+    expect(await nextEvent(handle.events)).toMatchObject({
+      type: 'question.resolved',
+      requestId: REQUEST_ID,
+      answers: [{ value: 'daemon answer' }],
+    });
+
+    await handle.close();
+    await collectRemaining(handle.events);
+  });
+
+  it('cannot replace a daemon-owned denial with a provider-authored allow', async () => {
+    const transport = new MemoryTransport({
+      send: async () => {
+        transport.emit({
+          type: 'approval.resolved',
+          turnId: TURN_ID,
+          requestId: REQUEST_ID,
+          decision: 'allowed',
+          actor: 'user',
+        });
+      },
+    });
+    const handle = await superviseInteractiveSession(transport, {
+      ...START_OPTIONS,
+      interactionOwner: 'daemon',
+    });
+    await startActiveSession(transport, handle);
+    transport.emit({
+      type: 'approval.requested',
+      turnId: TURN_ID,
+      requestId: REQUEST_ID,
+      title: 'Allow?',
+      action: 'write',
+      target: 'workspace',
+      possibleEffects: ['filesystem_write'],
+      effectsComplete: true,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    await nextEvent(handle.events);
+
+    await handle.send({
+      type: 'approval.respond',
+      commandId: COMMAND_ID,
+      sessionId: SESSION_ID,
+      turnId: TURN_ID,
+      requestId: REQUEST_ID,
+      decision: 'deny',
+    });
+
+    expect(await nextEvent(handle.events)).toMatchObject({
+      type: 'approval.resolved',
+      requestId: REQUEST_ID,
+      decision: 'denied',
+    });
+    await handle.close();
+    const remaining = await collectRemaining(handle.events);
+    expect(remaining).not.toContainEqual(
+      expect.objectContaining({ type: 'approval.resolved', decision: 'allowed' }),
+    );
+  });
+
+  it('fails closed when a provider allows a pending daemon-owned approval', async () => {
+    const transport = new MemoryTransport();
+    const handle = await superviseInteractiveSession(transport, {
+      ...START_OPTIONS,
+      interactionOwner: 'daemon',
+    });
+    await startActiveSession(transport, handle);
+    transport.emit({
+      type: 'approval.requested',
+      turnId: TURN_ID,
+      requestId: REQUEST_ID,
+      title: 'Allow?',
+      action: 'read',
+      target: 'workspace',
+      possibleEffects: ['read'],
+      effectsComplete: true,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    expect(await nextEvent(handle.events)).toMatchObject({
+      type: 'approval.requested',
+      requestId: REQUEST_ID,
+    });
+
+    transport.emit({
+      type: 'approval.resolved',
+      turnId: TURN_ID,
+      requestId: REQUEST_ID,
+      decision: 'allowed',
+      actor: 'user',
+    });
+
+    const events = await collectRemaining(handle.events);
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ type: 'approval.resolved', decision: 'allowed' }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'approval.resolved',
+        requestId: REQUEST_ID,
+        decision: 'denied',
+      }),
+    );
+    expect(terminalEvents(events)).toEqual([
+      expect.objectContaining({ type: 'session.failed', code: 'provider_correlation_error' }),
+    ]);
+    expect(transport.sent).toHaveLength(0);
+  });
+
   it('fails once when a provider resolves an unknown interaction', async () => {
     const transport = new MemoryTransport();
     const handle = await superviseInteractiveSession(transport, START_OPTIONS);
@@ -709,6 +851,46 @@ describe('interactive session supervisor', () => {
     await collectRemaining(handle.events);
   });
 
+  it('keeps a recoverably rejected question response retryable without closing the session', async () => {
+    let attempts = 0;
+    const transport = new MemoryTransport({
+      send: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new ProviderCommandRejectedError('opaque answer did not match');
+        }
+      },
+    });
+    const handle = await superviseInteractiveSession(transport, START_OPTIONS);
+    await startActiveSession(transport, handle);
+    transport.emit(questionRequest());
+    expect(await nextEvent(handle.events)).toMatchObject({
+      type: 'question.requested',
+      requestId: REQUEST_ID,
+    });
+    const response: AgentCommandV2 = {
+      type: 'question.respond',
+      commandId: COMMAND_ID,
+      sessionId: SESSION_ID,
+      turnId: TURN_ID,
+      requestId: REQUEST_ID,
+      answers: [{ questionId: QUESTION_ID, value: 'answer' }],
+    };
+
+    await expect(handle.send(response)).rejects.toMatchObject({ code: 'command_rejected' });
+    expect(transport.closeCalls).toBe(0);
+    await handle.send(response);
+    expect(await nextEvent(handle.events)).toMatchObject({
+      type: 'question.resolved',
+      requestId: REQUEST_ID,
+    });
+    expect(transport.sent).toHaveLength(2);
+    expect(transport.closeCalls).toBe(0);
+
+    await handle.close();
+    await collectRemaining(handle.events);
+  });
+
   it('resolves a timed-out question safely without forwarding a response', async () => {
     const transport = new MemoryTransport();
     const handle = await superviseInteractiveSession(transport, START_OPTIONS, {
@@ -737,6 +919,50 @@ describe('interactive session supervisor', () => {
       },
     ]);
     expect(transport.interruptCalls).toBe(1);
+
+    await handle.close();
+    await collectRemaining(handle.events);
+  });
+
+  it('denies a timed-out approval exactly once without interrupting the turn', async () => {
+    const transport = new MemoryTransport();
+    const handle = await superviseInteractiveSession(transport, START_OPTIONS, {
+      interactionTimeoutMs: 5,
+    });
+    await startActiveSession(transport, handle);
+    transport.emit({
+      type: 'approval.requested',
+      turnId: TURN_ID,
+      requestId: REQUEST_ID,
+      title: 'Allow?',
+      action: 'read',
+      target: 'workspace',
+      possibleEffects: ['read'],
+      effectsComplete: true,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    expect(await nextEvent(handle.events)).toMatchObject({
+      type: 'approval.requested',
+      requestId: REQUEST_ID,
+    });
+    expect(await nextEvent(handle.events)).toEqual({
+      type: 'approval.resolved',
+      turnId: TURN_ID,
+      requestId: REQUEST_ID,
+      decision: 'denied',
+      actor: 'timeout',
+    });
+    expect(transport.resolutions).toEqual([
+      {
+        kind: 'approval',
+        requestId: REQUEST_ID,
+        turnId: TURN_ID,
+        decision: 'deny',
+        reason: 'timeout',
+      },
+    ]);
+    expect(transport.interruptCalls).toBe(0);
 
     await handle.close();
     await collectRemaining(handle.events);
@@ -819,6 +1045,63 @@ describe('interactive session supervisor', () => {
     expect(events[1]).toMatchObject({ code: 'provider_disconnected' });
     expect(terminalEvents(events)).toHaveLength(1);
     expect(transport.resolutions).toEqual([]);
+  });
+
+  it('notifies the live provider and interrupts safely when the responder disconnects', async () => {
+    const transport = new MemoryTransport();
+    const handle = await superviseInteractiveSession(transport, START_OPTIONS);
+    await startActiveSession(transport, handle);
+    transport.emit(questionRequest());
+    await nextEvent(handle.events);
+
+    await handle.resolveInteraction(REQUEST_ID, 'disconnect');
+
+    expect(await nextEvent(handle.events)).toMatchObject({
+      type: 'question.cancelled',
+      requestId: REQUEST_ID,
+      reason: 'disconnect',
+    });
+    expect(await nextEvent(handle.events)).toMatchObject({ type: 'turn.interrupted' });
+    expect(await nextEvent(handle.events)).toEqual({ type: 'session.status', status: 'idle' });
+    expect(transport.resolutions).toEqual([
+      {
+        kind: 'question',
+        requestId: REQUEST_ID,
+        turnId: TURN_ID,
+        reason: 'disconnect',
+      },
+    ]);
+    expect(transport.interruptCalls).toBe(1);
+
+    await handle.close();
+    await collectRemaining(handle.events);
+  });
+
+  it('force-closes the provider session when fail-closed resolution cannot be delivered', async () => {
+    const transport = new MemoryTransport({
+      resolveInteraction: async () => {
+        throw new Error('native denial failed');
+      },
+    });
+    const handle = await superviseInteractiveSession(transport, START_OPTIONS);
+    await startActiveSession(transport, handle);
+    transport.emit(questionRequest());
+    await nextEvent(handle.events);
+
+    await expect(handle.resolveInteraction(REQUEST_ID, 'disconnect')).rejects.toThrow(
+      'native denial failed',
+    );
+    const events = await collectRemaining(handle.events);
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'question.cancelled',
+        requestId: REQUEST_ID,
+        reason: 'disconnect',
+      }),
+    );
+    expect(events.at(-1)).toMatchObject({ type: 'session.failed' });
+    expect(transport.closeCalls + transport.forceCloseCalls).toBeGreaterThan(0);
   });
 
   it('sends provider-native fail-closed resolutions before cancellation cleanup', async () => {
@@ -1191,6 +1474,39 @@ describe('interactive session supervisor', () => {
     expect(terminalEvents(events)).toHaveLength(1);
   });
 
+  it('never publishes prompt, credential, approval, or stderr canaries on provider failure', async () => {
+    const promptCanary = 'PROMPT_CANARY_supervisor_failure';
+    const credentialCanary = 'sk-proj-CREDENTIAL_CANARY_supervisor_failure';
+    const approvalCanary = 'RAW_APPROVAL_CANARY_supervisor_failure';
+    async function* crashingEvents(): AsyncGenerator<unknown, void, void> {
+      yield sessionStarted();
+      throw new Error(`${credentialCanary} ${approvalCanary}`);
+    }
+    async function* sensitiveStderr(): AsyncGenerator<unknown, void, void> {
+      yield Buffer.from(`${promptCanary} ${credentialCanary} ${approvalCanary}`);
+    }
+    const transport = new MemoryTransport({
+      events: crashingEvents(),
+      stderr: sensitiveStderr(),
+    });
+    const handle = await superviseInteractiveSession(transport, {
+      ...START_OPTIONS,
+      prompt: promptCanary,
+    });
+
+    const events = await collectRemaining(handle.events);
+    const serialized = JSON.stringify(events);
+    expect(serialized).not.toContain(promptCanary);
+    expect(serialized).not.toContain(credentialCanary);
+    expect(serialized).not.toContain(approvalCanary);
+    expect(events.at(-1)).toMatchObject({
+      type: 'session.failed',
+      code: 'provider_crash',
+      message: 'provider session crashed',
+    });
+    expect(terminalEvents(events)).toHaveLength(1);
+  });
+
   it.each([
     {
       label: '5,000-event provider queue',
@@ -1295,6 +1611,62 @@ describe('interactive session supervisor', () => {
     const events = await collectRemaining(handle.events);
 
     expect(transport.closeCalls).toBe(1);
+    expect(terminalEvents(events)).toEqual([
+      { type: 'session.cancelled', reason: 'session closed' },
+    ]);
+  });
+
+  it('resolves pending interactions, interrupts an active turn, then closes exactly once', async () => {
+    const transport = new MemoryTransport();
+    const handle = await superviseInteractiveSession(transport, START_OPTIONS, {
+      closeTimeoutMs: 20,
+    });
+    await startActiveSession(transport, handle);
+    transport.emit({
+      type: 'approval.requested',
+      turnId: TURN_ID,
+      requestId: REQUEST_ID,
+      title: 'Allow?',
+      action: 'read',
+      target: 'workspace',
+      possibleEffects: ['read'],
+      effectsComplete: true,
+      deadlineAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    transport.emit(questionRequest(testUuid(900), testUuid(901)));
+    await nextEvent(handle.events);
+    await nextEvent(handle.events);
+
+    await Promise.all([handle.close(), handle.close()]);
+    const events = await collectRemaining(handle.events);
+
+    expect(transport.resolutions).toHaveLength(2);
+    expect(transport.resolutions.map(({ reason }) => reason)).toEqual(['cancel', 'cancel']);
+    expect(transport.actions.lastIndexOf('resolve:cancel')).toBeLessThan(
+      transport.actions.indexOf('interrupt'),
+    );
+    expect(transport.actions.indexOf('interrupt')).toBeLessThan(transport.actions.indexOf('close'));
+    expect(transport.interruptCalls).toBe(1);
+    expect(transport.closeCalls).toBe(1);
+    expect(terminalEvents(events)).toEqual([
+      { type: 'session.cancelled', reason: 'session closed' },
+    ]);
+  });
+
+  it('bounds a non-responsive cancellation interrupt before closing', async () => {
+    const transport = new MemoryTransport({
+      interrupt: () => new Promise<void>(() => undefined),
+    });
+    const handle = await superviseInteractiveSession(transport, START_OPTIONS, {
+      closeTimeoutMs: 5,
+    });
+    await startActiveSession(transport, handle);
+
+    await handle.close();
+    const events = await collectRemaining(handle.events);
+
+    expect(transport.actions).toEqual(['interrupt', 'close']);
+    expect(transport.forceCloseCalls).toBe(0);
     expect(terminalEvents(events)).toEqual([
       { type: 'session.cancelled', reason: 'session closed' },
     ]);

@@ -2,25 +2,40 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { FAKE_PROVIDER_CAPABILITIES, FakeProvider, ProviderRegistry, noopLogger } from '@agent-dock/agent-runtime';
+import {
+  FAKE_PROVIDER_CAPABILITIES,
+  FakeProvider,
+  ProviderRegistry,
+  noopLogger,
+  type Logger,
+} from '@agent-dock/agent-runtime';
 import { AGENT_DOCK_PROTOCOL_VERSION } from '@agent-dock/shared';
 import { buildServer } from '../src/server.js';
 import { SessionManager } from '../src/session-manager.js';
 
 const TOKEN = 'test-token-123';
 
-function setup(scenario: 'success' | 'failure' | 'hang-until-cancelled' = 'success') {
+function setup(
+  scenario: 'success' | 'failure' | 'hang-until-cancelled' = 'success',
+  logger: Logger = noopLogger,
+) {
   const registry = new ProviderRegistry();
   registry.register(
     new FakeProvider(
       'claude',
-      { id: 'claude', name: 'Claude Code', installed: true, authenticated: 'authenticated', capabilities: FAKE_PROVIDER_CAPABILITIES },
+      {
+        id: 'claude',
+        name: 'Claude Code',
+        installed: true,
+        authenticated: 'authenticated',
+        capabilities: FAKE_PROVIDER_CAPABILITIES,
+      },
       scenario,
     ),
   );
   // codex intentionally left unregistered to exercise the "unsupported provider" path.
-  const sessionManager = new SessionManager(registry, noopLogger);
-  const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+  const sessionManager = new SessionManager(registry, logger);
+  const app = buildServer({ registry, sessionManager, token: TOKEN, logger });
   return { app, registry, sessionManager };
 }
 
@@ -90,10 +105,20 @@ describe('authorization', () => {
 describe('GET /providers', () => {
   it('reports installed/authenticated status for registered providers', async () => {
     const { app } = setup();
-    const res = await app.inject({ method: 'GET', url: '/providers', headers: { authorization: `Bearer ${TOKEN}` } });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/providers',
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
     const body = res.json();
     expect(body.providers).toEqual([
-      { id: 'claude', name: 'Claude Code', installed: true, authenticated: 'authenticated', capabilities: FAKE_PROVIDER_CAPABILITIES },
+      {
+        id: 'claude',
+        name: 'Claude Code',
+        installed: true,
+        authenticated: 'authenticated',
+        capabilities: FAKE_PROVIDER_CAPABILITIES,
+      },
     ]);
   });
 
@@ -295,7 +320,10 @@ describe('SSE events + cancellation', () => {
         .map((frame) => {
           const idLine = frame.split('\n').find((l) => l.startsWith('id: '));
           const dataLine = frame.split('\n').find((l) => l.startsWith('data: '));
-          return { sequence: Number(idLine?.slice('id: '.length)), event: JSON.parse(dataLine?.slice('data: '.length) ?? '{}') };
+          return {
+            sequence: Number(idLine?.slice('id: '.length)),
+            event: JSON.parse(dataLine?.slice('data: '.length) ?? '{}'),
+          };
         });
     }
 
@@ -318,9 +346,13 @@ describe('SSE events + cancellation', () => {
     });
     const resumedFrames = parseFrames(resumedRes.payload);
 
-    expect(resumedFrames.map((f) => f.sequence)).toEqual(fullFrames.slice(1).map((f) => f.sequence));
+    expect(resumedFrames.map((f) => f.sequence)).toEqual(
+      fullFrames.slice(1).map((f) => f.sequence),
+    );
     expect(resumedFrames.every((f) => f.sequence > n)).toBe(true);
-    expect(resumedFrames.map((f) => f.event.type)).toEqual(fullFrames.slice(1).map((f) => f.event.type));
+    expect(resumedFrames.map((f) => f.event.type)).toEqual(
+      fullFrames.slice(1).map((f) => f.event.type),
+    );
   });
 
   it('ends the SSE response cleanly instead of hanging forever if the session is removed between the existence check and subscribe() (AD-11 race)', async () => {
@@ -458,6 +490,42 @@ describe('DELETE /sessions/:id', () => {
 });
 
 describe('adversarial input handling', () => {
+  it('never writes request-controlled secrets to daemon logs', async () => {
+    const entries: unknown[] = [];
+    const capture = (message: string, meta?: Record<string, unknown>) => {
+      entries.push({ message, meta });
+    };
+    const logger: Logger = {
+      debug: capture,
+      info: capture,
+      warn: capture,
+      error: capture,
+    };
+    const { app } = setup('success', logger);
+    const credentialCanary = 'credential-canary-do-not-log';
+    const approvalCanary = 'approval-canary-do-not-log';
+
+    await app.inject({
+      method: 'GET',
+      url: `/providers?request=${encodeURIComponent(approvalCanary)}`,
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        origin: `https://${credentialCanary}.example`,
+      },
+    });
+    await app.inject({
+      method: 'POST',
+      url: '/sessions',
+      headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' },
+      payload: `{"prompt":"${credentialCanary}"`,
+    });
+
+    const serialized = JSON.stringify(entries);
+    expect(serialized).not.toContain(credentialCanary);
+    expect(serialized).not.toContain(approvalCanary);
+    expect(serialized).not.toContain(TOKEN);
+  });
+
   it('rejects Origin: null (sandboxed iframe / file:// context) on a privileged route', async () => {
     const { app } = setup();
     const res = await app.inject({
@@ -470,7 +538,11 @@ describe('adversarial input handling', () => {
 
   it('does not block a request with no Origin header at all (non-browser clients: curl, Electron main process)', async () => {
     const { app } = setup();
-    const res = await app.inject({ method: 'GET', url: '/providers', headers: { authorization: `Bearer ${TOKEN}` } });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/providers',
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
     expect(res.statusCode).toBe(200);
   });
 
@@ -555,7 +627,13 @@ describe('adversarial input handling', () => {
       method: 'POST',
       url: '/sessions',
       headers: { authorization: `Bearer ${TOKEN}` },
-      payload: { provider: 'claude', cwd, prompt: 'hi', executable: '/bin/evil', env: { EVIL: '1' } },
+      payload: {
+        provider: 'claude',
+        cwd,
+        prompt: 'hi',
+        executable: '/bin/evil',
+        env: { EVIL: '1' },
+      },
     });
     expect(res.statusCode).toBe(201);
     expect(res.json()).not.toHaveProperty('executable');
@@ -583,7 +661,7 @@ describe('adversarial input handling', () => {
     expect(res.statusCode).toBe(400);
   });
 
-  it('rejects a body over Fastify\'s default size limit with a sanitized error, not a crash', async () => {
+  it("rejects a body over Fastify's default size limit with a sanitized error, not a crash", async () => {
     const { app } = setup();
     const res = await app.inject({
       method: 'POST',

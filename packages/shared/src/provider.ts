@@ -11,6 +11,17 @@ export type ProviderId = (typeof PROVIDER_IDS)[number];
  * must write `=== 'authenticated'` explicitly.
  */
 export type AuthStatus = 'authenticated' | 'unauthenticated' | 'unknown';
+/** Non-secret account source label reported by a provider CLI; never contains account identity. */
+export const AUTH_SOURCES = [
+  'chatgpt',
+  'api_key',
+  'claude_subscription',
+  'bedrock',
+  'vertex',
+  'foundry',
+  'unknown',
+] as const;
+export type AuthSource = (typeof AUTH_SOURCES)[number];
 
 /**
  * What an AgentDock adapter actually does for a provider, not a marketing claim about the
@@ -50,6 +61,11 @@ export interface ProviderStatus {
   name: string;
   installed: boolean;
   authenticated: AuthStatus;
+  authSource?: AuthSource;
+  /** Internal SHA-256 fingerprint of a provider-exposed non-secret account identifier. Never serialize. */
+  accountFingerprint?: string;
+  /** Internal exact model selected for this launch snapshot. Never serialize as detector status. */
+  selectedModel?: string;
   capabilities: ProviderCapabilities;
   executablePath?: string;
   version?: string;

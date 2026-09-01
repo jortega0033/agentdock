@@ -1,5 +1,14 @@
 # Architecture
 
+AgentDock is an open-source Electron and local-daemon boilerplate for desktop products that use the
+Claude Agent SDK or a user's existing signed-in Claude or Codex CLI. It is designed to be forked. A
+product fork can replace the reference UI and workflow, set its own application identity, and keep
+or adapt the local runtime layers it needs.
+
+The runtime, protocol, security boundaries, provider adapters, tests, and packaging support that
+boilerplate purpose. They provide a working base and clear extension points rather than defining a
+finished chat product.
+
 This is the map of the repository: what each layer does, why it's shaped this way, and where to
 find the deeper detail. Wire-format detail lives in [protocol-v1.md](protocol-v1.md) and
 [protocol-v2.md](protocol-v2.md), while the v2 trust and capability decisions live in
@@ -25,7 +34,7 @@ those.
               ▼
 ┌─────────────────────────┐
 │   AgentDockClient           │   Typed daemon SDK: HTTP+SSE, bearer auth, protocol-
-│   (packages/client)        │   version compatibility check. No Electron dependency —
+│   (packages/client)        │   version compatibility check. No Electron dependency;
 │                             │   usable from any Node process. See docs/client-sdk.md.
 └─────────────┬────────────┘
               │ HTTP + SSE, http://127.0.0.1:<port>, Bearer token, protocol v1
@@ -38,9 +47,9 @@ those.
               ▼
 ┌─────────────────────────┐
 │   Agent Runtime             │   Provider-neutral: AgentProvider interface, process
-│   (packages/agent-runtime) │   spawning, JSONL parsing, normalization into AgentEvent.
-│  ├── ClaudeProvider ───────┼──▶ `claude` CLI ──▶ user's own Claude Code auth
-│  └── CodexProvider ────────┼──▶ `codex` CLI ──▶ user's own Codex auth
+│   (packages/agent-runtime) │   spawning, native transport normalization into AgentEvent.
+│  ├── ClaudeProvider ───────┼──▶ pinned Agent SDK (API/cloud) or local Claude CLI
+│  └── CodexProvider ────────┼──▶ app-server or local `codex` CLI
 └─────────────────────────┘
 ```
 
@@ -85,10 +94,10 @@ might be hostile":
    against the Zod schemas at the `ipcMain.handle` boundary (see [electron.md](electron.md)), and
    it structurally cannot reach the daemon's token or make an arbitrary daemon call, only the seven
    functions the preload bridge exposes.
-3. **The daemon → the provider CLI.** The daemon trusts the CLI it spawns (it's the user's own,
-   already-authenticated installation) but never trusts _what a request asked it to spawn_: the
-   executable is always resolved internally via `findExecutable()`, never from request input, and
-   arguments are always an argv array, never a shell string.
+3. **The daemon → the provider host.** Local CLI executables are resolved internally, never from
+   request input. The Claude Agent SDK path instead uses the exact packaged, version-checked SDK
+   executable outside ASAR. Both paths use argv arrays and the daemon-owned process-tree host,
+   never a shell-built command.
 
 Explicitly **not** a trust boundary this project defends: another process running as the same OS
 user. See [SECURITY.md](../SECURITY.md#what-this-does-not-claim-to-protect-against).
@@ -114,7 +123,9 @@ Three reasons, in order of importance:
 
 ## Runtime flow: what happens when a user presses "Run"
 
-This is the current protocol v1 one-shot flow. The v2 supervisor has not been implemented.
+This is the protocol v1 one-shot flow. The desktop uses protocol v2's interactive supervisor for
+the pinned Claude Agent SDK and Codex app-server when their exact runtime/authentication gates pass;
+the local CLI compatibility paths retain this v1 bridge.
 
 1. Renderer calls `window.agentDock.createSession({ provider, cwd, prompt })`.
 2. Preload forwards it over IPC to `ipcMain.handle('daemon:create-session', ...)` in `main.ts`.
@@ -137,8 +148,8 @@ This is the current protocol v1 one-shot flow. The v2 supervisor has not been im
    `status`, and broadcasts it to every subscriber of that session's SSE stream.
 10. Main receives each event over its own SSE connection and pushes it to the renderer via
     `sendToRenderer(mainWindow, 'daemon:session-event', ...)`.
-11. The renderer's `onSessionEvent` callback updates `EventLog.tsx`, which renders on a single
-    `switch (event.type)`, never branching on provider id.
+11. The renderer projects the forwarded envelopes into stable, bounded activity items and renders
+    them in `ActivityTimeline.tsx`, never branching on provider id.
 12. Exactly one of `session.completed` / `session.failed` / `session.cancelled` ends the stream;
     both the daemon's SSE response and `@agent-dock/client`'s async generator close at that point,
     with nothing emitted after it.
@@ -147,7 +158,7 @@ This is the current protocol v1 one-shot flow. The v2 supervisor has not been im
 
 ```ts
 type AgentSession = {
-  id: string; // daemon-generated UUID — never a process id
+  id: string; // daemon-generated UUID; never a process id
   provider: ProviderId;
   cwd: string;
   prompt: string;
@@ -204,14 +215,13 @@ spawn/parse/normalize lifecycle happens. It:
 - always terminates the event stream with exactly one of `session.completed` / `session.failed` /
   `session.cancelled`, so callers never have to guess whether more events might still arrive
 
-Rich SDK/app-server transports use a separate provider-neutral bidirectional supervisor. It now
+Rich SDK/app-server transports use a separate provider-neutral bidirectional supervisor. It
 owns startup and command-acceptance timeouts, frame/event/stderr/queue bounds, interaction
 correlation and provider-native fail-closed resolution, interrupt versus close semantics,
 accepted-work state, mandatory process-tree reap fallback, and the terminal-event invariant.
-`FakeProvider` verifies this runtime path. Production Claude and Codex still use the
-one-shot runner: issue #8's conformance fixtures gate their native transports, tracked in issues
-#10 and #11. Issue #7 also stops at a narrow client/Electron bridge; rich renderer UI remains
-separate work.
+`FakeProvider` and native transport fixtures verify this runtime path. Production Claude uses the
+pinned Agent SDK for reviewed API-key/Bedrock/Vertex/Foundry authentication, while Codex uses its
+validated app-server transport. Both retain their local one-shot CLI compatibility paths.
 
 ## Daemon discovery and lifecycle
 
@@ -239,8 +249,9 @@ each is also listed as out of scope in [CONTRIBUTING.md](../CONTRIBUTING.md#scop
   products built on this boilerplate coexist by using different app ids, but two instances of the
   _same_ product still can't run side by side. A richer scheme (e.g. a random per-launch id) isn't
   needed for what this boilerplate currently supports.
-- **No API-key/cloud provider mode.** Everything here assumes a locally authenticated CLI; adding a
-  second auth model is a different product shape, not an extension of this one.
+- **No hosted credential UI.** Claude API/cloud credentials come only from the daemon environment;
+  AgentDock never collects, stores, or displays them. Claude subscription OAuth remains on the
+  separately installed local CLI path and is never admitted to the SDK transport.
 - **No auto-update, telemetry, or crash reporting.** Each adds its own trust and privacy surface
   that doesn't belong in boilerplate meant to be forked as-is.
 - **Packaging targets Windows only**, see [packaging.md#platform-matrix](packaging.md#platform-matrix).

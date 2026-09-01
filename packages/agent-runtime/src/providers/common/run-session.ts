@@ -17,7 +17,6 @@ export interface ProviderRunConfig {
   executableNames: string[];
   buildArgs(options: StartSessionOptions): string[];
   parseLine(raw: unknown, logger: Logger): ParsedLine;
-  describeFailure?(stderr: string, code: number | null, signal: NodeJS.Signals | null): string;
   /**
    * When true, the prompt is written to the child's stdin instead of appearing anywhere in argv
    * (AD-05), set by an adapter whose CLI supports reading its prompt from stdin. Adapters that
@@ -49,13 +48,24 @@ export function runProviderSession(
    */
   function closeWithOverflow(): void {
     channel.closeWith([
-      { type: 'error', code: 'EVENT_OVERFLOW', message: 'session event buffer overflowed', recoverable: false },
+      {
+        type: 'error',
+        code: 'EVENT_OVERFLOW',
+        message: 'session event buffer overflowed',
+        recoverable: false,
+      },
       { type: 'session.failed', message: 'session event buffer overflowed' },
     ]);
   }
 
   async function run() {
-    if (!channel.push({ type: 'session.started', sessionId: options.sessionId, provider: config.providerId })) {
+    if (
+      !channel.push({
+        type: 'session.started',
+        sessionId: options.sessionId,
+        provider: config.providerId,
+      })
+    ) {
       closeWithOverflow();
       return;
     }
@@ -73,7 +83,22 @@ export function runProviderSession(
       return;
     }
 
-    const exePath = await findExecutable(config.executableNames);
+    const pinnedStatus = options.providerStatus;
+    if (pinnedStatus && pinnedStatus.id !== config.providerId) {
+      channel.closeWith([
+        {
+          type: 'error',
+          code: 'PROVIDER_SNAPSHOT_MISMATCH',
+          message: 'provider launch snapshot does not match the selected provider',
+          recoverable: false,
+        },
+        { type: 'session.failed', message: 'provider launch snapshot mismatch' },
+      ]);
+      return;
+    }
+    const exePath = pinnedStatus
+      ? pinnedStatus.executablePath
+      : await findExecutable(config.executableNames);
     if (!exePath) {
       channel.closeWith([
         {
@@ -106,16 +131,15 @@ export function runProviderSession(
     spawned.child.stdin.end();
 
     let providerSessionId: string | undefined;
-    const stderrChunks: string[] = [];
     let stderrBytes = 0;
     spawned.child.stderr.on('data', (chunk: Buffer) => {
-      if (stderrBytes < 200_000) {
-        stderrChunks.push(chunk.toString('utf8'));
-        stderrBytes += chunk.length;
-      }
+      // Provider stderr is untrusted and can echo prompts or credentials. Retain only a bounded
+      // numeric fact for diagnostics; never decode, persist, log, or surface its contents.
+      stderrBytes = Math.min(Number.MAX_SAFE_INTEGER, stderrBytes + chunk.length);
     });
 
     let overflowed = false;
+    let streamReadFailed = false;
     try {
       for await (const line of readLines(spawned.child.stdout)) {
         let raw: unknown;
@@ -135,44 +159,43 @@ export function runProviderSession(
         }
         if (overflowed) break;
       }
-    } catch (err) {
+    } catch {
+      streamReadFailed = true;
       channel.push({
         type: 'error',
         code: 'STREAM_READ_FAILED',
-        message: `failed reading ${config.providerId} output: ${(err as Error).message}`,
+        message: `failed reading ${config.providerId} output`,
         recoverable: false,
       });
     }
 
     if (overflowed) {
-      spawned.kill();
-      await spawned.exit;
+      await spawned.kill();
       closeWithOverflow();
       return;
     }
 
     const { code, signal } = await spawned.exit;
-    logger.info(`${config.providerId}: process exited`, { sessionId: options.sessionId, code, signal });
+    logger.info(`${config.providerId}: process exited`, {
+      sessionId: options.sessionId,
+      code,
+      signal,
+    });
 
     if (cancelled) {
       channel.closeWith([{ type: 'session.cancelled' }]);
+    } else if (streamReadFailed) {
+      channel.closeWith([{ type: 'session.failed', message: 'provider output could not be read' }]);
     } else if (code === 0) {
       channel.closeWith([{ type: 'session.completed', providerSessionId }]);
     } else {
-      const stderrText = stderrChunks.join('');
-      if (stderrText.trim()) {
-        // Bounded and at warn (shown by default): a session failure with no visible reason is
-        // unusable for debugging. This is the CLI's own diagnostic output, not daemon secrets;
-        // still capped, since we can't guarantee a third-party CLI never echoes something
-        // sensitive to stderr.
-        logger.warn(`${config.providerId}: process exited non-zero`, {
-          sessionId: options.sessionId,
-          code,
-          signal,
-          stderrSnippet: stderrText.slice(0, 2000),
-        });
-      }
-      const message = config.describeFailure?.(stderrText, code, signal) ?? defaultFailureMessage(config.providerId, stderrText, code, signal);
+      logger.warn(`${config.providerId}: process exited non-zero`, {
+        sessionId: options.sessionId,
+        code,
+        signal,
+        stderrBytes,
+      });
+      const message = defaultFailureMessage(config.providerId, code, signal);
       channel.closeWith([
         { type: 'error', code: 'PROCESS_EXIT', message, recoverable: false },
         { type: 'session.failed', message },
@@ -180,10 +203,17 @@ export function runProviderSession(
     }
   }
 
-  run().catch((err) => {
-    logger.error(`${config.providerId}: adapter crashed`, { message: (err as Error).message });
+  run().catch(() => {
+    // Parser/process failures can contain provider-controlled prompt, credential, or approval
+    // text. Log only the bounded failure class; the public event is intentionally generic too.
+    logger.error(`${config.providerId}: adapter crashed`, { failure: 'adapter_crash' });
     channel.closeWith([
-      { type: 'error', code: 'ADAPTER_CRASH', message: 'internal adapter error', recoverable: false },
+      {
+        type: 'error',
+        code: 'ADAPTER_CRASH',
+        message: 'internal adapter error',
+        recoverable: false,
+      },
       { type: 'session.failed', message: 'internal adapter error' },
     ]);
   });
@@ -192,23 +222,15 @@ export function runProviderSession(
     events: channel[Symbol.asyncIterator](),
     cancel: async () => {
       cancelled = true;
-      spawned?.kill();
+      await spawned?.kill();
     },
   };
 }
 
-/**
- * Falls back to this when an adapter doesn't provide its own `describeFailure`. A bare "exited
- * with code 1" tells a developer nothing actionable; include a short stderr snippet so a session
- * failure is debuggable without needing to run the daemon with debug logging just to see why.
- */
 function defaultFailureMessage(
   providerId: string,
-  stderr: string,
   code: number | null,
   signal: NodeJS.Signals | null,
 ): string {
-  const base = `${providerId} exited with code ${code ?? 'null'}${signal ? ` (signal ${signal})` : ''}`;
-  const snippet = stderr.trim().slice(0, 500);
-  return snippet ? `${base}: ${snippet}` : base;
+  return `${providerId} exited with code ${code ?? 'null'}${signal ? ` (signal ${signal})` : ''}`;
 }

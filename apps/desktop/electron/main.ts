@@ -1,14 +1,38 @@
 import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { basename, join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   agentCommandV2Schema,
   createSessionRequestSchema,
   createSessionV2RequestSchema,
+  sessionContinuationInputV2Schema,
+  sessionEventHistoryV2QuerySchema,
   sessionIdParamSchema,
+  sessionListV2QuerySchema,
+  workspaceInspectRequestV2Schema,
+  workspaceTrustUpdateRequestV2Schema,
+  mcpCatalogRequestV2Schema,
+  mcpConfigureRequestV2Schema,
+  mcpListRequestV2Schema,
+  mcpOAuthStartRequestV2Schema,
+  mcpServerActionRequestV2Schema,
+  mcpToolInvocationRequestV2Schema,
+  providerComponentInvokeRequestV2Schema,
+  providerComponentListRequestV2Schema,
+  providerComponentManageRequestV2Schema,
+  subagentControlRequestV2Schema,
+  worktreeCleanupRequestV2Schema,
+  worktreeCreateRequestV2Schema,
+  worktreePreviewRequestV2Schema,
+  structuredWorkflowRequestV2Schema,
+  type AgentCommandV2,
+  type AgentEventV2Envelope,
+  type AgentSessionV2,
+  type WorkspaceTrustUpdateRequestV2,
 } from '@agent-dock/shared';
 import { AgentDockClient, DaemonError } from '@agent-dock/client';
 import { resolveDaemonEntry } from './resolve-daemon-entry.js';
@@ -18,6 +42,7 @@ import {
   PendingInteractiveCreates,
   relayInteractiveSessionEvents,
 } from './interactive-session-lifecycle.js';
+import { InteractionBroker, type RendererInteractionResolution } from './interaction-broker.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -42,11 +67,12 @@ type DaemonStatus =
 let daemonChild: ChildProcess | undefined;
 let client: AgentDockClient | undefined;
 let mainWindow: BrowserWindow | undefined;
-let activeSessionId: string | undefined;
-let activeStreamAbort: AbortController | undefined;
+const activeSessionIds = new Set<string>();
+const streamAborts = new Map<string, AbortController>();
 const activeInteractiveSessionIds = new Set<string>();
 const interactiveStreamAborts = new Map<string, AbortController>();
 const pendingInteractiveCreates = new PendingInteractiveCreates();
+const interactionBroker = new InteractionBroker();
 // Startup may use the 30-second handshake bound plus graceful and hard-stop reap windows.
 const INTERACTIVE_CREATE_SHUTDOWN_TIMEOUT_MS = 41_000;
 const DAEMON_CANCELLATION_TIMEOUT_MS = 20_000;
@@ -93,8 +119,15 @@ function spawnDaemon(): void {
   daemonChild.on('exit', (code, signal) => {
     if (!client) return; // never became ready; startup error already reported
     client = undefined;
+    for (const controller of streamAborts.values()) controller.abort();
+    streamAborts.clear();
+    activeSessionIds.clear();
+    for (const sessionId of activeInteractiveSessionIds) {
+      clearInteractionSession(sessionId, 'stream_disconnected');
+    }
     for (const controller of interactiveStreamAborts.values()) controller.abort();
     interactiveStreamAborts.clear();
+    activeInteractiveSessionIds.clear();
     sendStatus({
       state: 'unavailable',
       error: `daemon process exited unexpectedly (code ${code ?? 'null'}, signal ${signal ?? 'null'})`,
@@ -104,6 +137,55 @@ function spawnDaemon(): void {
   waitForDaemonReady(spawnedAt).catch((err: Error) => {
     sendStatus({ state: 'unavailable', error: `daemon failed to start: ${err.message}` });
   });
+}
+
+function sendInteractionResolutions(
+  sessionId: string,
+  resolutions: readonly RendererInteractionResolution[],
+): void {
+  for (const resolution of resolutions) {
+    sendToRenderer(mainWindow, 'daemon:interaction-resolved', { sessionId, resolution });
+  }
+}
+
+function clearInteractionSession(
+  sessionId: string,
+  reason: 'stream_disconnected' | 'shutdown',
+): void {
+  sendInteractionResolutions(sessionId, interactionBroker.clearSession(sessionId, reason));
+}
+
+function forwardInteractiveEvent(event: AgentEventV2Envelope): void {
+  switch (event.type) {
+    case 'approval.requested':
+    case 'question.requested':
+      sendToRenderer(mainWindow, 'daemon:interaction-requested', {
+        sessionId: event.sessionId,
+        interaction: interactionBroker.publish(event),
+      });
+      return;
+    case 'approval.resolved':
+    case 'question.resolved':
+    case 'question.cancelled':
+      sendInteractionResolutions(event.sessionId, interactionBroker.consumeResolution(event));
+      return;
+    case 'session.completed':
+    case 'session.failed':
+    case 'session.cancelled':
+    case 'session.interrupted':
+      sendInteractionResolutions(event.sessionId, interactionBroker.consumeResolution(event));
+      activeInteractiveSessionIds.delete(event.sessionId);
+      sendToRenderer(mainWindow, 'daemon:interactive-session-event', {
+        sessionId: event.sessionId,
+        event,
+      });
+      return;
+    default:
+      sendToRenderer(mainWindow, 'daemon:interactive-session-event', {
+        sessionId: event.sessionId,
+        event,
+      });
+  }
 }
 
 async function waitForDaemonReady(spawnedAt: number, timeoutMs = 15_000): Promise<void> {
@@ -134,11 +216,12 @@ async function waitForDaemonReady(spawnedAt: number, timeoutMs = 15_000): Promis
   throw new Error('timed out waiting for daemon to become ready');
 }
 
-/** Streams one session's events to the renderer and clears `activeSessionId` at its terminal event. */
+/** Streams one legacy session independently; protocol-v2 uses the reconnecting relay below. */
 function forwardSessionEvents(sessionId: string): void {
   if (!client) return;
+  streamAborts.get(sessionId)?.abort();
   const controller = new AbortController();
-  activeStreamAbort = controller;
+  streamAborts.set(sessionId, controller);
   const activeClient = client;
 
   void (async () => {
@@ -152,7 +235,7 @@ function forwardSessionEvents(sessionId: string): void {
           event.type === 'session.failed' ||
           event.type === 'session.cancelled'
         ) {
-          if (activeSessionId === sessionId) activeSessionId = undefined;
+          activeSessionIds.delete(sessionId);
         }
       }
     } catch (err) {
@@ -165,6 +248,8 @@ function forwardSessionEvents(sessionId: string): void {
           recoverable: false,
         },
       });
+    } finally {
+      if (streamAborts.get(sessionId) === controller) streamAborts.delete(sessionId);
     }
   })();
 }
@@ -172,7 +257,11 @@ function forwardSessionEvents(sessionId: string): void {
 /** Streams validated protocol-v2 envelopes without changing the existing v1 renderer flow. */
 function forwardInteractiveSessionEvents(sessionId: string): void {
   if (!client) return;
-  interactiveStreamAborts.get(sessionId)?.abort();
+  const previousController = interactiveStreamAborts.get(sessionId);
+  if (previousController) {
+    previousController.abort();
+    clearInteractionSession(sessionId, 'stream_disconnected');
+  }
   const controller = new AbortController();
   interactiveStreamAborts.set(sessionId, controller);
   const activeClient = client;
@@ -180,26 +269,17 @@ function forwardInteractiveSessionEvents(sessionId: string): void {
   void relayInteractiveSessionEvents({
     sessionId,
     signal: controller.signal,
-    events: (id, options) => activeClient.v2.sessions.events(id, options),
+    events: (id, options) => activeClient.v2.sessions.events(id, { ...options, responder: true }),
     snapshot: (id) => activeClient.v2.sessions.get(id),
     isActive: () => activeInteractiveSessionIds.has(sessionId),
-    onEvent: (event) => {
-      sendToRenderer(mainWindow, 'daemon:interactive-session-event', { sessionId, event });
-      if (
-        event.type === 'session.completed' ||
-        event.type === 'session.failed' ||
-        event.type === 'session.cancelled' ||
-        event.type === 'session.interrupted'
-      ) {
-        activeInteractiveSessionIds.delete(sessionId);
-      }
-    },
+    onEvent: forwardInteractiveEvent,
     onRetry: (error, lastEventId) => {
       console.warn(
         `interactive event stream ${sessionId} reconnecting${lastEventId === undefined ? '' : ` after ${lastEventId}`}: ${(error as Error).message}`,
       );
     },
     onReplayGap: (session) => {
+      clearInteractionSession(sessionId, 'stream_disconnected');
       sendToRenderer(mainWindow, 'daemon:interactive-session-stream-notice', {
         sessionId,
         notice: { type: 'replay_reset', session },
@@ -218,8 +298,46 @@ function forwardInteractiveSessionEvents(sessionId: string): void {
   }).finally(() => {
     if (interactiveStreamAborts.get(sessionId) === controller) {
       interactiveStreamAborts.delete(sessionId);
+      clearInteractionSession(sessionId, 'stream_disconnected');
     }
   });
+}
+
+function activateInteractiveSession(session: AgentSessionV2): void {
+  if (isTerminalInteractiveStatus(session.status)) return;
+  activeInteractiveSessionIds.add(session.id);
+  if (!interactiveStreamAborts.has(session.id)) forwardInteractiveSessionEvents(session.id);
+}
+
+function createTrackedInteractiveSession(
+  start: (signal: AbortSignal) => Promise<AgentSessionV2>,
+): Promise<AgentSessionV2> {
+  if (!client) return Promise.reject(new Error('daemon is not ready yet'));
+  const activeClient = client;
+  return pendingInteractiveCreates.run(start, activateInteractiveSession, async (session) => {
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(new Error('late interactive session cancellation timed out')),
+      DAEMON_CANCELLATION_TIMEOUT_MS,
+    );
+    try {
+      await waitWithin(
+        activeClient.v2.sessions.cancel(session.id, { signal: controller.signal }),
+        DAEMON_CANCELLATION_TIMEOUT_MS,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+}
+
+function isTerminalInteractiveStatus(status: AgentSessionV2['status']): boolean {
+  return (
+    status === 'completed' ||
+    status === 'failed' ||
+    status === 'cancelled' ||
+    status === 'interrupted'
+  );
 }
 
 function boundedErrorMessage(error: unknown): string {
@@ -241,9 +359,113 @@ async function waitWithin(work: Promise<unknown>, timeoutMs: number): Promise<bo
   });
 }
 
+async function sendInteractionCommand(
+  activeClient: AgentDockClient,
+  command: AgentCommandV2,
+): Promise<{ status: 'accepted' }> {
+  try {
+    const acknowledgement = await activeClient.v2.sessions.send(command);
+    if (
+      acknowledgement.commandId !== command.commandId ||
+      acknowledgement.sessionId !== command.sessionId ||
+      acknowledgement.turnId !== command.turnId
+    ) {
+      throw new Error('mismatched acknowledgement');
+    }
+    return { status: 'accepted' };
+  } catch {
+    throw new Error('interaction response failed');
+  }
+}
+
+function parseWorkspaceTrustInput(input: unknown): {
+  workspaceId: string;
+  update: WorkspaceTrustUpdateRequestV2;
+} {
+  if (!isRecordWithExactKeys(input, ['workspaceId', 'update'])) {
+    throw new Error('invalid workspace trust input');
+  }
+  if (typeof input.workspaceId !== 'string' || !/^[a-f0-9]{64}$/.test(input.workspaceId)) {
+    throw new Error('invalid workspace id');
+  }
+  return {
+    workspaceId: input.workspaceId,
+    update: workspaceTrustUpdateRequestV2Schema.parse(input.update),
+  };
+}
+
+function parseRendererSessionCommand(input: unknown): AgentCommandV2 {
+  if (!input || typeof input !== 'object' || Array.isArray(input) || 'commandId' in input) {
+    throw new Error('renderer session commands must not provide a command id');
+  }
+  const command = agentCommandV2Schema.parse({ ...input, commandId: randomUUID() });
+  if (command.type === 'approval.respond' || command.type === 'question.respond') {
+    throw new Error('interactive responses require an opaque interaction handle');
+  }
+  return command;
+}
+
+interface AuditReadInput {
+  cursor?: string;
+  limit?: number;
+  sessionId?: string;
+}
+
+function parseAuditReadInput(input: unknown): AuditReadInput {
+  if (!isRecordWithAllowedKeys(input, ['cursor', 'limit', 'sessionId'])) {
+    throw new Error('invalid audit read input');
+  }
+  const cursor = input.cursor;
+  const limit = input.limit;
+  const sessionId = input.sessionId;
+  if (
+    cursor !== undefined &&
+    (typeof cursor !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/.test(cursor))
+  ) {
+    throw new Error('invalid audit cursor');
+  }
+  if (
+    limit !== undefined &&
+    (!Number.isInteger(limit) || (limit as number) < 1 || (limit as number) > 100)
+  ) {
+    throw new Error('invalid audit limit');
+  }
+  const parsedSessionId =
+    sessionId === undefined ? undefined : sessionIdParamSchema.parse({ sessionId }).sessionId;
+  return {
+    ...(cursor === undefined ? {} : { cursor }),
+    ...(limit === undefined ? {} : { limit: limit as number }),
+    ...(parsedSessionId === undefined ? {} : { sessionId: parsedSessionId }),
+  };
+}
+
+function isRecordWithExactKeys(
+  value: unknown,
+  expectedKeys: readonly string[],
+): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === expectedKeys.length && expectedKeys.every((key) => keys.includes(key));
+}
+
+function isRecordWithAllowedKeys(
+  value: unknown,
+  allowedKeys: readonly string[],
+): value is Record<string, unknown> {
+  return (
+    !!value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.keys(value).every((key) => allowedKeys.includes(key))
+  );
+}
+
 async function killDaemon(): Promise<void> {
   pendingInteractiveCreates.beginShutdown();
-  activeStreamAbort?.abort();
+  for (const controller of streamAborts.values()) controller.abort();
+  for (const sessionId of activeInteractiveSessionIds) {
+    clearInteractionSession(sessionId, 'shutdown');
+  }
   for (const controller of interactiveStreamAborts.values()) controller.abort();
   await pendingInteractiveCreates.waitForPending(INTERACTIVE_CREATE_SHUTDOWN_TIMEOUT_MS);
   const activeClient = client;
@@ -254,7 +476,7 @@ async function killDaemon(): Promise<void> {
       DAEMON_CANCELLATION_TIMEOUT_MS,
     );
     const cancellations = Promise.allSettled([
-      // Cancels every in-flight session over HTTP, not just `activeSessionId`. On Windows,
+      // Cancels every in-flight session over HTTP. On Windows,
       // daemonChild.kill() below maps to TerminateProcess, so bounded HTTP cancellation is the
       // reliable opportunity for the daemon to reap each provider tree before the hard stop.
       activeClient.sessions.cancelAll({ signal: cancellationController.signal }),
@@ -268,6 +490,8 @@ async function killDaemon(): Promise<void> {
     clearTimeout(cancellationTimer);
     cancellationController.abort(new Error('desktop shutdown completed'));
   }
+  activeSessionIds.clear();
+  streamAborts.clear();
   activeInteractiveSessionIds.clear();
   interactiveStreamAborts.clear();
   daemonChild?.kill();
@@ -355,6 +579,121 @@ ipcMain.handle('daemon:list-providers', async () => {
   return client.providers.list();
 });
 
+ipcMain.handle('daemon:list-providers-v2', async () => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.providers.list();
+});
+
+ipcMain.handle('daemon:list-mcp-servers', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  const parsed = mcpListRequestV2Schema.parse(input);
+  return client.v2.integrations.mcp.list(parsed.provider, parsed.cwd);
+});
+
+ipcMain.handle('daemon:configure-mcp-server', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.integrations.mcp.configure(mcpConfigureRequestV2Schema.parse(input));
+});
+
+ipcMain.handle('daemon:action-mcp-server', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.integrations.mcp.action(mcpServerActionRequestV2Schema.parse(input));
+});
+
+ipcMain.handle('daemon:get-mcp-catalog', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  const parsed = mcpCatalogRequestV2Schema.parse(input);
+  return client.v2.integrations.mcp.catalog(parsed.provider, parsed.serverId, parsed.cwd);
+});
+
+ipcMain.handle('daemon:start-mcp-oauth', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  const parsed = mcpOAuthStartRequestV2Schema.parse(input);
+  const result = await client.v2.integrations.mcp.oauth(parsed.provider, parsed.serverId, parsed.cwd);
+  let authorizationHost: string | undefined;
+  if (result.authorizationUrl) {
+    const url = new URL(result.authorizationUrl);
+    if (url.protocol !== 'https:') throw new Error('provider returned an unsafe OAuth URL');
+    authorizationHost = url.host;
+    await shell.openExternal(url.toString());
+  }
+  return {
+    serverId: result.serverId,
+    status: result.status,
+    ...(authorizationHost ? { authorizationHost } : {}),
+    ...(result.safeSummary ? { safeSummary: result.safeSummary } : {}),
+  };
+});
+
+ipcMain.handle('daemon:invoke-mcp-tool', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.integrations.mcp.invoke(mcpToolInvocationRequestV2Schema.parse(input));
+});
+
+ipcMain.handle('daemon:list-provider-components', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.integrations.components.list(providerComponentListRequestV2Schema.parse(input));
+});
+
+ipcMain.handle('daemon:manage-provider-component', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.integrations.components.manage(providerComponentManageRequestV2Schema.parse(input));
+});
+
+ipcMain.handle('daemon:invoke-provider-component', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.integrations.components.invoke(providerComponentInvokeRequestV2Schema.parse(input));
+});
+
+ipcMain.handle('daemon:get-subagent-graph', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  const { sessionId } = sessionIdParamSchema.parse({ sessionId: input });
+  return client.v2.agents.graph(sessionId);
+});
+ipcMain.handle('daemon:control-subagent', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.agents.control(subagentControlRequestV2Schema.parse(input));
+});
+ipcMain.handle('daemon:preview-worktree', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.worktrees.preview(worktreePreviewRequestV2Schema.parse(input));
+});
+ipcMain.handle('daemon:create-worktree', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.worktrees.create(worktreeCreateRequestV2Schema.parse(input));
+});
+ipcMain.handle('daemon:list-worktrees', async () => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.worktrees.list();
+});
+ipcMain.handle('daemon:cleanup-worktree', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  const parsed = worktreeCleanupRequestV2Schema.parse({ worktreeId: input });
+  return client.v2.worktrees.cleanup(parsed.worktreeId);
+});
+
+ipcMain.handle('dialog:select-and-upload-attachments', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  if (!isRecordWithAllowedKeys(input, ['sessionId'])) throw new Error('invalid attachment picker input');
+  const sessionId = input.sessionId === undefined ? undefined : sessionIdParamSchema.parse({ sessionId: input.sessionId }).sessionId;
+  if (!mainWindow) return [];
+  const result = await dialog.showOpenDialog(mainWindow, { properties: ['openFile', 'multiSelections'] });
+  if (result.canceled) return [];
+  if (result.filePaths.length > 20) throw new Error('select at most 20 files');
+  const uploaded = [];
+  for (const path of result.filePaths) {
+    const metadata = statSync(path);
+    if (!metadata.isFile()) throw new Error('attachment selection must contain files only');
+    uploaded.push(await client.v2.attachments.upload({ fileName: basename(path), size: metadata.size, stream: createReadStream(path), ...(sessionId ? { sessionId } : {}) }));
+  }
+  return uploaded;
+});
+
+ipcMain.handle('daemon:validate-structured-output', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.structured.validate(structuredWorkflowRequestV2Schema.parse(input));
+});
+
 ipcMain.handle('daemon:create-session', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   // Validated here too, at the IPC boundary from the (untrusted) renderer. @agent-dock/client
@@ -363,7 +702,7 @@ ipcMain.handle('daemon:create-session', async (_event, input: unknown) => {
   // boundary from the renderer in the first place.
   const parsed = createSessionRequestSchema.parse(input);
   const session = await client.sessions.create(parsed);
-  activeSessionId = session.id;
+  activeSessionIds.add(session.id);
   forwardSessionEvents(session.id);
   return session;
 });
@@ -378,36 +717,95 @@ ipcMain.handle('daemon:create-interactive-session', async (_event, input: unknow
   if (!client) throw new Error('daemon is not ready yet');
   const parsed = createSessionV2RequestSchema.parse(input);
   const activeClient = client;
-  return pendingInteractiveCreates.run(
-    (signal) => activeClient.v2.sessions.create(parsed, { signal }),
-    (session) => {
-      activeInteractiveSessionIds.add(session.id);
-      forwardInteractiveSessionEvents(session.id);
-    },
-    async (session) => {
-      const controller = new AbortController();
-      const timer = setTimeout(
-        () => controller.abort(new Error('late interactive session cancellation timed out')),
-        DAEMON_CANCELLATION_TIMEOUT_MS,
-      );
-      await waitWithin(
-        activeClient.v2.sessions.cancel(session.id, { signal: controller.signal }),
-        DAEMON_CANCELLATION_TIMEOUT_MS,
-      );
-      clearTimeout(timer);
-    },
+  return createTrackedInteractiveSession((signal) =>
+    activeClient.v2.sessions.create(parsed, { signal }),
   );
+});
+
+ipcMain.handle('daemon:list-interactive-sessions', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.sessions.list(sessionListV2QuerySchema.parse(input));
+});
+
+ipcMain.handle('daemon:read-interactive-session-history', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  if (!isRecordWithExactKeys(input, ['sessionId', 'query'])) {
+    throw new Error('invalid interactive session history input');
+  }
+  const { sessionId } = sessionIdParamSchema.parse({ sessionId: input.sessionId });
+  const query = sessionEventHistoryV2QuerySchema.parse(input.query);
+  return client.v2.sessions.history(sessionId, query);
+});
+
+ipcMain.handle('daemon:reconnect-interactive-session', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  const { sessionId } = sessionIdParamSchema.parse({ sessionId: input });
+  const session = await client.v2.sessions.get(sessionId);
+  activateInteractiveSession(session);
+  return session;
+});
+
+for (const kind of ['resume', 'fork'] as const) {
+  ipcMain.handle(`daemon:${kind}-interactive-session`, async (_event, input: unknown) => {
+    if (!client) throw new Error('daemon is not ready yet');
+    if (!isRecordWithExactKeys(input, ['sessionId', 'input'])) {
+      throw new Error(`invalid interactive session ${kind} input`);
+    }
+    const { sessionId } = sessionIdParamSchema.parse({ sessionId: input.sessionId });
+    const continuation = sessionContinuationInputV2Schema.parse(input.input);
+    const activeClient = client;
+    return createTrackedInteractiveSession((signal) =>
+      activeClient.v2.sessions[kind](sessionId, continuation, { signal }),
+    );
+  });
+}
+
+ipcMain.handle('daemon:delete-interactive-session', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  const { sessionId } = sessionIdParamSchema.parse({ sessionId: input });
+  await client.v2.sessions.delete(sessionId);
+  activeInteractiveSessionIds.delete(sessionId);
+  interactiveStreamAborts.get(sessionId)?.abort();
+  interactiveStreamAborts.delete(sessionId);
+  clearInteractionSession(sessionId, 'stream_disconnected');
 });
 
 ipcMain.handle('daemon:send-session-command', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
-  return client.v2.sessions.send(agentCommandV2Schema.parse(input));
+  return client.v2.sessions.send(parseRendererSessionCommand(input));
+});
+
+ipcMain.handle('daemon:respond-approval', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return sendInteractionCommand(client, interactionBroker.resolveApproval(input));
+});
+
+ipcMain.handle('daemon:answer-questions', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return sendInteractionCommand(client, interactionBroker.resolveQuestions(input));
 });
 
 ipcMain.handle('daemon:cancel-interactive-session', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   const { sessionId } = sessionIdParamSchema.parse({ sessionId: input });
   return client.v2.sessions.cancel(sessionId);
+});
+
+ipcMain.handle('daemon:inspect-workspace', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  const { cwd } = workspaceInspectRequestV2Schema.parse(input);
+  return client.v2.workspaces.inspect(cwd);
+});
+
+ipcMain.handle('daemon:set-workspace-trust', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  const { workspaceId, update } = parseWorkspaceTrustInput(input);
+  return client.v2.workspaces.setTrust(workspaceId, update);
+});
+
+ipcMain.handle('daemon:read-audit', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.audit.list(parseAuditReadInput(input));
 });
 
 ipcMain.handle('dialog:select-directory', async () => {

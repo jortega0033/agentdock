@@ -130,21 +130,16 @@ a session's `cwd` gets set; the renderer cannot read the filesystem itself to co
 
 ## Provider and session flow (what the demo UI actually does)
 
-The renderer still uses the v1 functions below. Issue #7 adds the narrow v2 bridge so a future UI
-does not need a new privileged boundary, but it does not add a rich timeline, approval/question
-controls, steering, or a multi-session workspace. Native Claude/Codex interactive transports also
-remain gated by issue #8 and outside this UI bridge change.
-
-1. On load, the renderer calls `listProviders()` and shows each provider's `installed` /
-   `authenticated` state (routing the user to the CLI's own login flow if `installed` is true but
-   `authenticated` isn't).
-2. The user picks a provider, a working directory (via the picker above), and types a prompt.
-3. `createSession(input)` creates the session; `main.ts` immediately starts forwarding that
-   session's SSE events to the renderer via `onSessionEvent`.
-4. `EventLog.tsx` renders each `AgentEvent` with a single `switch (event.type)`, see
-   [protocol-v1.md](protocol-v1.md) for the full event union; the UI never branches on which
-   provider produced an event.
-5. `cancelSession(id)` is available while a session is running.
+1. On load, the renderer calls `listProvidersV2()` and shows each provider's installation,
+   authentication, transport, capability, and sandbox evidence.
+2. The user picks a provider, a working directory, and a prompt. The main process verifies the
+   workspace trust record before a session can start.
+3. `createInteractiveSession(input)` negotiates capabilities and starts the selected provider
+   transport. `main.ts` forwards its v2 stream through the narrow preload bridge.
+4. `ActivityTimeline.tsx` renders bounded provider-neutral activity cards. Approval and question
+   requests use the separate interaction broker and focused security dialogs.
+5. `cancelInteractiveSession(id)` is available while a session is running. Protocol v1 envelopes
+   remain supported by the timeline model during migration, but the demo flow uses v2.
 
 ## Where to safely add native functionality
 

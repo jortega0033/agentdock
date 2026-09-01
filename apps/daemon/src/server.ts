@@ -7,13 +7,29 @@ import { registerProviderRoutes } from './routes/providers.js';
 import { registerSessionRoutes } from './routes/sessions.js';
 import { registerV2ProviderRoutes } from './routes/v2-providers.js';
 import { registerV2SessionRoutes } from './routes/v2-sessions.js';
+import { registerV2AuditRoutes } from './routes/v2-audit.js';
+import { registerV2WorkspaceRoutes } from './routes/v2-workspaces.js';
+import { registerV2McpRoutes } from './routes/v2-mcp.js';
+import { registerV2ComponentRoutes } from './routes/v2-components.js';
+import type { AuditStore } from './audit-store.js';
 import type { SessionManager } from './session-manager.js';
+import type { WorkspaceTrustStore } from './workspace-trust-store.js';
+import type { SubagentGraphStore } from './subagent-graph-store.js';
+import type { OwnedWorktreeManager } from './worktree-manager.js';
+import { registerV2AgentWorktreeRoutes } from './routes/v2-agents-worktrees.js';
+import type { AttachmentStore } from './attachment-store.js';
+import { registerV2MultimodalRoutes } from './routes/v2-multimodal.js';
 
 export interface BuildServerOptions {
   registry: ProviderRegistry;
   sessionManager: SessionManager;
   token: string;
   logger: Logger;
+  auditStore?: AuditStore;
+  trustStore?: WorkspaceTrustStore;
+  subagentStore?: SubagentGraphStore;
+  worktreeManager?: OwnedWorktreeManager;
+  attachmentStore?: AttachmentStore;
 }
 
 /**
@@ -43,10 +59,7 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
     // response header, so an allowlisted origin still couldn't complete a request; it was dead
     // configuration and has been removed rather than fixed, since nothing currently needs it.
     if (req.headers.origin !== undefined) {
-      opts.logger.warn('rejected request carrying an Origin header', {
-        origin: req.headers.origin,
-        url: req.url,
-      });
+      opts.logger.warn('rejected request carrying an Origin header', { method: req.method });
       reply.code(403).send(
         req.url.startsWith('/v2/')
           ? {
@@ -75,14 +88,28 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
   });
 
   app.register(rateLimit, { global: false });
+  app.addContentTypeParser('application/octet-stream', (request, payload, done) =>
+    done(null, payload),
+  );
 
   registerHealthRoute(app, startedAt);
   registerProviderRoutes(app, opts.registry);
-  registerSessionRoutes(app, opts.sessionManager, opts.registry);
+  registerSessionRoutes(app, opts.sessionManager, opts.registry, opts.trustStore);
   registerV2ProviderRoutes(app, opts.registry);
   // Route-level limiter configuration is bound by @fastify/rate-limit's onRoute hook. Register
   // this route only after the plugin has booted so the hook sees it in this synchronous builder.
-  app.after(() => registerV2SessionRoutes(app, opts.sessionManager, opts.registry));
+  app.after(() => {
+    registerV2SessionRoutes(app, opts.sessionManager, opts.registry, opts.trustStore);
+    if (opts.auditStore) registerV2AuditRoutes(app, opts.auditStore);
+    if (opts.trustStore) {
+      registerV2WorkspaceRoutes(app, opts.trustStore, opts.sessionManager);
+      registerV2McpRoutes(app, opts.registry, opts.trustStore);
+      registerV2ComponentRoutes(app, opts.registry, opts.trustStore);
+    }
+    registerV2AgentWorktreeRoutes(app, opts.subagentStore, opts.worktreeManager);
+    if (opts.attachmentStore)
+      registerV2MultimodalRoutes(app, opts.attachmentStore, opts.sessionManager);
+  });
 
   app.setErrorHandler((err: FastifyError, req, reply) => {
     // Fastify's own body-parsing errors (malformed JSON, payload-too-large, ...) carry a real
@@ -96,7 +123,7 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
         : 500;
 
     if (statusCode >= 500) {
-      opts.logger.error('unhandled route error', { message: err.message, url: req.url });
+      opts.logger.error('unhandled route error', { method: req.method, statusCode });
       reply
         .code(500)
         .send(
@@ -106,7 +133,7 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
         );
       return;
     }
-    opts.logger.warn('client error', { message: err.message, url: req.url, statusCode });
+    opts.logger.warn('client error', { method: req.method, statusCode });
     if (req.url.startsWith('/v2/')) {
       const isPayloadTooLarge = statusCode === 413;
       const isRateLimited = statusCode === 429;

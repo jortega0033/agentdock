@@ -2,7 +2,7 @@
   "name": "agent-dock",
   "private": true,
   "version": "0.1.0",
-  "description": "Boilerplate for desktop AI apps that bring their own Claude Code / Codex CLI subscription",
+  "description": "Open-source Electron and local-daemon boilerplate for apps using Claude Agent SDK, Claude CLI, or Codex",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
@@ -14,6 +14,7 @@
     "dev:desktop": "pnpm --filter @agent-dock/desktop run dev",
     "daemon": "pnpm --filter @agent-dock/daemon run start",
     "package": "pnpm build && pnpm --filter @agent-dock/desktop run package",
+    "prepackage:win": "node apps/daemon/scripts/build-windows-job-host.mjs --assert-windows",
     "package:win": "pnpm build && pnpm --filter @agent-dock/desktop run package:win",
     "assets:generate": "python scripts/assets/generate_assets.py && python scripts/assets/generate_public_assets.py",
     "assets:validate": "python scripts/assets/validate_assets.py",

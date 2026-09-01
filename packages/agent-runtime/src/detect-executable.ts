@@ -7,7 +7,9 @@ import { execCapture } from './process/exec-capture.js';
  * Locates an executable without assuming it's on the PATH the daemon inherited. Electron/GUI
  * apps frequently start with a different PATH than an interactive login shell (notably on
  * macOS), so on top of a real PATH lookup (`where` / `which`, never a shell builtin) we probe a
- * short, curated list of directories CLI installers commonly use.
+ * short, curated list of directories CLI installers commonly use. Windows scans PATH directly
+ * so executable discovery does not itself depend on launching the packaged process-tree helper;
+ * POSIX uses `which` without a shell.
  */
 export async function findExecutable(
   names: string[],
@@ -37,16 +39,51 @@ export async function findExecutable(
 }
 
 async function lookupOnPath(name: string): Promise<string | null> {
-  const [command, args] =
-    process.platform === 'win32' ? ['where', [name]] : ['which', [name]];
+  if (process.platform === 'win32') return lookupWindowsExecutableOnPath(name);
   try {
-    const result = await execCapture(command, args, { timeoutMs: 5_000 });
+    const result = await execCapture('which', [name], { timeoutMs: 5_000 });
     if (result.code !== 0) return null;
     const firstLine = result.stdout.split(/\r?\n/).find((line) => line.trim().length > 0);
     return firstLine?.trim() ?? null;
   } catch {
     return null;
   }
+}
+
+/** Windows JobHost accepts only native executables and npm-style command shims. */
+export function lookupWindowsExecutableOnPath(
+  name: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const path = Object.entries(env).find(([key]) => key.toUpperCase() === 'PATH')?.[1];
+  if (!path) return null;
+  const lowerName = name.toLowerCase();
+  const pathExt = Object.entries(env).find(([key]) => key.toUpperCase() === 'PATHEXT')?.[1];
+  const supportedExtensions = (pathExt?.split(';') ?? ['.exe', '.cmd'])
+    .map((extension) => extension.trim().toLowerCase())
+    .filter(
+      (extension, index, all) =>
+        (extension === '.exe' || extension === '.cmd') && all.indexOf(extension) === index,
+    );
+  const candidateNames =
+    lowerName.endsWith('.exe') || lowerName.endsWith('.cmd')
+      ? [name]
+      : supportedExtensions.map((extension) => `${name}${extension}`);
+
+  for (const rawDirectory of path.split(';')) {
+    const trimmed = rawDirectory.trim();
+    const directory =
+      trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')
+        ? trimmed.slice(1, -1)
+        : trimmed;
+    // Empty/relative PATH entries implicitly select the CWD; never allow that ambiguity here.
+    if (!isAbsolute(directory)) continue;
+    for (const candidateName of candidateNames) {
+      const candidate = join(directory, candidateName);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
 }
 
 function commonInstallDirs(): string[] {

@@ -3,6 +3,7 @@ import { CODEX_PROMPT_VIA_STDIN } from '../src/providers/codex/adapter.js';
 import { CODEX_CAPABILITIES } from '../src/providers/codex/capabilities.js';
 import { parseCodexLine } from '../src/providers/codex/parser.js';
 import { describeProviderContract } from './support/provider-contract.js';
+import { describe, expect, it } from 'vitest';
 
 describeProviderContract({
   providerId: 'codex',
@@ -22,4 +23,40 @@ describeProviderContract({
   },
   expectedAssistantText: 'done',
   expectedProviderSessionId: 'codex-fixture-thread-id',
+});
+
+describe('Codex pinned fallback scope', () => {
+  it('adds an explicit sandbox only when a pinned cross-transport launch requests one', () => {
+    expect(
+      buildCodexArgs({
+        sessionId: 'session-1',
+        cwd: '/workspace',
+        prompt: 'hello',
+        sandbox: 'workspace-write',
+        model: 'gpt-5.4',
+      }),
+    ).toEqual([
+      'exec',
+      'hello',
+      '--json',
+      '--skip-git-repo-check',
+      '--sandbox',
+      'workspace-write',
+      '--model',
+      'gpt-5.4',
+    ]);
+  });
+
+  it('fails closed instead of dropping a sandbox pin on resumed exec', () => {
+    expect(() =>
+      buildCodexArgs({
+        sessionId: 'session-2',
+        cwd: '/workspace',
+        prompt: 'continue',
+        resumeProviderSessionId: 'native-thread-1',
+        sandbox: 'workspace-write',
+        model: 'gpt-5.4',
+      }),
+    ).toThrow('cannot preserve an explicit sandbox scope');
+  });
 });

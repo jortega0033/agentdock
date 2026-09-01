@@ -30,6 +30,9 @@ install`, with no code signing configured: there's nothing to sign with in this 
   was an actual bug, not a theoretical risk: caught by running the packaged-mode code path
   (`node dist/index.js`) and hitting `ERR_MODULE_NOT_FOUND`, see
   `apps/daemon/scripts/build.mjs` for the fix.
+- `apps/daemon/dist/claude-agent-sdk/`: the pinned Windows x64 SDK executable plus its SDK/native
+  notices. The build executes `claude.exe --version` and rejects a package/version mismatch before
+  staging it.
 - `apps/desktop/dist/`: the Vite production build of the React renderer
 - `apps/desktop/dist-electron/main.js`, `preload.js`: the Electron main process and preload
   script, each bundled to a single file (`main.js` inlines `@agent-dock/client`,
@@ -63,6 +66,11 @@ resources/
     icon-256.png                 runtime window icon used outside packaged metadata surfaces
   daemon/
     index.js                     the daemon's own esbuild bundle, unmodified from apps/daemon/dist/
+    agent-dock-job-host.exe      daemon-owned Windows Job Object process-tree host
+    claude-agent-sdk/
+      claude.exe                 pinned SDK executable, a real file outside app.asar
+      NOTICE.txt                 version, terms, auth, and branding release notice
+      LICENSE.*.md               upstream SDK/native notices
 ```
 
 ## Native application identity
@@ -79,11 +87,10 @@ source SVGs, exact inventory, regeneration, validation, and fork rebranding step
 ## The daemon ships outside `app.asar`
 
 `extraResources: [{ from: ../daemon/dist, to: daemon }]` in `electron-builder.yml` puts the daemon
-bundle *outside* the asar archive entirely, rather than relying on Electron's asar-aware `fs`
-patching. It's spawned as a separate OS process (`child_process.spawn`) rather than imported code
-Asar is a virtual filesystem Electron's own `fs` module knows how to read, but handing a path
-inside it to a freshly spawned process is exactly the kind of "happens to work by accident"
-behavior this project avoids.
+bundle, Job Object host, and Claude Agent SDK executable _outside_ the asar archive entirely. They
+are spawned as real OS processes rather than imported code. Asar is a virtual filesystem
+Electron's own `fs` module knows how to read, but handing a path inside it to a freshly spawned
+process is exactly the kind of "happens to work by accident" behavior this project avoids.
 
 ## `resolveDaemonEntry()`
 
@@ -138,11 +145,11 @@ local testing.
 
 ## Platform matrix
 
-| | source / dev | production build | packaged app | installer | uninstall |
-|---|---|---|---|---|---|
-| **Windows** | verified | verified | verified (installed, launched, closed, relaunched, second-instance-blocked) | verified (NSIS, silent install/uninstall) | verified |
-| **macOS** | untested | untested | untested | not implemented | n/a |
-| **Linux** | untested | untested | untested | not implemented | n/a |
+|             | source / dev | production build | packaged app                                                                | installer                                 | uninstall |
+| ----------- | ------------ | ---------------- | --------------------------------------------------------------------------- | ----------------------------------------- | --------- |
+| **Windows** | verified     | verified         | verified (installed, launched, closed, relaunched, second-instance-blocked) | verified (NSIS, silent install/uninstall) | verified  |
+| **macOS**   | untested     | untested         | untested                                                                    | not implemented                           | n/a       |
+| **Linux**   | untested     | untested         | untested                                                                    | not implemented                           | n/a       |
 
 Nothing in the code is deliberately Windows-only: path handling uses `node:path` throughout, and
 process management already has explicit POSIX branches (see
@@ -160,6 +167,7 @@ catch every packaging-mode failure mode: the three real bugs documented above
 (`resolveDaemonEntry`'s asar boundary, the
 `devDependencies`-vs-`dependencies` duplication, and the shutdown-path crash in
 [architecture.md](architecture.md)) were each only caught by actually running `pnpm package:win` and
-launching the result. Run it, confirm the app launches from
-`dist-packages/win-unpacked/AgentDock.exe`, and inspect the executable, installer, Start Menu, and
-window icons before considering the change done.
+launching the result. Run it, then run `pnpm --filter @agent-dock/desktop
+test:packaged-daemon-win`; that smoke test executes the packaged SDK binary, checks its exact pinned
+version and notices, and proves the daemon still starts. Also inspect the installer, Start Menu,
+and window icons before considering the change done.

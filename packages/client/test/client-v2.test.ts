@@ -33,6 +33,17 @@ const COMMAND_ACKNOWLEDGEMENT_V2 = {
   turnId: TURN_ID,
 } as const;
 
+const WORKSPACE_ID = 'a'.repeat(64);
+const WORKSPACE_INCARNATION = 'b'.repeat(64);
+const WORKSPACE_TRUST_VIEW = {
+  schemaVersion: 1,
+  workspaceId: WORKSPACE_ID,
+  incarnation: WORKSPACE_INCARNATION,
+  displayName: 'workspace',
+  reusable: true,
+  state: 'untrusted',
+} as const;
+
 function extensionSummaryEvent(sequence: number, sessionId = SESSION_ID) {
   return {
     type: 'extension.summary',
@@ -122,6 +133,14 @@ const PROVIDER_V2 = {
   authenticated: 'authenticated',
   transports: [],
   capabilities: [],
+  sandbox: {
+    providerId: 'claude',
+    platform: 'win32',
+    provider: { mechanism: 'provider_policy', state: 'unknown', evidence: [] },
+    agentDock: { mechanism: 'agentdock_policy', state: 'not_requested', evidence: [] },
+    os: { mechanism: 'os_sandbox', state: 'unavailable', evidence: [] },
+    badge: 'none',
+  },
 };
 
 const SESSION_V2 = {
@@ -141,6 +160,12 @@ const SESSION_V2 = {
   acceptedWork: 'not_accepted',
   startedAt: '2026-01-01T00:00:00.000Z',
   earliestSequence: 0,
+};
+
+const SESSION_PAGE_V2 = { sessions: [SESSION_V2], nextCursor: 'page_2' };
+const SESSION_HISTORY_PAGE_V2 = {
+  events: [extensionSummaryEvent(0)],
+  nextCursor: 'page_2',
 };
 
 describe('AgentDockClient.v2 protocol discovery', () => {
@@ -186,6 +211,32 @@ describe('AgentDockClient.v2 protocol discovery', () => {
 
     await expect(makeClient(fetchImpl).providers.list()).resolves.toEqual([]);
     expect(fetchImpl.mock.calls.some(([url]) => String(url).endsWith('/v2/providers'))).toBe(false);
+  });
+});
+
+describe('AgentDockClient.v2 MCP control', () => {
+  it('uses fixed versioned routes and validates configuration before IPC-facing callers can send it', async () => {
+    const list = { servers: [], revision: 'mcp-1' };
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      if (url.includes('/v2/integrations/mcp')) return jsonResponse(200, list);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const client = makeClient(fetchImpl);
+    await expect(client.v2.integrations.mcp.list('codex', 'C:\\repo')).resolves.toEqual(list);
+    await expect(client.v2.integrations.mcp.configure({
+      provider: 'codex', cwd: 'C:\\repo', action: 'add', name: 'docs', scope: 'user',
+      config: { transport: 'streamable_http', url: 'https://mcp.example.test' },
+    })).resolves.toEqual(list);
+    await expect(client.v2.integrations.mcp.configure({
+      provider: 'codex', cwd: 'C:\\repo', action: 'add', name: 'unsafe', scope: 'user',
+      config: { transport: 'streamable_http', url: 'http://mcp.example.test' },
+    })).rejects.toBeInstanceOf(ValidationError);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(fetchImpl.mock.calls[2]?.[1]).toMatchObject({
+      method: 'POST',
+      headers: expect.objectContaining({ Authorization: `Bearer ${TOKEN}` }),
+    });
   });
 });
 
@@ -241,6 +292,48 @@ describe('AgentDockClient.v2 response validation', () => {
     expect(cancelCall?.[1]).toMatchObject({ signal: requestController.signal });
   });
 
+  it('lists persisted sessions, reads paginated history, and starts daemon-owned continuations', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      if (url.endsWith('/v2/sessions?cursor=page_1&limit=25'))
+        return jsonResponse(200, SESSION_PAGE_V2);
+      if (url.endsWith(`/v2/sessions/${SESSION_ID}/history?limit=25`))
+        return jsonResponse(200, SESSION_HISTORY_PAGE_V2);
+      if (
+        (url.endsWith(`/v2/sessions/${SESSION_ID}/resume`) ||
+          url.endsWith(`/v2/sessions/${SESSION_ID}/fork`)) &&
+        init?.method === 'POST'
+      ) {
+        return jsonResponse(201, SESSION_V2);
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const client = makeClient(fetchImpl);
+
+    await expect(client.v2.sessions.list({ cursor: 'page_1', limit: 25 })).resolves.toEqual(
+      SESSION_PAGE_V2,
+    );
+    await expect(client.v2.sessions.history(SESSION_ID, { limit: 25 })).resolves.toEqual(
+      SESSION_HISTORY_PAGE_V2,
+    );
+    await expect(client.v2.sessions.resume(SESSION_ID, { prompt: 'continue' })).resolves.toEqual(
+      SESSION_V2,
+    );
+    await expect(client.v2.sessions.fork(SESSION_ID, { prompt: 'branch' })).resolves.toEqual(
+      SESSION_V2,
+    );
+
+    const resumeCall = fetchImpl.mock.calls.find(([url]) =>
+      String(url).endsWith(`/v2/sessions/${SESSION_ID}/resume`),
+    );
+    expect(JSON.parse((resumeCall?.[1] as RequestInit).body as string)).toEqual({
+      prompt: 'continue',
+    });
+    expect(fetchImpl.mock.calls.some(([url]) => String(url).includes('providerSessionId'))).toBe(
+      false,
+    );
+  });
+
   it('sends a validated command on the authenticated versioned route', async () => {
     const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
       if (url.endsWith('/health')) return healthResponse([1, 2]);
@@ -262,6 +355,58 @@ describe('AgentDockClient.v2 response validation', () => {
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
     });
     expect(JSON.parse(String((commandCall?.[1] as RequestInit).body))).toEqual(COMMAND_V2);
+  });
+
+  it('keeps the responder lease private and attaches it only to interaction responses', async () => {
+    const responderLease = 'L'.repeat(43);
+    const requestId = '123e4567-e89b-42d3-a456-426614174005';
+    const approvalCommand = {
+      type: 'approval.respond' as const,
+      commandId: COMMAND_ID,
+      sessionId: SESSION_ID,
+      turnId: TURN_ID,
+      requestId,
+      decision: 'deny' as const,
+    };
+    const fetchImpl = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      if (url.endsWith(`/v2/sessions/${SESSION_ID}/events`)) {
+        const response = sseResponse([v2EventFrame(extensionSummaryEvent(0))]);
+        response.headers.set('X-AgentDock-Responder-Lease', responderLease);
+        return response;
+      }
+      if (url.endsWith(`/v2/sessions/${SESSION_ID}/commands`)) {
+        const command = JSON.parse(String(init?.body)) as typeof approvalCommand;
+        return jsonResponse(202, {
+          status: 'accepted',
+          commandId: command.commandId,
+          sessionId: command.sessionId,
+          turnId: command.turnId,
+        });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+
+    const observer = makeClient(fetchImpl);
+    await observer.v2.sessions.send(approvalCommand);
+
+    const responder = makeClient(fetchImpl);
+    const events = responder.v2.sessions.events(SESSION_ID, { responder: true });
+    await expect(events.next()).resolves.toEqual({ done: false, value: extensionSummaryEvent(0) });
+    await responder.v2.sessions.send(approvalCommand);
+    await events.return(undefined);
+
+    const commandCalls = fetchImpl.mock.calls.filter(([url]) =>
+      String(url).endsWith(`/v2/sessions/${SESSION_ID}/commands`),
+    );
+    expect(commandCalls).toHaveLength(2);
+    expect((commandCalls[0]?.[1] as RequestInit).headers).not.toHaveProperty(
+      'X-AgentDock-Responder-Lease',
+    );
+    expect((commandCalls[1]?.[1] as RequestInit).headers).toMatchObject({
+      'X-AgentDock-Responder-Lease': responderLease,
+    });
+    expect(await events.next()).toEqual({ done: true, value: undefined });
   });
 
   it('rejects an invalid command locally before compatibility or command requests', async () => {
@@ -595,21 +740,29 @@ describe('AgentDockClient.v2 response validation', () => {
     const event = extensionSummaryEvent(4);
     const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
       if (url.endsWith('/health')) return healthResponse([1, 2]);
-      return sseResponse([
+      const response = sseResponse([
         `:ok\n\nid: 4\nevent: extension.summary\ndata: ${JSON.stringify(event)}\n\n`,
       ]);
+      response.headers.set('X-AgentDock-Responder-Lease', 'R'.repeat(43));
+      return response;
     });
     const client = makeClient(fetchImpl);
 
     const collected = [];
-    for await (const item of client.v2.sessions.events(SESSION_ID, { lastEventId: '3' }))
+    for await (const item of client.v2.sessions.events(SESSION_ID, {
+      lastEventId: '3',
+      responder: true,
+    }))
       collected.push(item);
 
     expect(collected).toEqual([event]);
     const streamCall = fetchImpl.mock.calls.find(([url]) =>
       String(url).endsWith(`/v2/sessions/${SESSION_ID}/events`),
     );
-    expect((streamCall?.[1] as RequestInit).headers).toMatchObject({ 'Last-Event-ID': '3' });
+    expect((streamCall?.[1] as RequestInit).headers).toMatchObject({
+      'Last-Event-ID': '3',
+      'X-AgentDock-Responder': '1',
+    });
   });
 
   it('surfaces a bounded subscriber overflow control frame', async () => {
@@ -666,6 +819,66 @@ describe('AgentDockClient.v2 response validation', () => {
   });
 });
 
+describe('AgentDockClient.v2 security APIs', () => {
+  it('inspects and updates an exact workspace incarnation', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      return jsonResponse(200, WORKSPACE_TRUST_VIEW);
+    });
+    const client = makeClient(fetchImpl);
+
+    await expect(client.v2.workspaces.inspect('C:\\repo')).resolves.toEqual(WORKSPACE_TRUST_VIEW);
+    await expect(
+      client.v2.workspaces.setTrust(WORKSPACE_ID, {
+        cwd: 'C:\\repo',
+        incarnation: WORKSPACE_INCARNATION,
+        state: 'trusted',
+      }),
+    ).resolves.toEqual(WORKSPACE_TRUST_VIEW);
+
+    const inspectCall = fetchImpl.mock.calls.find(([url]) =>
+      String(url).endsWith('/v2/workspaces/inspect'),
+    );
+    expect(inspectCall?.[1]).toMatchObject({ method: 'POST' });
+    expect(JSON.parse(String((inspectCall?.[1] as RequestInit).body))).toEqual({ cwd: 'C:\\repo' });
+    const trustCall = fetchImpl.mock.calls.find(([url]) =>
+      String(url).endsWith(`/v2/workspaces/${WORKSPACE_ID}/trust`),
+    );
+    expect(trustCall?.[1]).toMatchObject({ method: 'PUT' });
+  });
+
+  it('reads a validated audit page with bounded query parameters', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      return jsonResponse(200, { schemaVersion: 1, entries: [] });
+    });
+    const client = makeClient(fetchImpl);
+
+    await expect(
+      client.v2.audit.list({ cursor: 'MA', limit: 25, sessionId: SESSION_ID }),
+    ).resolves.toEqual({ schemaVersion: 1, entries: [] });
+    expect(
+      fetchImpl.mock.calls.some(([url]) =>
+        String(url).endsWith(`/v2/audit?cursor=MA&limit=25&sessionId=${SESSION_ID}`),
+      ),
+    ).toBe(true);
+  });
+
+  it('rejects forged workspace IDs and invalid audit bounds before a privileged request', async () => {
+    const fetchImpl = vi.fn();
+    const client = makeClient(fetchImpl);
+    await expect(
+      client.v2.workspaces.setTrust('forged', {
+        cwd: 'C:\\repo',
+        incarnation: WORKSPACE_INCARNATION,
+        state: 'trusted',
+      }),
+    ).rejects.toBeInstanceOf(ValidationError);
+    await expect(client.v2.audit.list({ limit: 101 })).rejects.toBeInstanceOf(ValidationError);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
 describe('AgentDockClient.v2 error mapping', () => {
   it('retains typed 401 and provider/session 404 errors', async () => {
     const status = new Map<string, number>([
@@ -711,6 +924,35 @@ describe('AgentDockClient.v2 error mapping', () => {
     await expect(makeClient(fetchImpl).v2.sessions.send(COMMAND_V2)).rejects.toBeInstanceOf(
       SessionNotFoundError,
     );
+  });
+
+  it.each([
+    ['resume', 'continuation_not_found'],
+    ['fork', 'continuation_binding_not_found'],
+  ] as const)('preserves %s continuation 404 code %s', async (kind, code) => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      return jsonResponse(404, { error: 'continuation unavailable', code });
+    });
+
+    const sessions = makeClient(fetchImpl).v2.sessions;
+    const failure = await sessions[kind](SESSION_ID, { prompt: 'continue' }).catch(
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(DaemonError);
+    expect(failure).toMatchObject({ status: 404, code, message: 'continuation unavailable' });
+  });
+
+  it('keeps a genuinely missing continuation parent typed as SessionNotFoundError', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      return jsonResponse(404, { error: 'session not found', code: 'session_not_found' });
+    });
+
+    await expect(
+      makeClient(fetchImpl).v2.sessions.resume(SESSION_ID, { prompt: 'continue' }),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
   });
 
   it.each([409, 413, 429])('preserves command dispatch status %i', async (status) => {

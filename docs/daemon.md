@@ -116,25 +116,26 @@ The `AgentSession` record itself lives behind a `SessionStore` interface
 
 ```ts
 interface SessionStore {
-  create(session: AgentSession): void;
+  create(session: AgentSession, protocolVersion?: 1 | 2): void;
   get(id: string): AgentSession | undefined;
   update(id: string, session: AgentSession): void;
   delete(id: string): void;
   list(): AgentSession[];
+  protocolVersionOf(id: string): 1 | 2 | undefined;
 }
 ```
 
-`MemorySessionStore` is the only implementation and the daemon's default: fully synchronous (so is
-the interface), and **sessions do not survive a daemon restart**. Persistence is explicitly out of
-scope for this milestone: swapping in a real store (e.g. a future `SQLiteSessionStore`) should only
-require implementing this interface, not touching `SessionManager`'s lifecycle logic, but the
-interface would likely need to become `async` at that point, a deliberately larger change left for
-when it's actually needed.
+`MemorySessionStore` remains available for isolated tests and embedders. Production uses the
+versioned `FileSessionStore`, which atomically persists compatibility metadata without prompts or
+raw error diagnostics and marks legacy active-at-restart records failed. Protocol v2 additionally
+uses
+`FileExecutionGraphStore` as the authoritative durable metadata/history store; it recovers active
+executions as `interrupted` and owns lineage retention, tombstones, pagination, and continuation
+locks. All writes remain synchronous so metadata is durable before provider dispatch.
 
-The store owns only the `AgentSession` record. A session's live legacy or interactive provider
-handle and its buffered event history are kept as separate, non-persistable runtime state inside
-`SessionManager`, specifically so `SessionStore` never grows into an accidental event-history
-database with its own schema-design questions.
+The compatibility store owns only the `AgentSession` record. A session's live legacy or interactive
+provider handle and bounded SSE replay window remain runtime state inside `SessionManager`; durable
+normalized v2 events are stored separately by the execution graph.
 
 For an interactive v2 transport, creation resolves only after the provider startup handshake. The
 common supervisor enforces 1 MiB provider-frame and normalized-event limits, a 5,000-event / 16 MiB

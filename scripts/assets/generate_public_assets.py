@@ -150,13 +150,13 @@ def make_readme_and_portfolio() -> None:
     draw.text((78, 210), "AgentDock", fill=PAPER, font=font(58, bold=True))
     draw.multiline_text(
         (78, 292),
-        "Run CLI-authenticated AI agents\nthrough one secure local runtime.",
+        "Forkable Electron boilerplate\nfor desktop products using\nClaude Code or Codex CLI.",
         fill="#CBD5E1",
         font=font(23),
         spacing=8,
     )
 
-    chips = ("CLI auth stays local", "Typed protocol", "Provider-neutral events")
+    chips = ("Local daemon included", "CLI auth stays local", "Typed provider events")
     y = 418
     for label in chips:
         draw.rounded_rectangle((78, y, 390, y + 48), radius=14, fill="#121A2B", outline="#334155")
@@ -195,14 +195,14 @@ def make_social(width: int, height: int, filename: str) -> None:
     draw.text((pad, pad + icon_size + 28), "AgentDock", fill=PAPER, font=font(title_size, bold=True))
     draw.multiline_text(
         (pad, pad + icon_size + title_size + 50),
-        "Local AI agents.\nOne secure runtime.",
+        "Electron boilerplate.\nLocal daemon included.",
         fill="#CBD5E1",
         font=font(round(height * 0.043)),
         spacing=8,
     )
     draw.text(
         (pad, height - pad - 30),
-        "CLI-managed auth · typed events · provider-neutral",
+        "Fork it · Claude Code · Codex CLI",
         fill="#94A3B8",
         font=font(round(height * 0.027)),
     )
@@ -213,7 +213,7 @@ def make_asset_system_preview() -> None:
     canvas = Image.new("RGB", (1600, 1040), CANVAS)
     draw = ImageDraw.Draw(canvas)
     draw.text((70, 54), "AgentDock · Asset System", fill=INK, font=font(44, bold=True))
-    draw.text((70, 112), "Dock Gate identity · local runtime · provider-neutral", fill=SLATE, font=font(22))
+    draw.text((70, 112), "Forkable boilerplate · local daemon · provider-neutral", fill=SLATE, font=font(22))
 
     icon = Image.open(PNG_ICONS / "icon-512.png").convert("RGBA").resize((290, 290), Image.Resampling.LANCZOS)
     canvas.paste(icon, (70, 188), icon)

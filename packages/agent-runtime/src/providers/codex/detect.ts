@@ -1,7 +1,9 @@
-import type { AuthStatus, ProviderStatus } from '@agent-dock/shared';
+import type { AuthSource, AuthStatus, ProviderStatus } from '@agent-dock/shared';
 import { execCapture } from '../../process/exec-capture.js';
 import { findExecutable } from '../../detect-executable.js';
 import type { Logger } from '../../logger.js';
+import type { ProviderDetectionOptions } from '../../types.js';
+import { probeCodexAppServerScope } from './app-server/scope-probe.js';
 import { CODEX_CAPABILITIES } from './capabilities.js';
 
 const EXECUTABLE_NAMES = ['codex'];
@@ -20,6 +22,13 @@ export function parseCodexLoginStatus(output: string): AuthStatus {
   return 'unknown';
 }
 
+/** Parses only the non-secret credential source label exposed by `codex login status`. */
+export function parseCodexAuthSource(output: string): AuthSource {
+  if (/logged in using chatgpt/i.test(output) && !/not logged in/i.test(output)) return 'chatgpt';
+  if (/logged in using api key/i.test(output) && !/not logged in/i.test(output)) return 'api_key';
+  return 'unknown';
+}
+
 /** Preserves the complete CLI semver so prereleases cannot inherit stable fixture evidence. */
 export function parseCodexVersion(output: string): string | undefined {
   return output
@@ -34,8 +43,16 @@ export function parseCodexVersion(output: string): string | undefined {
  * variants) rather than JSON. We pattern-match conservatively and fall back to 'unknown' rather
  * than guessing, since a wrong "authenticated: 'authenticated'" is far worse than an honest "unknown".
  */
-export async function detectCodex(logger: Logger): Promise<ProviderStatus> {
-  const base = { id: 'codex' as const, name: 'Codex', capabilities: CODEX_CAPABILITIES };
+export async function detectCodex(
+  logger: Logger,
+  options?: ProviderDetectionOptions,
+): Promise<ProviderStatus> {
+  const base = {
+    id: 'codex' as const,
+    name: 'Codex',
+    capabilities: CODEX_CAPABILITIES,
+    authSource: 'unknown' as const,
+  };
 
   const executablePath = await findExecutable(EXECUTABLE_NAMES);
   if (!executablePath) {
@@ -70,9 +87,51 @@ export async function detectCodex(logger: Logger): Promise<ProviderStatus> {
   }
 
   const output = `${statusResult.stdout}\n${statusResult.stderr}`.trim();
+  if (statusResult.code !== 0) {
+    logger.warn('codex: login status failed', { code: statusResult.code });
+    return {
+      ...base,
+      installed: true,
+      authenticated: 'unknown',
+      executablePath,
+      version,
+      error: 'codex login status failed',
+    };
+  }
   const authenticated = parseCodexLoginStatus(output);
+  const authSource = parseCodexAuthSource(output);
   if (authenticated !== 'unknown') {
-    return { ...base, installed: true, authenticated, executablePath, version };
+    const status: ProviderStatus = {
+      ...base,
+      installed: true,
+      authenticated,
+      authSource,
+      executablePath,
+      version,
+    };
+    if (
+      authenticated === 'authenticated' &&
+      authSource !== 'unknown' &&
+      options?.includeLaunchScopeEvidence === true &&
+      options?.cwd &&
+      options.workspaceTrust?.state === 'trusted' &&
+      !options.signal?.aborted
+    ) {
+      try {
+        const evidence = await probeCodexAppServerScope({
+          executable: executablePath,
+          cwd: options.cwd,
+          providerStatus: status,
+          signal: options.signal,
+        });
+        if (evidence) return { ...status, ...evidence };
+      } catch {
+        // Scope evidence is optional for ordinary app-server startup but mandatory for fallback.
+        // Keep detection usable and let the daemon's existing fail-closed planner deny fallback.
+        logger.warn('codex: launch scope evidence unavailable');
+      }
+    }
+    return status;
   }
 
   return {
@@ -81,6 +140,8 @@ export async function detectCodex(logger: Logger): Promise<ProviderStatus> {
     authenticated: 'unknown',
     executablePath,
     version,
-    error: output.slice(0, 200) || 'could not determine codex login status',
+    // Successful CLI output is still untrusted and may contain account or credential material.
+    // Detection exposes only the fixed classification, never raw stdout/stderr.
+    error: 'could not determine codex login status',
   };
 }

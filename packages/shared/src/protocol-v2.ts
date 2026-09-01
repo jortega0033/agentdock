@@ -12,12 +12,14 @@ import {
   type CapabilitySelection,
   type Effect,
 } from './capabilities-v2.js';
+import { approvalDecisionV2Schema, permissionActionV2Schema } from './policy-v2.js';
 
 const MAX_CONTENT_BYTES = 256 * 1024;
 const MAX_COMMAND_BYTES = 1024 * 1024;
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const MAX_JSON_DEPTH = 16;
 const MAX_JSON_ITEMS = 1_024;
+const MAX_PAGE_SIZE = 100;
 
 export const sessionIdSchema = z.string().uuid();
 export const turnIdSchema = z.string().uuid();
@@ -255,7 +257,7 @@ export const approvalResponseCommandV2Schema = z
     type: z.literal('approval.respond'),
     turnId: turnIdSchema,
     requestId: requestIdSchema,
-    decision: z.enum(['allow_once', 'deny']),
+    decision: approvalDecisionV2Schema,
   })
   .strict();
 
@@ -298,11 +300,69 @@ export type QuestionAnswerV2 = z.infer<typeof questionAnswerV2Schema>;
 export type QuestionResponseCommandV2 = z.infer<typeof questionResponseCommandV2Schema>;
 export type AgentCommandV2 = z.infer<typeof agentCommandV2Schema>;
 
+export const providerSessionIdV2Schema = z
+  .string()
+  .min(1)
+  .refine((value) => utf8ByteLength(value) <= 1_024, {
+    message: 'provider session id must be at most 1024 UTF-8 bytes',
+  })
+  .refine(
+    (value) =>
+      ![...value].some((character) => {
+        const codePoint = character.codePointAt(0) ?? 0;
+        return codePoint <= 31 || codePoint === 127;
+      }),
+    {
+      message: 'provider session id must not contain control characters',
+    },
+  );
+
+export const sessionContinuationV2Schema = z.discriminatedUnion('kind', [
+  z
+    .object({
+      kind: z.literal('resume'),
+      providerSessionId: providerSessionIdV2Schema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('fork'),
+      providerSessionId: providerSessionIdV2Schema,
+    })
+    .strict(),
+]);
+
+export type SessionContinuationV2 = z.infer<typeof sessionContinuationV2Schema>;
+
+/**
+ * User-controlled input for a daemon-owned continuation. The parent session route parameter,
+ * rather than this body, selects the persisted provider-native session/thread identifier.
+ */
+export const sessionContinuationInputV2Schema = z
+  .object({
+    prompt: z.string().min(1, 'prompt is required').max(200_000, 'prompt is too long'),
+    capabilities: capabilityRequestSchema.optional(),
+    allowDirtyWorkspaceShare: z.boolean().optional(),
+  })
+  .strict()
+  .superRefine((input, ctx) => {
+    addBoundsIssue(input, ctx, MAX_COMMAND_BYTES, MAX_COMMAND_BYTES);
+  });
+
+export type SessionContinuationInputV2 = z.infer<typeof sessionContinuationInputV2Schema>;
+
 export interface CreateSessionV2Request {
   provider: (typeof PROVIDER_IDS)[number];
   cwd: string;
   prompt: string;
   capabilities?: CapabilityRequest;
+  /** Explicit consent to add a read-only session to an already-shared dirty Git worktree. */
+  allowDirtyWorkspaceShare?: boolean;
+  /**
+   * @deprecated Use the daemon-owned `POST /v2/sessions/:sessionId/resume` or `/fork` routes.
+   * Kept parse-compatible until consumers have migrated; new callers must not supply native IDs.
+   */
+  continuation?: SessionContinuationV2;
 }
 
 export const createSessionV2RequestSchema = z
@@ -311,11 +371,39 @@ export const createSessionV2RequestSchema = z
     cwd: z.string().min(1, 'cwd is required'),
     prompt: z.string().min(1, 'prompt is required').max(200_000, 'prompt is too long'),
     capabilities: capabilityRequestSchema.optional(),
+    allowDirtyWorkspaceShare: z.boolean().optional(),
+    continuation: sessionContinuationV2Schema.optional(),
   })
   .strict()
   .superRefine((request, ctx) => {
     addBoundsIssue(request, ctx, MAX_COMMAND_BYTES, MAX_COMMAND_BYTES);
   });
+
+/** Opaque pagination cursor issued by the daemon; callers must not derive or inspect it. */
+export const opaqueCursorV2Schema = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[A-Za-z0-9_-]+$/);
+export const pageLimitV2Schema = z.number().int().min(1).max(MAX_PAGE_SIZE);
+
+export const sessionListV2QuerySchema = z
+  .object({
+    cursor: opaqueCursorV2Schema.optional(),
+    limit: pageLimitV2Schema.optional(),
+  })
+  .strict();
+
+export type SessionListV2Query = z.infer<typeof sessionListV2QuerySchema>;
+
+export const sessionEventHistoryV2QuerySchema = z
+  .object({
+    cursor: opaqueCursorV2Schema.optional(),
+    limit: pageLimitV2Schema.optional(),
+  })
+  .strict();
+
+export type SessionEventHistoryV2Query = z.infer<typeof sessionEventHistoryV2QuerySchema>;
 
 export const sessionStatusV2Schema = z.enum([
   'starting',
@@ -327,20 +415,51 @@ export const sessionStatusV2Schema = z.enum([
   'interrupted',
 ]);
 
+const providerRuntimeVersionV2Schema = nonemptyWireStringSchema.refine(
+  (value) => /^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(value),
+  { message: 'runtime version metadata must contain only safe version characters' },
+);
+const providerFallbackReasonV2Schema = nonemptyWireStringSchema.refine(
+  (value) => /^[a-z0-9][a-z0-9._-]*$/.test(value),
+  { message: 'fallback reason must be a safe reason code' },
+);
+
+export const providerRuntimeMetadataV2Schema = z
+  .object({
+    cliVersion: providerRuntimeVersionV2Schema.optional(),
+    schemaVersion: providerRuntimeVersionV2Schema.optional(),
+    fixtureSet: providerRuntimeVersionV2Schema.optional(),
+    requestedTransportMode: z.enum(['auto', 'app-server', 'exec', 'sdk', 'cli']).optional(),
+    fallbackReason: providerFallbackReasonV2Schema.optional(),
+  })
+  .strict();
+
+export type ProviderRuntimeMetadataV2 = z.infer<typeof providerRuntimeMetadataV2Schema>;
+
 export interface AgentSessionV2 {
   id: SessionId;
   provider: (typeof PROVIDER_IDS)[number];
   transport: string;
   cwd: string;
+  /** Launch-time Git branch label, or `detached` when HEAD was detached. */
+  branch?: string;
   status: z.infer<typeof sessionStatusV2Schema>;
   selection: CapabilitySelection;
   executionId: ExecutionId;
+  rootExecutionId?: ExecutionId;
+  parentSessionId?: SessionId;
   parentExecutionId?: ExecutionId;
+  continuationKind?: 'fresh' | 'resume' | 'fork';
   currentTurnId?: TurnId;
   acceptedWork: 'not_accepted' | 'accepted' | 'unknown';
   startedAt: string;
   completedAt?: string;
+  terminalReason?: string;
   error?: string;
+  /** Opaque provider-native thread/session id; bounded and never used as a process id. */
+  providerSessionId?: string;
+  /** Bounded, non-secret provider transport facts. Native payloads and credentials are forbidden. */
+  runtimeMetadata?: ProviderRuntimeMetadataV2;
   earliestSequence: number;
 }
 
@@ -350,18 +469,34 @@ export const agentSessionV2Schema = z
     provider: z.enum(PROVIDER_IDS),
     transport: nonemptyWireStringSchema,
     cwd: z.string().min(1),
+    branch: z.string().min(1).max(1024).optional(),
     status: sessionStatusV2Schema,
     selection: capabilitySelectionSchema,
     executionId: executionIdSchema,
+    rootExecutionId: executionIdSchema.optional(),
+    parentSessionId: sessionIdSchema.optional(),
     parentExecutionId: executionIdSchema.optional(),
+    continuationKind: z.enum(['fresh', 'resume', 'fork']).optional(),
     currentTurnId: turnIdSchema.optional(),
     acceptedWork: z.enum(['not_accepted', 'accepted', 'unknown']),
     startedAt: z.string().datetime({ offset: true }),
     completedAt: z.string().datetime({ offset: true }).optional(),
+    terminalReason: nonemptyWireStringSchema.optional(),
     error: z.string().optional(),
+    providerSessionId: providerSessionIdV2Schema.optional(),
+    runtimeMetadata: providerRuntimeMetadataV2Schema.optional(),
     earliestSequence: z.number().int().finite().nonnegative(),
   })
   .strict();
+
+export const sessionListV2PageSchema = z
+  .object({
+    sessions: z.array(agentSessionV2Schema).max(MAX_PAGE_SIZE),
+    nextCursor: opaqueCursorV2Schema.optional(),
+  })
+  .strict();
+
+export type SessionListV2Page = z.infer<typeof sessionListV2PageSchema>;
 
 export interface CancelSessionV2Response {
   status: 'cancelling';
@@ -544,6 +679,8 @@ const approvalRequestedEventSchema = z
     reason: utf8ByteLimitedStringSchema(4 * 1024).optional(),
     possibleEffects: uniqueEffectsSchema,
     effectsComplete: z.boolean(),
+    permission: permissionActionV2Schema.optional(),
+    allowedDecisions: z.array(approvalDecisionV2Schema).min(1).max(3).optional(),
     deadlineAt: z.string().datetime({ offset: true }),
   })
   .strict()
@@ -588,6 +725,7 @@ const questionCancelledEventSchema = z
       'interrupt',
       'cancel',
       'shutdown',
+      'trust_revoked',
       'provider_cancelled',
     ]),
   })
@@ -668,6 +806,13 @@ export const agentEventV2EnvelopeSchema = agentEventV2EnvelopeUnionSchema.superR
   },
 );
 
+export const sessionEventHistoryV2PageSchema = z
+  .object({
+    events: z.array(agentEventV2EnvelopeSchema).max(MAX_PAGE_SIZE),
+    nextCursor: opaqueCursorV2Schema.optional(),
+  })
+  .strict();
+
 /** Wire items accepted on a v2 SSE stream. Stream errors are connection-local control frames. */
 export const agentEventOrStreamErrorV2Schema = z.union([
   agentEventV2EnvelopeSchema,
@@ -684,6 +829,7 @@ export interface AgentEventV2Meta {
 
 export type AgentEventV2Envelope = z.infer<typeof agentEventV2EnvelopeSchema>;
 export type AgentEventOrStreamErrorV2 = z.infer<typeof agentEventOrStreamErrorV2Schema>;
+export type SessionEventHistoryV2Page = z.infer<typeof sessionEventHistoryV2PageSchema>;
 type WithoutEventMeta<T> = T extends AgentEventV2Meta ? Omit<T, keyof AgentEventV2Meta> : never;
 export type AgentEventV2 = WithoutEventMeta<AgentEventV2Envelope>;
 

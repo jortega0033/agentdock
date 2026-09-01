@@ -16,10 +16,10 @@
     {
       "type": "error",
       "code": "provider_crash",
-      "message": "fixture acceptance failed",
+      "message": "provider acceptance failed",
       "recoverable": false
     },
-    { "type": "session.failed", "code": "provider_crash", "message": "fixture acceptance failed" }
+    { "type": "session.failed", "code": "provider_crash", "message": "provider acceptance failed" }
   ],
   "terminalState": {
     "type": "session.failed",

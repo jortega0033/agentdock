@@ -7,6 +7,11 @@ import {
   cancelSessionV2ResponseSchema,
   contentBlockV2Schema,
   createSessionV2RequestSchema,
+  sessionContinuationInputV2Schema,
+  sessionEventHistoryV2PageSchema,
+  sessionEventHistoryV2QuerySchema,
+  sessionListV2PageSchema,
+  sessionListV2QuerySchema,
   questionV2Schema,
 } from '../src/protocol-v2.js';
 
@@ -236,6 +241,96 @@ describe('protocol v2 content and interaction schemas', () => {
     ).toBe(false);
   });
 
+  it('accepts only the strict public resume/fork continuation union', () => {
+    for (const kind of ['resume', 'fork'] as const) {
+      expect(
+        createSessionV2RequestSchema.safeParse({
+          provider: 'codex',
+          cwd: '/tmp',
+          prompt: 'continue',
+          continuation: { kind, providerSessionId: 'native-thread-1' },
+        }).success,
+      ).toBe(true);
+    }
+    expect(
+      createSessionV2RequestSchema.safeParse({
+        provider: 'codex',
+        cwd: '/tmp',
+        prompt: 'continue',
+        continuation: {
+          kind: 'fork',
+          providerSessionId: 'native-thread-1',
+          lastTurnId: 'must-not-be-public',
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      createSessionV2RequestSchema.safeParse({
+        provider: 'codex',
+        cwd: '/tmp',
+        prompt: 'continue',
+        continuation: { kind: 'resume', providerSessionId: 'bad\nthread' },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('keeps deprecated create continuations parse-compatible while bounding daemon-owned input', () => {
+    expect(
+      createSessionV2RequestSchema.safeParse({
+        provider: 'codex',
+        cwd: '/tmp',
+        prompt: 'continue',
+        continuation: { kind: 'resume', providerSessionId: 'native-thread-1' },
+      }).success,
+    ).toBe(true);
+    expect(sessionContinuationInputV2Schema.safeParse({ prompt: 'continue' }).success).toBe(true);
+    expect(
+      sessionContinuationInputV2Schema.safeParse({
+        prompt: 'continue',
+        provider: 'codex',
+      }).success,
+    ).toBe(false);
+    expect(
+      sessionContinuationInputV2Schema.safeParse({
+        prompt: 'continue',
+        providerSessionId: 'native-thread-1',
+      }).success,
+    ).toBe(false);
+  });
+
+  it('validates bounded opaque session and event-history pages', () => {
+    expect(sessionListV2QuerySchema.safeParse({ cursor: 'page_1', limit: 100 }).success).toBe(true);
+    expect(sessionListV2QuerySchema.safeParse({ cursor: 'page+1' }).success).toBe(false);
+    expect(sessionEventHistoryV2QuerySchema.safeParse({ limit: 101 }).success).toBe(false);
+    const snapshot = {
+      id: sessionId,
+      provider: 'claude',
+      transport: 'cli',
+      cwd: '/tmp',
+      branch: 'feature/session-workspace',
+      status: 'completed',
+      selection,
+      executionId,
+      rootExecutionId: executionId,
+      parentSessionId: requestId,
+      parentExecutionId: turnId,
+      continuationKind: 'fork',
+      acceptedWork: 'accepted',
+      startedAt: timestamp,
+      completedAt: timestamp,
+      terminalReason: 'provider_completed',
+      earliestSequence: 0,
+    };
+    expect(
+      sessionListV2PageSchema.safeParse({ sessions: [snapshot], nextCursor: 'page_2' }).success,
+    ).toBe(true);
+    expect(
+      sessionEventHistoryV2PageSchema.safeParse({
+        events: [{ ...meta, type: 'session.completed' }],
+      }).success,
+    ).toBe(true);
+  });
+
   it('validates session snapshots and cancellation acknowledgements', () => {
     expect(
       agentSessionV2Schema.safeParse({
@@ -249,9 +344,64 @@ describe('protocol v2 content and interaction schemas', () => {
         currentTurnId: turnId,
         acceptedWork: 'accepted',
         startedAt: timestamp,
+        providerSessionId: 'thread_123',
+        runtimeMetadata: {
+          cliVersion: '0.147.0',
+          schemaVersion: 'schema-0.147.0',
+          fixtureSet: 'codex-app-server-0.147.0-v1',
+          requestedTransportMode: 'auto',
+          fallbackReason: 'app_server_handshake_failed',
+        },
         earliestSequence: 0,
       }).success,
     ).toBe(true);
+    for (const requestedTransportMode of ['sdk', 'cli'] as const) {
+      expect(
+        agentSessionV2Schema.safeParse({
+          id: sessionId,
+          provider: 'claude',
+          transport: requestedTransportMode === 'sdk' ? 'claude-agent-sdk' : 'legacy-one-shot',
+          cwd: '/tmp',
+          status: 'active',
+          selection,
+          executionId,
+          acceptedWork: 'accepted',
+          startedAt: timestamp,
+          runtimeMetadata: { requestedTransportMode },
+          earliestSequence: 0,
+        }).success,
+      ).toBe(true);
+    }
+    expect(
+      agentSessionV2Schema.safeParse({
+        id: sessionId,
+        provider: 'codex',
+        transport: 'legacy-one-shot',
+        cwd: '/tmp',
+        status: 'active',
+        selection,
+        executionId,
+        acceptedWork: 'unknown',
+        startedAt: timestamp,
+        runtimeMetadata: { fallbackReason: 'prompt: secret value' },
+        earliestSequence: 0,
+      }).success,
+    ).toBe(false);
+    expect(
+      agentSessionV2Schema.safeParse({
+        id: sessionId,
+        provider: 'codex',
+        transport: 'codex-app-server',
+        cwd: '/tmp',
+        status: 'active',
+        selection,
+        executionId,
+        acceptedWork: 'accepted',
+        startedAt: timestamp,
+        providerSessionId: `thread-${'x'.repeat(1_025)}`,
+        earliestSequence: 0,
+      }).success,
+    ).toBe(false);
     expect(
       cancelSessionV2ResponseSchema.safeParse({ status: 'cancelling', sessionId }).success,
     ).toBe(true);

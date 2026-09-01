@@ -41,12 +41,16 @@ All routes are relative to `http://127.0.0.1:<port>`. Every route except `GET /h
 | --------------------------------------- | ------: | ----------------------------------------------------------------------------------------- |
 | `GET /v2/providers`                     |   `200` | Strict `{ providers: ProviderStatusV2[] }`                                                |
 | `GET /v2/providers/:providerId`         |   `200` | One `ProviderStatusV2`                                                                    |
-| `POST /v2/sessions`                     |   `201` | Validate and rate-limit `CreateSessionV2Request`, negotiate, then return `AgentSessionV2` |
-| `GET /v2/sessions/:sessionId`           |   `200` | Return the current `AgentSessionV2` snapshot                                              |
+| `POST /v2/sessions`                     |   `201` | Validate and rate-limit a fresh session request; raw native continuation IDs are rejected |
+| `GET /v2/sessions`                      |   `200` | Return one cursor-paginated page of durable session snapshots                             |
+| `GET /v2/sessions/:sessionId`           |   `200` | Return the current or retained `AgentSessionV2` snapshot                                  |
+| `GET /v2/sessions/:sessionId/history`   |   `200` | Return one cursor-paginated page of durable normalized events                             |
 | `GET /v2/sessions/:sessionId/events`    |   `200` | SSE stream of `AgentEventV2Envelope`; `Last-Event-ID` resumes after that sequence         |
+| `POST /v2/sessions/:sessionId/resume`   |   `201` | Resume from the terminal parent's stored provider-native ID                               |
+| `POST /v2/sessions/:sessionId/fork`     |   `201` | Create a genuine native fork from the terminal parent's stored ID                         |
 | `POST /v2/sessions/:sessionId/commands` |   `202` | Validate and dispatch `AgentCommandV2`, then return `CommandAcknowledgementV2`            |
 | `POST /v2/sessions/:sessionId/cancel`   |   `202` | Return `{ status: 'cancelling', sessionId }` when `session.cancel` was selected           |
-| `DELETE /v2/sessions/:sessionId`        |   `204` | Cancel when necessary, then forget the session                                            |
+| `DELETE /v2/sessions/:sessionId`        |   `204` | Delete an entire terminal lineage                                                         |
 
 Protocol v2 has no `cancel-all` route. The unversioned v1 endpoint remains a narrow desktop-shutdown
 mechanism. Command dispatch is available only when the frozen selection includes the command's
@@ -65,6 +69,25 @@ has a protocol-specific reason. Important statuses are:
 |  `413` | Request exceeds the v2 payload bound                                                    |
 |  `422` | A required capability is unavailable; no provider work has started                      |
 |  `429` | Session creation or command limit; client also maps `stream_overflow` here              |
+|  `507` | Durable storage is full and no eligible terminal lineage can make room                  |
+
+## Durable execution graph
+
+V2 session metadata and normalized event history are stored in the per-user AgentDock state
+directory before provider work is dispatched. Metadata replacement is atomic; event files are
+append-only JSONL. Startup quarantines corrupt records or partial tails, preserves valid data, and
+marks executions that were active at daemon exit `interrupted` exactly once.
+
+Retention is enforced across whole terminal lineages: 30 days, 500 session records plus tombstones,
+and 250 MiB including quarantined bytes. Active lineages and continuation-locked lineages are never
+evicted. If no eligible lineage can make room, creation fails with `507 storage_full` before provider
+dispatch.
+
+Resume and fork requests contain only new user input and optional capability preferences. The daemon
+derives provider, workspace, lineage, and native session/thread ID from the stored terminal parent.
+One continuation lease keyed by provider plus native ID prevents concurrent mutation; a conflict is
+`409 continuation_in_use`. Fork is available only when the selected transport advertises a real
+provider-native fork operation.
 
 Session creation is limited to 30 authenticated attempts per minute per local client address. The
 limiter runs before filesystem inspection, provider detection, or process startup; rejected
@@ -148,8 +171,9 @@ session and never replays it through another transport.
 
 The current `legacy-one-shot` bridge is a migration adapter over the existing v1 process runner.
 It truthfully reports an `untrusted` scope and does not advertise filesystem or network isolation.
-Workspace trust enforcement is added by issue #9; until then this bridge retains the documented v1
-workspace trust boundary and must not be presented as sandboxed execution.
+The Claude Agent SDK transport is selected only with a verified trusted workspace and its reviewed
+restricted tool policy. The legacy bridge retains the documented v1 boundary and must not be
+presented as sandboxed execution.
 
 ## The 52 core capability constraints
 
@@ -361,14 +385,18 @@ compatibility bridge retains its v1 process-runner limits.
 
 ## Current implementation boundary
 
-Issue #7 provides the provider-neutral supervisor, command endpoint, bounded SSE delivery, client
-API, and a narrow Electron bridge. `FakeProvider` exercises the rich path in deterministic tests.
-The production Claude and Codex adapters still select `legacy-one-shot`; native transport work is
-intentionally outside issue #7, gated by
-[issue #8](https://github.com/jortega0033/agentdock/issues/8)'s conformance fixtures, and tracked in
-[issues #10](https://github.com/jortega0033/agentdock/issues/10) and
-[#11](https://github.com/jortega0033/agentdock/issues/11). The existing React renderer still uses
-the v1 flow. A rich interactive timeline and multi-session UI remain separate work in
+The current v2 implementation provides shared schemas and negotiation, provider discovery,
+versioned session routes, client APIs, a provider-neutral supervisor, bounded SSE delivery, and a
+narrow Electron bridge. `FakeProvider` exercises the rich interactive path in deterministic tests.
+Compatibility fixtures pin the legacy Claude and Codex CLI paths, plus the fake interactive path,
+to exact provider versions, transports, and fixture sets.
+
+The Claude Agent SDK transport is now available when its pinned Windows asset, reviewed
+authentication source, and trusted-workspace requirements are satisfied; the legacy Claude CLI
+compatibility path remains `legacy-one-shot`. Codex app-server is available for its exact validated
+runtime and trust scope, with `legacy-one-shot` retained as its compatibility path. SDK settings,
+MCP, hooks, plugins, skills, agents, and Bash are disabled. The existing React
+renderer still uses the v1 flow. A rich interactive timeline and multi-session UI remain separate work in
 [issues #12](https://github.com/jortega0033/agentdock/issues/12) and
 [#14](https://github.com/jortega0033/agentdock/issues/14).
 

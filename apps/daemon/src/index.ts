@@ -1,4 +1,6 @@
 import { createConsoleLogger } from '@agent-dock/agent-runtime';
+import { join } from 'node:path';
+import { AuditStore } from './audit-store.js';
 import { generateToken } from './auth-token.js';
 import {
   DEFAULT_APP_ID,
@@ -10,6 +12,13 @@ import {
 import { buildProviderRegistry } from './providers.js';
 import { buildServer } from './server.js';
 import { SessionManager } from './session-manager.js';
+import { FileSessionStore } from './session-store.js';
+import { FileExecutionGraphStore } from './execution-graph-store.js';
+import { stateDirectory } from './state-directory.js';
+import { SubagentGraphStore } from './subagent-graph-store.js';
+import { OwnedWorktreeManager } from './worktree-manager.js';
+import { AttachmentStore } from './attachment-store.js';
+import { WorkspaceTrustStore } from './workspace-trust-store.js';
 
 async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -33,10 +42,61 @@ async function main() {
   const appId = process.env.AGENT_DOCK_APP_ID?.trim() || DEFAULT_APP_ID;
   assertNoLiveDaemon(appId);
   const registry = buildProviderRegistry(logger);
-  const sessionManager = new SessionManager(registry, logger);
+  const durableStateDirectory = stateDirectory({ appId });
+  const subagentStore = new SubagentGraphStore(join(durableStateDirectory, 'subagents-v1.json'));
+  const worktreeManager = new OwnedWorktreeManager(join(durableStateDirectory, 'worktrees'), join(durableStateDirectory, 'worktrees-v1.json'));
+  await worktreeManager.load();
+  const attachmentStore = new AttachmentStore(join(durableStateDirectory, 'attachments-v1'), join(durableStateDirectory, 'attachments-v1.json'));
+  await attachmentStore.load();
+  const auditStore = new AuditStore(join(durableStateDirectory, 'audit-v1.jsonl'));
+  const trustStore = new WorkspaceTrustStore(
+    join(durableStateDirectory, 'workspace-trust-v1.json'),
+  );
+  const sessionStoreDirectory = join(durableStateDirectory, 'sessions-v1');
+  const sessionStore = new FileSessionStore(sessionStoreDirectory);
+  const executionGraphStore = new FileExecutionGraphStore(
+    join(durableStateDirectory, 'execution-graph-v1'),
+    {
+      additionalQuotaPaths: [sessionStoreDirectory],
+      onLineageRemoving: (records) => {
+        for (const record of records) sessionStore.delete(record.session.id);
+      },
+    },
+  );
+  const sessionRecovery = sessionStore.getRecoveryReport();
+  const graphRecovery = executionGraphStore.recoveryReport();
+  if (
+    sessionRecovery.quarantinedFiles.length > 0 ||
+    sessionRecovery.interruptedSessionIds.length > 0 ||
+    graphRecovery.quarantinedPaths.length > 0 ||
+    graphRecovery.interruptedSessionIds.length > 0
+  ) {
+    logger.warn('durable session recovery required repairs', {
+      quarantinedSessionRecords: sessionRecovery.quarantinedFiles.length,
+      quarantinedExecutionRecords: graphRecovery.quarantinedPaths.length,
+      interruptedCompatibilitySessions: sessionRecovery.interruptedSessionIds.length,
+      interruptedExecutions: graphRecovery.interruptedSessionIds.length,
+    });
+  }
+  const sessionManager = new SessionManager(registry, logger, sessionStore, {
+    auditStore,
+    trustStore,
+    providerStateDirectory: durableStateDirectory,
+    executionGraphStore,
+  });
   const token = generateToken();
 
-  const app = buildServer({ registry, sessionManager, token, logger });
+  const app = buildServer({
+    registry,
+    sessionManager,
+    token,
+    logger,
+    auditStore,
+    trustStore,
+    subagentStore,
+    worktreeManager,
+    attachmentStore,
+  });
 
   const requestedPort = Number(process.env.AGENT_DOCK_PORT ?? '0');
   await app.listen({ port: requestedPort, host: '127.0.0.1' });
@@ -61,10 +121,8 @@ async function main() {
     logger.info('shutting down', { signal });
     sessionManager.beginShutdown();
     await sessionManager.cancelAll();
-    const closing = app.close().catch((error: unknown) => {
-      logger.warn('daemon HTTP shutdown failed', {
-        message: error instanceof Error ? error.message : String(error),
-      });
+    const closing = app.close().catch(() => {
+      logger.warn('daemon HTTP shutdown failed');
     });
     if (!(await settlesWithin(closing, 5_000))) {
       logger.warn('daemon HTTP shutdown exceeded deadline; closing active sockets');
@@ -79,8 +137,8 @@ async function main() {
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 }
 
-main().catch((err) => {
-  console.error('daemon failed to start:', err instanceof Error ? err.message : err);
+main().catch(() => {
+  console.error('daemon failed to start');
   process.exit(1);
 });
 

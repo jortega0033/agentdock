@@ -1,5 +1,12 @@
 import { z } from 'zod';
-import { PROVIDER_IDS, type AuthStatus, type ProviderId } from './provider.js';
+import {
+  AUTH_SOURCES,
+  PROVIDER_IDS,
+  type AuthSource,
+  type AuthStatus,
+  type ProviderId,
+} from './provider.js';
+import { sandboxStatusV2Schema, type SandboxStatusV2 } from './policy-v2.js';
 
 export const EFFECTS = [
   'read',
@@ -369,8 +376,11 @@ export interface ProviderStatusV2 {
   name: string;
   installed: boolean;
   authenticated: AuthStatus;
+  authSource?: AuthSource;
   transports: ProviderTransportV2[];
   capabilities: CapabilitySupportRecord[];
+  /** Truthful, layered status; policy restrictions never imply OS isolation. */
+  sandbox: SandboxStatusV2;
   executablePath?: string;
   version?: string;
   error?: string;
@@ -984,8 +994,10 @@ export const providerStatusV2Schema = z
     name: z.string(),
     installed: z.boolean(),
     authenticated: z.enum(['authenticated', 'unauthenticated', 'unknown']),
+    authSource: z.enum(AUTH_SOURCES).optional(),
     transports: z.array(providerTransportV2Schema),
     capabilities: z.array(capabilitySupportRecordSchema),
+    sandbox: sandboxStatusV2Schema,
     executablePath: z.string().optional(),
     version: z.string().optional(),
     error: z.string().optional(),

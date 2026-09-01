@@ -28,6 +28,7 @@ import { CLAUDE_AGENT_SDK_TRANSPORT_ID, resolveClaudeSdkV2Support } from './sdk-
 import { CLAUDE_AGENT_SDK_CLAUDE_CODE_VERSION } from './sdk-version.js';
 import { resolveClaudeTransportMode } from './transport-mode.js';
 import { ProviderCliMcpControlPlane } from '../../mcp-control.js';
+import { FilesystemProviderComponentControlPlane } from '../../component-control.js';
 
 export const CLAUDE_PROMPT_VIA_STDIN = true;
 
@@ -81,6 +82,7 @@ export class ClaudeProvider implements AgentProvider {
   readonly id = 'claude' as const;
   readonly name = 'Claude Agent';
   readonly mcp = new ProviderCliMcpControlPlane({ provider: 'claude', executableName: 'claude' });
+  readonly components = new FilesystemProviderComponentControlPlane('claude');
 
   private readonly dependencies: ClaudeProviderDependencies;
 

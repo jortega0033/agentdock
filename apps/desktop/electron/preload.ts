@@ -29,6 +29,11 @@ import {
   mcpServerListV2Schema,
   mcpToolInvocationRequestV2Schema,
   mcpToolInvocationResultV2Schema,
+  providerComponentInvokeRequestV2Schema,
+  providerComponentListRequestV2Schema,
+  providerComponentListV2Schema,
+  providerComponentManageRequestV2Schema,
+  providerComponentOperationResultV2Schema,
   type AgentCommandV2,
   type AgentEvent,
   type AgentEventV2Envelope,
@@ -56,6 +61,11 @@ import {
   type McpServerListV2,
   type McpToolInvocationRequestV2,
   type McpToolInvocationResultV2,
+  type ProviderComponentInvokeRequestV2,
+  type ProviderComponentListRequestV2,
+  type ProviderComponentListV2,
+  type ProviderComponentManageRequestV2,
+  type ProviderComponentOperationResultV2,
 } from '@agent-dock/shared';
 import type {
   RendererInteraction,
@@ -119,6 +129,9 @@ export interface AgentDockBridge {
   getMcpCatalog(provider: ProviderId, serverId: string, cwd: string): Promise<McpCatalogV2>;
   startMcpOAuth(provider: ProviderId, serverId: string, cwd: string): Promise<RendererMcpOAuthStatus>;
   invokeMcpTool(input: McpToolInvocationRequestV2): Promise<McpToolInvocationResultV2>;
+  listProviderComponents(input: ProviderComponentListRequestV2): Promise<ProviderComponentListV2>;
+  manageProviderComponent(input: ProviderComponentManageRequestV2): Promise<ProviderComponentOperationResultV2>;
+  invokeProviderComponent(input: ProviderComponentInvokeRequestV2): Promise<ProviderComponentOperationResultV2>;
   createSession(input: CreateSessionInput): Promise<AgentSession>;
   cancelSession(sessionId: string): Promise<void>;
   onSessionEvent(callback: (sessionId: string, event: AgentEvent) => void): () => void;
@@ -630,6 +643,18 @@ const api: AgentDockBridge = {
   async invokeMcpTool(input) {
     const parsed = mcpToolInvocationRequestV2Schema.parse(input);
     return mcpToolInvocationResultV2Schema.parse(await ipcRenderer.invoke('daemon:invoke-mcp-tool', parsed));
+  },
+  async listProviderComponents(input) {
+    const parsed = providerComponentListRequestV2Schema.parse(input);
+    return providerComponentListV2Schema.parse(await ipcRenderer.invoke('daemon:list-provider-components', parsed));
+  },
+  async manageProviderComponent(input) {
+    const parsed = providerComponentManageRequestV2Schema.parse(input);
+    return providerComponentOperationResultV2Schema.parse(await ipcRenderer.invoke('daemon:manage-provider-component', parsed));
+  },
+  async invokeProviderComponent(input) {
+    const parsed = providerComponentInvokeRequestV2Schema.parse(input);
+    return providerComponentOperationResultV2Schema.parse(await ipcRenderer.invoke('daemon:invoke-provider-component', parsed));
   },
   createSession(input) {
     return ipcRenderer.invoke('daemon:create-session', input);

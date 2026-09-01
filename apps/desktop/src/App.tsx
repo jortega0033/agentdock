@@ -16,6 +16,7 @@ import type {
 } from '../electron/interaction-broker.js';
 import { ProviderPanel } from './components/ProviderPanel.js';
 import { McpPanel } from './components/McpPanel.js';
+import { ComponentPanel } from './components/ComponentPanel.js';
 import { ActivityTimeline } from './components/activity/ActivityTimeline.js';
 import { RendererInteractionTimelineProjector } from './components/activity/interaction-timeline.js';
 import { AgentDockMark } from './components/AgentDockMark.js';
@@ -512,6 +513,10 @@ export function App() {
                 </div>
               </div>
               <McpPanel provider={provider} cwd={cwd} />
+            </section>
+            <section className="card">
+              <div className="section-heading"><div><span className="eyebrow">Trust inventory</span><h2>Skills, plugins & hooks</h2></div></div>
+              <ComponentPanel provider={provider} cwd={cwd} />
             </section>
             <section className="card">
               <div className="section-heading">

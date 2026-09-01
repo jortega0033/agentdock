@@ -25,6 +25,11 @@ import type {
   McpServerListV2,
   McpToolInvocationRequestV2,
   McpToolInvocationResultV2,
+  ProviderComponentInvokeRequestV2,
+  ProviderComponentListRequestV2,
+  ProviderComponentListV2,
+  ProviderComponentManageRequestV2,
+  ProviderComponentOperationResultV2,
 } from '@agent-dock/shared';
 import type {
   RendererInteraction,
@@ -78,6 +83,9 @@ export interface AgentDockBridge {
   getMcpCatalog(provider: ProviderId, serverId: string, cwd: string): Promise<McpCatalogV2>;
   startMcpOAuth(provider: ProviderId, serverId: string, cwd: string): Promise<RendererMcpOAuthStatus>;
   invokeMcpTool(input: McpToolInvocationRequestV2): Promise<McpToolInvocationResultV2>;
+  listProviderComponents(input: ProviderComponentListRequestV2): Promise<ProviderComponentListV2>;
+  manageProviderComponent(input: ProviderComponentManageRequestV2): Promise<ProviderComponentOperationResultV2>;
+  invokeProviderComponent(input: ProviderComponentInvokeRequestV2): Promise<ProviderComponentOperationResultV2>;
   createSession(input: CreateSessionInput): Promise<AgentSession>;
   cancelSession(sessionId: string): Promise<void>;
   onSessionEvent(callback: (sessionId: string, event: AgentEvent) => void): () => void;

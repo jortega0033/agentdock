@@ -10,6 +10,7 @@ import type {
   SessionContinuationV2,
 } from '@agent-dock/shared';
 import type { ProviderMcpControlPlane } from './mcp-control.js';
+import type { ProviderComponentControlPlane } from './component-control.js';
 
 export interface StartSessionOptions {
   /** Daemon-generated session UUID. Used only for logging/correlation, never as a process id. */
@@ -225,4 +226,5 @@ export interface AgentProvider {
   ): Promise<InteractiveProviderSessionHandle>;
   /** Optional provider-owned MCP control surface. The daemon remains provider-neutral. */
   readonly mcp?: ProviderMcpControlPlane;
+  readonly components?: ProviderComponentControlPlane;
 }

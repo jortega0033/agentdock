@@ -21,6 +21,9 @@ import {
   mcpOAuthStartRequestV2Schema,
   mcpServerActionRequestV2Schema,
   mcpToolInvocationRequestV2Schema,
+  providerComponentInvokeRequestV2Schema,
+  providerComponentListRequestV2Schema,
+  providerComponentManageRequestV2Schema,
   type AgentCommandV2,
   type AgentEventV2Envelope,
   type AgentSessionV2,
@@ -620,6 +623,21 @@ ipcMain.handle('daemon:start-mcp-oauth', async (_event, input: unknown) => {
 ipcMain.handle('daemon:invoke-mcp-tool', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.integrations.mcp.invoke(mcpToolInvocationRequestV2Schema.parse(input));
+});
+
+ipcMain.handle('daemon:list-provider-components', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.integrations.components.list(providerComponentListRequestV2Schema.parse(input));
+});
+
+ipcMain.handle('daemon:manage-provider-component', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.integrations.components.manage(providerComponentManageRequestV2Schema.parse(input));
+});
+
+ipcMain.handle('daemon:invoke-provider-component', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.integrations.components.invoke(providerComponentInvokeRequestV2Schema.parse(input));
 });
 
 ipcMain.handle('daemon:create-session', async (_event, input: unknown) => {

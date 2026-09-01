@@ -61,6 +61,16 @@ import {
   type McpServerListV2,
   type McpToolInvocationRequestV2,
   type McpToolInvocationResultV2,
+  providerComponentInvokeRequestV2Schema,
+  providerComponentListRequestV2Schema,
+  providerComponentListV2Schema,
+  providerComponentManageRequestV2Schema,
+  providerComponentOperationResultV2Schema,
+  type ProviderComponentInvokeRequestV2,
+  type ProviderComponentListRequestV2,
+  type ProviderComponentListV2,
+  type ProviderComponentManageRequestV2,
+  type ProviderComponentOperationResultV2,
 } from '@agent-dock/shared';
 import {
   DaemonError,
@@ -226,6 +236,14 @@ export class AgentDockClient {
           this.startMcpOAuthV2(provider, serverId, cwd),
         invoke: (input: McpToolInvocationRequestV2): Promise<McpToolInvocationResultV2> =>
           this.invokeMcpToolV2(input),
+      },
+      components: {
+        list: (input: ProviderComponentListRequestV2): Promise<ProviderComponentListV2> =>
+          this.listProviderComponentsV2(input),
+        manage: (input: ProviderComponentManageRequestV2): Promise<ProviderComponentOperationResultV2> =>
+          this.manageProviderComponentV2(input),
+        invoke: (input: ProviderComponentInvokeRequestV2): Promise<ProviderComponentOperationResultV2> =>
+          this.invokeProviderComponentV2(input),
       },
     },
   };
@@ -568,6 +586,23 @@ export class AgentDockClient {
     return this.requestV2('/v2/integrations/mcp/invoke', mcpToolInvocationResultV2Schema, 'protocol-v2 MCP tool result', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed),
     }, { expectedStatus: 200 });
+  }
+
+  private async listProviderComponentsV2(input: ProviderComponentListRequestV2): Promise<ProviderComponentListV2> {
+    const parsed = validateInput(providerComponentListRequestV2Schema, input, 'provider component inspection');
+    const query = new URLSearchParams({ provider: parsed.provider, cwd: parsed.cwd });
+    if (parsed.kind) query.set('kind', parsed.kind);
+    return this.requestV2(`/v2/integrations/components?${query.toString()}`, providerComponentListV2Schema, 'protocol-v2 provider component list', {}, { expectedStatus: 200 });
+  }
+
+  private async manageProviderComponentV2(input: ProviderComponentManageRequestV2): Promise<ProviderComponentOperationResultV2> {
+    const parsed = validateInput(providerComponentManageRequestV2Schema, input, 'provider component management');
+    return this.requestV2('/v2/integrations/components/manage', providerComponentOperationResultV2Schema, 'protocol-v2 provider component result', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }, { expectedStatus: 200 });
+  }
+
+  private async invokeProviderComponentV2(input: ProviderComponentInvokeRequestV2): Promise<ProviderComponentOperationResultV2> {
+    const parsed = validateInput(providerComponentInvokeRequestV2Schema, input, 'provider component invocation');
+    return this.requestV2('/v2/integrations/components/invoke', providerComponentOperationResultV2Schema, 'protocol-v2 provider component result', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }, { expectedStatus: 200 });
   }
 
   private async createSessionV2(

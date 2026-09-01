@@ -7,6 +7,7 @@ import type {
   AgentEvent,
   AgentEventEnvelope,
   AgentEventV2,
+  AgentSession,
   CapabilitySelection,
   ProviderId,
   ProviderStatus,
@@ -35,6 +36,8 @@ import { planLegacyProviderFallback, type ProviderV2Manifest } from '../src/prov
 import { legacyRuntimeScope } from '../src/v2-legacy-provider.js';
 import { resolveWorkspaceIdentity, type WorkspaceIdentity } from '../src/workspace-identity.js';
 import { WorkspaceTrustStore } from '../src/workspace-trust-store.js';
+import { MemoryExecutionGraphStore } from '../src/execution-graph-store.js';
+import { MemorySessionStore } from '../src/session-store.js';
 
 const TERMINAL_TYPES = new Set(['session.completed', 'session.failed', 'session.cancelled']);
 
@@ -452,14 +455,14 @@ describe('SessionManager — removal', () => {
   });
 });
 
-describe('SessionManager — bounded retention of completed sessions (AD-11)', () => {
-  it('evicts the oldest completed session once more than the retention cap have finished', async () => {
+describe('SessionManager — bounded retention of completed runtimes (AD-11)', () => {
+  it('evicts the oldest replay runtime but keeps protocol-v2 queryable metadata', async () => {
     const { provider, sessionManager } = setup();
-    const RETENTION_CAP = 50; // MAX_RETAINED_COMPLETED_SESSIONS in session-manager.ts
+    const RETENTION_CAP = 50; // MAX_RETAINED_COMPLETED_RUNTIMES in session-manager.ts
 
     const ids: string[] = [];
     for (let i = 0; i < RETENTION_CAP + 1; i++) {
-      const session = sessionManager.create('claude', '/tmp', `prompt ${i}`);
+      const session = sessionManager.create('claude', '/tmp', `prompt ${i}`, undefined, 2);
       ids.push(session.id);
       const testSession = provider.sessions.get(session.id)!;
       testSession.push({ type: 'session.completed' });
@@ -467,11 +470,47 @@ describe('SessionManager — bounded retention of completed sessions (AD-11)', (
       await tick();
     }
 
-    // The very first session should have been evicted once the (RETENTION_CAP + 1)th completed.
-    expect(sessionManager.get(ids[0] as string)).toBeUndefined();
+    // Runtime replay is bounded independently from durable/queryable session metadata.
+    expect(sessionManager.get(ids[0] as string)).toBeDefined();
+    expect(sessionManager.subscribe(ids[0] as string, 0, () => {})).toBeUndefined();
     // The most recent one is still there.
     expect(sessionManager.get(ids[ids.length - 1] as string)).toBeDefined();
   }, 15_000);
+
+  it('retains the legacy 50-session metadata bound for protocol v1', async () => {
+    const { provider, sessionManager } = setup();
+    const ids: string[] = [];
+    for (let index = 0; index <= 50; index += 1) {
+      const session = sessionManager.create('claude', '/tmp', `prompt ${index}`);
+      ids.push(session.id);
+      const testSession = provider.sessions.get(session.id)!;
+      testSession.push({ type: 'session.completed' });
+      testSession.finish();
+      await tick();
+    }
+    expect(sessionManager.get(ids[0] as string)).toBeUndefined();
+    expect(sessionManager.get(ids.at(-1) as string)).toBeDefined();
+  }, 15_000);
+
+  it('removes protocol-v2 compatibility records that never reached graph reservation', () => {
+    const store = new MemorySessionStore();
+    const session: AgentSession = {
+      id: uuid(90_000),
+      provider: 'claude',
+      cwd: '/tmp',
+      prompt: '',
+      status: 'failed',
+      startedAt: '2026-09-01T08:00:00.000Z',
+      completedAt: '2026-09-01T08:00:01.000Z',
+    };
+    store.create(session, 2);
+
+    new SessionManager(new ProviderRegistry(), noopLogger, store, {
+      executionGraphStore: new MemoryExecutionGraphStore(),
+    });
+
+    expect(store.get(session.id)).toBeUndefined();
+  });
 
   it('cancelAll() awaits active sessions finishing, bounded by a timeout, and does not touch already-terminal ones', async () => {
     const { provider, sessionManager } = setup();
@@ -1902,6 +1941,60 @@ describe('SessionManager — interactive replay bounds', () => {
 });
 
 describe('V2SessionFacade — interactive turn state', () => {
+  it('bounds the recovered SSE replay window while preserving full durable history', () => {
+    const graph = new MemoryExecutionGraphStore();
+    const sessionId = '123e4567-e89b-42d3-a456-426614174210';
+    const executionId = '123e4567-e89b-42d3-a456-426614174211';
+    graph.reserve({
+      session: {
+        id: sessionId,
+        provider: 'claude',
+        transport: INTERACTIVE_TRANSPORT.id,
+        cwd: '/tmp',
+        status: 'active',
+        selection: INTERACTIVE_SELECTION,
+        executionId,
+        rootExecutionId: executionId,
+        continuationKind: 'fresh',
+        acceptedWork: 'accepted',
+        startedAt: '2026-09-01T08:00:00.000Z',
+        earliestSequence: 0,
+      },
+      interactive: true,
+    });
+    for (let sequence = 0; sequence <= 5_000; sequence += 1) {
+      graph.appendEvent(sessionId, {
+        sessionId,
+        executionId,
+        sequence,
+        timestamp: '2026-09-01T08:00:00.000Z',
+        type: 'session.status',
+        status: 'active',
+      });
+    }
+
+    const sessions = new V2SessionFacade(
+      new SessionManager(new ProviderRegistry(), noopLogger),
+      graph,
+    );
+    expect(sessions.replayWindow(sessionId)).toEqual({ earliestSequence: 1, nextSequence: 5_001 });
+    let replayed = 0;
+    const unsubscribe = sessions.subscribe(sessionId, 1, () => {
+      replayed += 1;
+    });
+    expect(replayed).toBe(5_000);
+    unsubscribe?.();
+
+    let durableEvents = 0;
+    let cursor: string | undefined;
+    do {
+      const page = sessions.history(sessionId, { ...(cursor ? { cursor } : {}), limit: 100 });
+      durableEvents += page?.events.length ?? 0;
+      cursor = page?.nextCursor;
+    } while (cursor);
+    expect(durableEvents).toBe(5_001);
+  });
+
   it('projects bounded provider session and runtime metadata from a successful transport', async () => {
     const interactive = makeControllableInteractiveSession({
       providerSessionId: 'thread_123',
@@ -1931,6 +2024,32 @@ describe('V2SessionFacade — interactive turn state', () => {
       fixtureSet: 'codex-app-server-0.147.0-v1',
       requestedTransportMode: 'auto',
     });
+    await finishInteractive(interactive);
+  });
+
+  it('persists accepted-work evidence as soon as the provider resolves it', async () => {
+    const accepted = deferred<AcceptedWorkState>();
+    const interactive = makeControllableInteractiveSession({ accepted: accepted.promise });
+    const provider = new InteractiveTestProvider(interactive);
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const graph = new MemoryExecutionGraphStore();
+    const manager = new SessionManager(registry, noopLogger, undefined, {
+      executionGraphStore: graph,
+    });
+    const sessions = new V2SessionFacade(manager, graph);
+
+    const session = await sessions.create(
+      { provider: provider.id, cwd: '/tmp', prompt: 'hello' },
+      INTERACTIVE_SELECTION,
+      INTERACTIVE_TRANSPORT,
+      true,
+    );
+    expect(graph.get(session.id)?.session.acceptedWork).toBe('not_accepted');
+
+    accepted.resolve('accepted');
+    await tick();
+    expect(graph.get(session.id)?.session.acceptedWork).toBe('accepted');
     await finishInteractive(interactive);
   });
 

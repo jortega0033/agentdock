@@ -162,6 +162,12 @@ const SESSION_V2 = {
   earliestSequence: 0,
 };
 
+const SESSION_PAGE_V2 = { sessions: [SESSION_V2], nextCursor: 'page_2' };
+const SESSION_HISTORY_PAGE_V2 = {
+  events: [extensionSummaryEvent(0)],
+  nextCursor: 'page_2',
+};
+
 describe('AgentDockClient.v2 protocol discovery', () => {
   it('uses v2 when it is the highest shared protocol', async () => {
     const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
@@ -258,6 +264,48 @@ describe('AgentDockClient.v2 response validation', () => {
       String(url).endsWith(`/v2/sessions/${SESSION_ID}/cancel`),
     );
     expect(cancelCall?.[1]).toMatchObject({ signal: requestController.signal });
+  });
+
+  it('lists persisted sessions, reads paginated history, and starts daemon-owned continuations', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      if (url.endsWith('/v2/sessions?cursor=page_1&limit=25'))
+        return jsonResponse(200, SESSION_PAGE_V2);
+      if (url.endsWith(`/v2/sessions/${SESSION_ID}/history?limit=25`))
+        return jsonResponse(200, SESSION_HISTORY_PAGE_V2);
+      if (
+        (url.endsWith(`/v2/sessions/${SESSION_ID}/resume`) ||
+          url.endsWith(`/v2/sessions/${SESSION_ID}/fork`)) &&
+        init?.method === 'POST'
+      ) {
+        return jsonResponse(201, SESSION_V2);
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const client = makeClient(fetchImpl);
+
+    await expect(client.v2.sessions.list({ cursor: 'page_1', limit: 25 })).resolves.toEqual(
+      SESSION_PAGE_V2,
+    );
+    await expect(client.v2.sessions.history(SESSION_ID, { limit: 25 })).resolves.toEqual(
+      SESSION_HISTORY_PAGE_V2,
+    );
+    await expect(client.v2.sessions.resume(SESSION_ID, { prompt: 'continue' })).resolves.toEqual(
+      SESSION_V2,
+    );
+    await expect(client.v2.sessions.fork(SESSION_ID, { prompt: 'branch' })).resolves.toEqual(
+      SESSION_V2,
+    );
+
+    const resumeCall = fetchImpl.mock.calls.find(([url]) =>
+      String(url).endsWith(`/v2/sessions/${SESSION_ID}/resume`),
+    );
+    expect(JSON.parse((resumeCall?.[1] as RequestInit).body as string)).toEqual({
+      prompt: 'continue',
+    });
+    expect(fetchImpl.mock.calls.some(([url]) => String(url).includes('providerSessionId'))).toBe(
+      false,
+    );
   });
 
   it('sends a validated command on the authenticated versioned route', async () => {
@@ -850,6 +898,35 @@ describe('AgentDockClient.v2 error mapping', () => {
     await expect(makeClient(fetchImpl).v2.sessions.send(COMMAND_V2)).rejects.toBeInstanceOf(
       SessionNotFoundError,
     );
+  });
+
+  it.each([
+    ['resume', 'continuation_not_found'],
+    ['fork', 'continuation_binding_not_found'],
+  ] as const)('preserves %s continuation 404 code %s', async (kind, code) => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      return jsonResponse(404, { error: 'continuation unavailable', code });
+    });
+
+    const sessions = makeClient(fetchImpl).v2.sessions;
+    const failure = await sessions[kind](SESSION_ID, { prompt: 'continue' }).catch(
+      (error: unknown) => error,
+    );
+
+    expect(failure).toBeInstanceOf(DaemonError);
+    expect(failure).toMatchObject({ status: 404, code, message: 'continuation unavailable' });
+  });
+
+  it('keeps a genuinely missing continuation parent typed as SessionNotFoundError', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      return jsonResponse(404, { error: 'session not found', code: 'session_not_found' });
+    });
+
+    await expect(
+      makeClient(fetchImpl).v2.sessions.resume(SESSION_ID, { prompt: 'continue' }),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
   });
 
   it.each([409, 413, 429])('preserves command dispatch status %i', async (status) => {

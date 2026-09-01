@@ -7,6 +7,11 @@ import {
   cancelSessionV2ResponseSchema,
   contentBlockV2Schema,
   createSessionV2RequestSchema,
+  sessionContinuationInputV2Schema,
+  sessionEventHistoryV2PageSchema,
+  sessionEventHistoryV2QuerySchema,
+  sessionListV2PageSchema,
+  sessionListV2QuerySchema,
   questionV2Schema,
 } from '../src/protocol-v2.js';
 
@@ -267,6 +272,62 @@ describe('protocol v2 content and interaction schemas', () => {
         continuation: { kind: 'resume', providerSessionId: 'bad\nthread' },
       }).success,
     ).toBe(false);
+  });
+
+  it('keeps deprecated create continuations parse-compatible while bounding daemon-owned input', () => {
+    expect(
+      createSessionV2RequestSchema.safeParse({
+        provider: 'codex',
+        cwd: '/tmp',
+        prompt: 'continue',
+        continuation: { kind: 'resume', providerSessionId: 'native-thread-1' },
+      }).success,
+    ).toBe(true);
+    expect(sessionContinuationInputV2Schema.safeParse({ prompt: 'continue' }).success).toBe(true);
+    expect(
+      sessionContinuationInputV2Schema.safeParse({
+        prompt: 'continue',
+        provider: 'codex',
+      }).success,
+    ).toBe(false);
+    expect(
+      sessionContinuationInputV2Schema.safeParse({
+        prompt: 'continue',
+        providerSessionId: 'native-thread-1',
+      }).success,
+    ).toBe(false);
+  });
+
+  it('validates bounded opaque session and event-history pages', () => {
+    expect(sessionListV2QuerySchema.safeParse({ cursor: 'page_1', limit: 100 }).success).toBe(true);
+    expect(sessionListV2QuerySchema.safeParse({ cursor: 'page+1' }).success).toBe(false);
+    expect(sessionEventHistoryV2QuerySchema.safeParse({ limit: 101 }).success).toBe(false);
+    const snapshot = {
+      id: sessionId,
+      provider: 'claude',
+      transport: 'cli',
+      cwd: '/tmp',
+      status: 'completed',
+      selection,
+      executionId,
+      rootExecutionId: executionId,
+      parentSessionId: requestId,
+      parentExecutionId: turnId,
+      continuationKind: 'fork',
+      acceptedWork: 'accepted',
+      startedAt: timestamp,
+      completedAt: timestamp,
+      terminalReason: 'provider_completed',
+      earliestSequence: 0,
+    };
+    expect(
+      sessionListV2PageSchema.safeParse({ sessions: [snapshot], nextCursor: 'page_2' }).success,
+    ).toBe(true);
+    expect(
+      sessionEventHistoryV2PageSchema.safeParse({
+        events: [{ ...meta, type: 'session.completed' }],
+      }).success,
+    ).toBe(true);
   });
 
   it('validates session snapshots and cancellation acknowledgements', () => {

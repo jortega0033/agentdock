@@ -11,7 +11,7 @@ export class DaemonUnavailableError extends AgentDockClientError {
 
 /** The daemon rejected the request's bearer token (HTTP 401). */
 export class UnauthorizedError extends AgentDockClientError {
-  constructor(message = 'the daemon rejected this client\'s token') {
+  constructor(message = "the daemon rejected this client's token") {
     super(message);
     this.name = 'UnauthorizedError';
   }
@@ -27,7 +27,9 @@ export class ProtocolMismatchError extends AgentDockClientError {
     public readonly clientVersion: number,
     public readonly daemonVersion: number,
   ) {
-    super(`this client supports protocol ${clientVersion}, but the daemon reports protocol ${daemonVersion}`);
+    super(
+      `this client supports protocol ${clientVersion}, but the daemon reports protocol ${daemonVersion}`,
+    );
     this.name = 'ProtocolMismatchError';
   }
 }
@@ -56,11 +58,12 @@ export class ProviderUnavailableError extends AgentDockClientError {
   }
 }
 
-/** Any other daemon-declared failure: preserves the daemon's own status code and message. */
+/** Any other daemon-declared failure: preserves the daemon's own status, code, and message. */
 export class DaemonError extends AgentDockClientError {
   constructor(
     message: string,
     public readonly status: number,
+    public readonly code?: string,
   ) {
     super(message);
     this.name = 'DaemonError';

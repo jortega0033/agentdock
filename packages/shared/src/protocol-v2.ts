@@ -19,6 +19,7 @@ const MAX_COMMAND_BYTES = 1024 * 1024;
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 const MAX_JSON_DEPTH = 16;
 const MAX_JSON_ITEMS = 1_024;
+const MAX_PAGE_SIZE = 100;
 
 export const sessionIdSchema = z.string().uuid();
 export const turnIdSchema = z.string().uuid();
@@ -333,12 +334,31 @@ export const sessionContinuationV2Schema = z.discriminatedUnion('kind', [
 
 export type SessionContinuationV2 = z.infer<typeof sessionContinuationV2Schema>;
 
+/**
+ * User-controlled input for a daemon-owned continuation. The parent session route parameter,
+ * rather than this body, selects the persisted provider-native session/thread identifier.
+ */
+export const sessionContinuationInputV2Schema = z
+  .object({
+    prompt: z.string().min(1, 'prompt is required').max(200_000, 'prompt is too long'),
+    capabilities: capabilityRequestSchema.optional(),
+  })
+  .strict()
+  .superRefine((input, ctx) => {
+    addBoundsIssue(input, ctx, MAX_COMMAND_BYTES, MAX_COMMAND_BYTES);
+  });
+
+export type SessionContinuationInputV2 = z.infer<typeof sessionContinuationInputV2Schema>;
+
 export interface CreateSessionV2Request {
   provider: (typeof PROVIDER_IDS)[number];
   cwd: string;
   prompt: string;
   capabilities?: CapabilityRequest;
-  /** Absence starts a fresh provider thread. */
+  /**
+   * @deprecated Use the daemon-owned `POST /v2/sessions/:sessionId/resume` or `/fork` routes.
+   * Kept parse-compatible until consumers have migrated; new callers must not supply native IDs.
+   */
   continuation?: SessionContinuationV2;
 }
 
@@ -354,6 +374,32 @@ export const createSessionV2RequestSchema = z
   .superRefine((request, ctx) => {
     addBoundsIssue(request, ctx, MAX_COMMAND_BYTES, MAX_COMMAND_BYTES);
   });
+
+/** Opaque pagination cursor issued by the daemon; callers must not derive or inspect it. */
+export const opaqueCursorV2Schema = z
+  .string()
+  .min(1)
+  .max(256)
+  .regex(/^[A-Za-z0-9_-]+$/);
+export const pageLimitV2Schema = z.number().int().min(1).max(MAX_PAGE_SIZE);
+
+export const sessionListV2QuerySchema = z
+  .object({
+    cursor: opaqueCursorV2Schema.optional(),
+    limit: pageLimitV2Schema.optional(),
+  })
+  .strict();
+
+export type SessionListV2Query = z.infer<typeof sessionListV2QuerySchema>;
+
+export const sessionEventHistoryV2QuerySchema = z
+  .object({
+    cursor: opaqueCursorV2Schema.optional(),
+    limit: pageLimitV2Schema.optional(),
+  })
+  .strict();
+
+export type SessionEventHistoryV2Query = z.infer<typeof sessionEventHistoryV2QuerySchema>;
 
 export const sessionStatusV2Schema = z.enum([
   'starting',
@@ -394,11 +440,15 @@ export interface AgentSessionV2 {
   status: z.infer<typeof sessionStatusV2Schema>;
   selection: CapabilitySelection;
   executionId: ExecutionId;
+  rootExecutionId?: ExecutionId;
+  parentSessionId?: SessionId;
   parentExecutionId?: ExecutionId;
+  continuationKind?: 'fresh' | 'resume' | 'fork';
   currentTurnId?: TurnId;
   acceptedWork: 'not_accepted' | 'accepted' | 'unknown';
   startedAt: string;
   completedAt?: string;
+  terminalReason?: string;
   error?: string;
   /** Opaque provider-native thread/session id; bounded and never used as a process id. */
   providerSessionId?: string;
@@ -416,17 +466,30 @@ export const agentSessionV2Schema = z
     status: sessionStatusV2Schema,
     selection: capabilitySelectionSchema,
     executionId: executionIdSchema,
+    rootExecutionId: executionIdSchema.optional(),
+    parentSessionId: sessionIdSchema.optional(),
     parentExecutionId: executionIdSchema.optional(),
+    continuationKind: z.enum(['fresh', 'resume', 'fork']).optional(),
     currentTurnId: turnIdSchema.optional(),
     acceptedWork: z.enum(['not_accepted', 'accepted', 'unknown']),
     startedAt: z.string().datetime({ offset: true }),
     completedAt: z.string().datetime({ offset: true }).optional(),
+    terminalReason: nonemptyWireStringSchema.optional(),
     error: z.string().optional(),
     providerSessionId: providerSessionIdV2Schema.optional(),
     runtimeMetadata: providerRuntimeMetadataV2Schema.optional(),
     earliestSequence: z.number().int().finite().nonnegative(),
   })
   .strict();
+
+export const sessionListV2PageSchema = z
+  .object({
+    sessions: z.array(agentSessionV2Schema).max(MAX_PAGE_SIZE),
+    nextCursor: opaqueCursorV2Schema.optional(),
+  })
+  .strict();
+
+export type SessionListV2Page = z.infer<typeof sessionListV2PageSchema>;
 
 export interface CancelSessionV2Response {
   status: 'cancelling';
@@ -736,6 +799,13 @@ export const agentEventV2EnvelopeSchema = agentEventV2EnvelopeUnionSchema.superR
   },
 );
 
+export const sessionEventHistoryV2PageSchema = z
+  .object({
+    events: z.array(agentEventV2EnvelopeSchema).max(MAX_PAGE_SIZE),
+    nextCursor: opaqueCursorV2Schema.optional(),
+  })
+  .strict();
+
 /** Wire items accepted on a v2 SSE stream. Stream errors are connection-local control frames. */
 export const agentEventOrStreamErrorV2Schema = z.union([
   agentEventV2EnvelopeSchema,
@@ -752,6 +822,7 @@ export interface AgentEventV2Meta {
 
 export type AgentEventV2Envelope = z.infer<typeof agentEventV2EnvelopeSchema>;
 export type AgentEventOrStreamErrorV2 = z.infer<typeof agentEventOrStreamErrorV2Schema>;
+export type SessionEventHistoryV2Page = z.infer<typeof sessionEventHistoryV2PageSchema>;
 type WithoutEventMeta<T> = T extends AgentEventV2Meta ? Omit<T, keyof AgentEventV2Meta> : never;
 export type AgentEventV2 = WithoutEventMeta<AgentEventV2Envelope>;
 

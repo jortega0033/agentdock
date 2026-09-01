@@ -15,7 +15,12 @@ import {
   providerStatusSchema,
   providerStatusV2Schema,
   providersV2ResponseSchema,
+  sessionContinuationInputV2Schema,
+  sessionEventHistoryV2PageSchema,
+  sessionEventHistoryV2QuerySchema,
   sessionIdParamSchema,
+  sessionListV2PageSchema,
+  sessionListV2QuerySchema,
   auditReadResponseV2Schema,
   workspaceInspectRequestV2Schema,
   workspaceTrustUpdateRequestV2Schema,
@@ -34,6 +39,11 @@ import {
   type ProviderStatus,
   type ProviderStatusV2,
   type ProvidersV2Response,
+  type SessionContinuationInputV2,
+  type SessionEventHistoryV2Page,
+  type SessionEventHistoryV2Query,
+  type SessionListV2Page,
+  type SessionListV2Query,
   type WorkspaceTrustUpdateRequestV2,
   type WorkspaceTrustViewV2,
 } from '@agent-dock/shared';
@@ -81,6 +91,9 @@ export interface AuditReadOptions {
   limit?: number;
   sessionId?: string;
 }
+
+export type SessionListV2Options = SessionListV2Query;
+export type SessionEventHistoryV2Options = SessionEventHistoryV2Query;
 
 interface CompatibilityResult {
   health: HealthResponse;
@@ -145,7 +158,24 @@ export class AgentDockClient {
         input: CreateSessionV2Request,
         options?: SessionRequestOptions,
       ): Promise<AgentSessionV2> => this.createSessionV2(input, options),
+      list: (options?: SessionListV2Options): Promise<SessionListV2Page> =>
+        this.listSessionsV2(options),
       get: (id: string): Promise<AgentSessionV2> => this.getSessionV2(id),
+      history: (
+        id: string,
+        options?: SessionEventHistoryV2Options,
+      ): Promise<SessionEventHistoryV2Page> => this.getSessionEventHistoryV2(id, options),
+      resume: (
+        parentSessionId: string,
+        input: SessionContinuationInputV2,
+        options?: SessionRequestOptions,
+      ): Promise<AgentSessionV2> =>
+        this.continueSessionV2(parentSessionId, 'resume', input, options),
+      fork: (
+        parentSessionId: string,
+        input: SessionContinuationInputV2,
+        options?: SessionRequestOptions,
+      ): Promise<AgentSessionV2> => this.continueSessionV2(parentSessionId, 'fork', input, options),
       events: (
         id: string,
         options?: SessionEventsOptions,
@@ -258,7 +288,7 @@ export class AgentDockClient {
     protocolVersion: number,
     path: string,
     init: RequestInit = {},
-    opts: { notFound?: () => AgentDockClientError } = {},
+    opts: { notFound?: () => AgentDockClientError; notFoundCode?: string } = {},
   ): Promise<Response> {
     await this.ensureProtocolVersion(protocolVersion);
 
@@ -278,13 +308,21 @@ export class AgentDockClient {
     }
 
     if (res.status === 401) throw new UnauthorizedError();
-    if (res.status === 404 && opts.notFound) throw opts.notFound();
+
+    let body: unknown;
+    let bodyRead = false;
+    if (res.status === 404 && opts.notFound) {
+      if (opts.notFoundCode === undefined) throw opts.notFound();
+      body = await res.json().catch(() => undefined);
+      bodyRead = true;
+      if (daemonErrorCode(body) === opts.notFoundCode) throw opts.notFound();
+    }
 
     if (!res.ok) {
-      const body = await res.json().catch(() => undefined);
+      if (!bodyRead) body = await res.json().catch(() => undefined);
       const message = daemonErrorMessage(body) ?? `daemon request failed with status ${res.status}`;
       if (res.status === 400) throw new ValidationError(message);
-      throw new DaemonError(message, res.status);
+      throw new DaemonError(message, res.status, daemonErrorCode(body));
     }
     return res;
   }
@@ -388,7 +426,11 @@ export class AgentDockClient {
     schema: RuntimeSchema<T>,
     label: string,
     init: RequestInit = {},
-    opts: { expectedStatus: number; notFound?: () => AgentDockClientError },
+    opts: {
+      expectedStatus: number;
+      notFound?: () => AgentDockClientError;
+      notFoundCode?: string;
+    },
   ): Promise<T> {
     const res = await this.fetchAuthenticated(PROTOCOL_V2, path, init, opts);
     if (res.status !== opts.expectedStatus) {
@@ -477,6 +519,78 @@ export class AgentDockClient {
       'protocol-v2 session',
       {},
       { expectedStatus: 200, notFound: () => new SessionNotFoundError(sessionId) },
+    );
+  }
+
+  private async listSessionsV2(options: SessionListV2Options = {}): Promise<SessionListV2Page> {
+    const parsed = validateInput(
+      sessionListV2QuerySchema,
+      options,
+      'protocol-v2 session list query',
+    );
+    const query = new URLSearchParams();
+    if (parsed.cursor !== undefined) query.set('cursor', parsed.cursor);
+    if (parsed.limit !== undefined) query.set('limit', String(parsed.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : '';
+    return this.requestV2(
+      `/v2/sessions${suffix}`,
+      sessionListV2PageSchema,
+      'protocol-v2 session page',
+      {},
+      { expectedStatus: 200 },
+    );
+  }
+
+  private async getSessionEventHistoryV2(
+    id: string,
+    options: SessionEventHistoryV2Options = {},
+  ): Promise<SessionEventHistoryV2Page> {
+    const sessionId = validateSessionIdV2(id);
+    const parsed = validateInput(
+      sessionEventHistoryV2QuerySchema,
+      options,
+      'protocol-v2 session event history query',
+    );
+    const query = new URLSearchParams();
+    if (parsed.cursor !== undefined) query.set('cursor', parsed.cursor);
+    if (parsed.limit !== undefined) query.set('limit', String(parsed.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : '';
+    return this.requestV2(
+      `/v2/sessions/${encodeURIComponent(sessionId)}/history${suffix}`,
+      sessionEventHistoryV2PageSchema,
+      'protocol-v2 session event history page',
+      {},
+      { expectedStatus: 200, notFound: () => new SessionNotFoundError(sessionId) },
+    );
+  }
+
+  private async continueSessionV2(
+    parentSessionId: string,
+    kind: 'resume' | 'fork',
+    input: SessionContinuationInputV2,
+    options: SessionRequestOptions = {},
+  ): Promise<AgentSessionV2> {
+    const sessionId = validateSessionIdV2(parentSessionId);
+    const parsed = validateInput(
+      sessionContinuationInputV2Schema,
+      input,
+      `protocol-v2 session ${kind} request`,
+    );
+    return this.requestV2(
+      `/v2/sessions/${encodeURIComponent(sessionId)}/${kind}`,
+      agentSessionV2Schema,
+      'protocol-v2 session',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(parsed),
+        signal: options.signal,
+      },
+      {
+        expectedStatus: 201,
+        notFound: () => new SessionNotFoundError(sessionId),
+        notFoundCode: 'session_not_found',
+      },
     );
   }
 
@@ -766,6 +880,16 @@ function daemonErrorMessage(body: unknown): string | undefined {
     if (typeof message === 'string') return message;
   }
   return undefined;
+}
+
+function daemonErrorCode(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const code = (body as { code?: unknown }).code;
+  if (typeof code === 'string') return code;
+  const error = (body as { error?: unknown }).error;
+  if (!error || typeof error !== 'object') return undefined;
+  const nestedCode = (error as { code?: unknown }).code;
+  return typeof nestedCode === 'string' ? nestedCode : undefined;
 }
 
 function errorMessage(err: unknown): string {

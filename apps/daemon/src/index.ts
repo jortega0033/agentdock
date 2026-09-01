@@ -12,6 +12,8 @@ import {
 import { buildProviderRegistry } from './providers.js';
 import { buildServer } from './server.js';
 import { SessionManager } from './session-manager.js';
+import { FileSessionStore } from './session-store.js';
+import { FileExecutionGraphStore } from './execution-graph-store.js';
 import { stateDirectory } from './state-directory.js';
 import { WorkspaceTrustStore } from './workspace-trust-store.js';
 
@@ -42,10 +44,37 @@ async function main() {
   const trustStore = new WorkspaceTrustStore(
     join(durableStateDirectory, 'workspace-trust-v1.json'),
   );
-  const sessionManager = new SessionManager(registry, logger, undefined, {
+  const sessionStoreDirectory = join(durableStateDirectory, 'sessions-v1');
+  const sessionStore = new FileSessionStore(sessionStoreDirectory);
+  const executionGraphStore = new FileExecutionGraphStore(
+    join(durableStateDirectory, 'execution-graph-v1'),
+    {
+      additionalQuotaPaths: [sessionStoreDirectory],
+      onLineageRemoving: (records) => {
+        for (const record of records) sessionStore.delete(record.session.id);
+      },
+    },
+  );
+  const sessionRecovery = sessionStore.getRecoveryReport();
+  const graphRecovery = executionGraphStore.recoveryReport();
+  if (
+    sessionRecovery.quarantinedFiles.length > 0 ||
+    sessionRecovery.interruptedSessionIds.length > 0 ||
+    graphRecovery.quarantinedPaths.length > 0 ||
+    graphRecovery.interruptedSessionIds.length > 0
+  ) {
+    logger.warn('durable session recovery required repairs', {
+      quarantinedSessionRecords: sessionRecovery.quarantinedFiles.length,
+      quarantinedExecutionRecords: graphRecovery.quarantinedPaths.length,
+      interruptedCompatibilitySessions: sessionRecovery.interruptedSessionIds.length,
+      interruptedExecutions: graphRecovery.interruptedSessionIds.length,
+    });
+  }
+  const sessionManager = new SessionManager(registry, logger, sessionStore, {
     auditStore,
     trustStore,
     providerStateDirectory: durableStateDirectory,
+    executionGraphStore,
   });
   const token = generateToken();
 

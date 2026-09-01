@@ -33,6 +33,7 @@ import {
 } from '@agent-dock/agent-runtime';
 import { MemorySessionStore, type SessionStore } from './session-store.js';
 import type { AuditStore } from './audit-store.js';
+import type { ExecutionGraphStore } from './execution-graph-store.js';
 import {
   InteractionState,
   type InteractionResolutionReason,
@@ -117,6 +118,7 @@ export interface SessionManagerSecurityOptions {
   trustStore?: WorkspaceTrustStore;
   interactionTimeoutMs?: number;
   providerStateDirectory?: string;
+  executionGraphStore?: ExecutionGraphStore;
 }
 
 export class WorkspaceAccessError extends Error {
@@ -134,7 +136,7 @@ export type DispatchResult =
 
 const MAX_STORED_EVENTS_PER_SESSION = 5_000;
 const MAX_STORED_EVENT_BYTES_PER_SESSION = 16 * 1024 * 1024;
-const MAX_RETAINED_COMPLETED_SESSIONS = 50;
+const MAX_RETAINED_COMPLETED_RUNTIMES = 50;
 const MAX_PENDING_COMMANDS = 64;
 const MAX_PENDING_COMMAND_BYTES = 1024 * 1024;
 const MAX_COMMAND_LEDGER_ENTRIES = 1_024;
@@ -178,7 +180,20 @@ export class SessionManager {
     private readonly logger: Logger,
     private readonly store: SessionStore = new MemorySessionStore(),
     private readonly security: SessionManagerSecurityOptions = {},
-  ) {}
+  ) {
+    const graph = security.executionGraphStore;
+    if (graph) {
+      for (const session of store.list()) {
+        if (store.protocolVersionOf(session.id) === 2 && !graph.get(session.id)) {
+          store.delete(session.id);
+        }
+      }
+    }
+  }
+
+  get executionGraphStore(): ExecutionGraphStore | undefined {
+    return this.security.executionGraphStore;
+  }
 
   /** Existing one-shot path. Its process and event contract deliberately remains unchanged. */
   create(
@@ -191,6 +206,7 @@ export class SessionManager {
     providerStatus?: ProviderStatus,
     sandbox?: StartSessionOptions['sandbox'],
     model?: string,
+    beforeProviderDispatch?: (session: Readonly<AgentSession>) => void,
   ): AgentSession {
     if (this.shuttingDown) throw new Error('session manager is shutting down');
     if (workspace && this.blockedWorkspaces.has(workspace.workspaceId)) {
@@ -201,16 +217,28 @@ export class SessionManager {
 
     const id = randomUUID();
     const session = this.newSession(id, provider, cwd, prompt);
-    this.store.create(session);
-    const handle = providerImpl.startSession({
-      sessionId: id,
-      cwd,
-      prompt,
-      resumeProviderSessionId,
-      ...(providerStatus ? { providerStatus } : {}),
-      ...(sandbox ? { sandbox } : {}),
-      ...(model ? { model } : {}),
-    });
+    this.store.create(session, protocolVersion);
+    try {
+      beforeProviderDispatch?.(session);
+    } catch (error) {
+      this.store.delete(id);
+      throw error;
+    }
+    let handle: ProviderSessionHandle;
+    try {
+      handle = providerImpl.startSession({
+        sessionId: id,
+        cwd,
+        prompt,
+        resumeProviderSessionId,
+        ...(providerStatus ? { providerStatus } : {}),
+        ...(sandbox ? { sandbox } : {}),
+        ...(model ? { model } : {}),
+      });
+    } catch (error) {
+      this.store.delete(id);
+      throw error;
+    }
     const runtime: LegacyRuntimeState = {
       kind: 'legacy',
       handle,
@@ -244,6 +272,7 @@ export class SessionManager {
     beforeProviderThreadStart?: (
       evidence: Readonly<ProviderContinuationEvidence> | undefined,
     ) => Promise<void>,
+    beforeProviderDispatch?: (session: Readonly<AgentSession>) => void,
   ): Promise<AgentSession> {
     if (this.shuttingDown) {
       throw new InteractiveSessionError('session_terminal', 'session manager is shutting down');
@@ -270,7 +299,13 @@ export class SessionManager {
       : { state: 'untrusted' };
     const id = randomUUID();
     const session = this.newSession(id, provider, cwd, prompt);
-    this.store.create(session);
+    this.store.create(session, 2);
+    try {
+      beforeProviderDispatch?.(session);
+    } catch (error) {
+      this.store.delete(id);
+      throw error;
+    }
     const controller = new AbortController();
     const relayAbort = () => controller.abort(signal?.reason);
     if (signal?.aborted) relayAbort();
@@ -364,12 +399,12 @@ export class SessionManager {
       void handle.accepted.then(
         (acceptedWork) => {
           if (this.runtime.get(id) === runtime && runtime.acceptedWork !== 'accepted') {
-            runtime.acceptedWork = acceptedWork;
+            this.setAcceptedWork(id, runtime, acceptedWork);
           }
         },
         () => {
           if (this.runtime.get(id) === runtime && runtime.acceptedWork !== 'accepted') {
-            runtime.acceptedWork = 'unknown';
+            this.setAcceptedWork(id, runtime, 'unknown');
           }
         },
       );
@@ -731,12 +766,12 @@ export class SessionManager {
   }
 
   private evictOldestCompletedIfOverCap(): void {
-    while (this.completedOrder.length > MAX_RETAINED_COMPLETED_SESSIONS) {
+    while (this.completedOrder.length > MAX_RETAINED_COMPLETED_RUNTIMES) {
       const staleId = this.completedOrder.shift();
       if (staleId === undefined) break;
       if (!this.runtime.has(staleId)) continue;
       this.runtime.delete(staleId);
-      this.store.delete(staleId);
+      if (this.store.protocolVersionOf(staleId) === 1) this.store.delete(staleId);
     }
   }
 
@@ -745,6 +780,27 @@ export class SessionManager {
     if (!session) return;
     fn(session);
     this.store.update(id, session);
+  }
+
+  private setAcceptedWork(
+    id: string,
+    runtime: InteractiveRuntimeState,
+    next: AcceptedWorkState,
+  ): void {
+    const acceptedWork = runtime.acceptedWork === 'accepted' ? 'accepted' : next;
+    try {
+      const graph = this.security.executionGraphStore;
+      const record = graph?.get(id);
+      if (graph && record && record.session.acceptedWork !== acceptedWork) {
+        graph.update({
+          ...record,
+          session: { ...record.session, acceptedWork },
+        });
+      }
+    } catch {
+      this.logger.warn('accepted-work persistence failed', { sessionId: id });
+    }
+    runtime.acceptedWork = acceptedWork;
   }
 
   private applyLegacyStatus(session: AgentSession, event: AgentEvent): void {
@@ -1112,7 +1168,7 @@ export class SessionManager {
           }
         }
       } else await runtime.handle.send(command);
-      runtime.acceptedWork = 'accepted';
+      this.setAcceptedWork(id, runtime, 'accepted');
       return this.acknowledgement(command);
     } catch (error) {
       if (error instanceof InteractiveSessionError && error.code === 'stale_interaction') {
@@ -1199,7 +1255,7 @@ export class SessionManager {
     if (allowRequested && !workspaceStillTrusted) {
       return this.dispatchFailure('workspace_untrusted');
     }
-    runtime.acceptedWork = 'accepted';
+    this.setAcceptedWork(id, runtime, 'accepted');
     return this.acknowledgement(command);
   }
 
@@ -1272,7 +1328,8 @@ export class SessionManager {
   private ownedBy(id: string, protocolVersion: 1 | 2 | undefined): boolean {
     const ownedProtocol =
       this.runtime.get(id)?.protocolVersion ??
-      this.pendingInteractiveStarts.get(id)?.protocolVersion;
+      this.pendingInteractiveStarts.get(id)?.protocolVersion ??
+      this.store.protocolVersionOf(id);
     return protocolVersion === undefined || ownedProtocol === protocolVersion;
   }
 

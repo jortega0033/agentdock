@@ -49,6 +49,9 @@ importers:
       '@fastify/rate-limit':
         specifier: 11.2.0
         version: 11.2.0
+      ajv:
+        specifier: ^8.20.0
+        version: 8.20.0
       fastify:
         specifier: ^5.2.1
         version: 5.12.1

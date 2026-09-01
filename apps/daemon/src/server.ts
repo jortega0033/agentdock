@@ -88,7 +88,9 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
   });
 
   app.register(rateLimit, { global: false });
-  app.addContentTypeParser('application/octet-stream', (request, payload, done) => done(null, payload));
+  app.addContentTypeParser('application/octet-stream', (request, payload, done) =>
+    done(null, payload),
+  );
 
   registerHealthRoute(app, startedAt);
   registerProviderRoutes(app, opts.registry);
@@ -105,7 +107,8 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
       registerV2ComponentRoutes(app, opts.registry, opts.trustStore);
     }
     registerV2AgentWorktreeRoutes(app, opts.subagentStore, opts.worktreeManager);
-    if (opts.attachmentStore) registerV2MultimodalRoutes(app, opts.attachmentStore);
+    if (opts.attachmentStore)
+      registerV2MultimodalRoutes(app, opts.attachmentStore, opts.sessionManager);
   });
 
   app.setErrorHandler((err: FastifyError, req, reply) => {

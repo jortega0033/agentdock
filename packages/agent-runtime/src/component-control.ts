@@ -14,9 +14,18 @@ import type { McpControlContext } from './mcp-control.js';
 import { ProviderControlError } from './mcp-control.js';
 
 export interface ProviderComponentControlPlane {
-  list(input: ProviderComponentListRequestV2, context: McpControlContext): Promise<ProviderComponentListV2>;
-  manage(input: ProviderComponentManageRequestV2, context: McpControlContext): Promise<ProviderComponentOperationResultV2>;
-  invoke(input: ProviderComponentInvokeRequestV2, context: McpControlContext): Promise<ProviderComponentOperationResultV2>;
+  list(
+    input: ProviderComponentListRequestV2,
+    context: McpControlContext,
+  ): Promise<ProviderComponentListV2>;
+  manage(
+    input: ProviderComponentManageRequestV2,
+    context: McpControlContext,
+  ): Promise<ProviderComponentOperationResultV2>;
+  invoke(
+    input: ProviderComponentInvokeRequestV2,
+    context: McpControlContext,
+  ): Promise<ProviderComponentOperationResultV2>;
 }
 
 interface DiscoveryRoot {
@@ -31,17 +40,59 @@ function roots(provider: ProviderId, cwd: string): DiscoveryRoot[] {
   const providerDir = provider === 'claude' ? '.claude' : '.codex';
   const home = homedir();
   const entries: DiscoveryRoot[] = [
-    { scope: 'project', kind: 'skill', directory: join(cwd, providerDir, 'skills'), marker: `${providerDir}/skills`, fileName: 'SKILL.md' },
-    { scope: 'project', kind: 'plugin', directory: join(cwd, providerDir, 'plugins'), marker: `${providerDir}/plugins` },
-    { scope: 'user', kind: 'skill', directory: join(home, providerDir, 'skills'), marker: `~/${providerDir}/skills`, fileName: 'SKILL.md' },
-    { scope: 'user', kind: 'plugin', directory: join(home, providerDir, 'plugins'), marker: `~/${providerDir}/plugins` },
+    {
+      scope: 'project',
+      kind: 'skill',
+      directory: join(cwd, providerDir, 'skills'),
+      marker: `${providerDir}/skills`,
+      fileName: 'SKILL.md',
+    },
+    {
+      scope: 'project',
+      kind: 'plugin',
+      directory: join(cwd, providerDir, 'plugins'),
+      marker: `${providerDir}/plugins`,
+    },
+    {
+      scope: 'user',
+      kind: 'skill',
+      directory: join(home, providerDir, 'skills'),
+      marker: `~/${providerDir}/skills`,
+      fileName: 'SKILL.md',
+    },
+    {
+      scope: 'user',
+      kind: 'plugin',
+      directory: join(home, providerDir, 'plugins'),
+      marker: `~/${providerDir}/plugins`,
+    },
   ];
   if (provider === 'claude') {
     entries.push(
-      { scope: 'project', kind: 'command', directory: join(cwd, '.claude', 'commands'), marker: '.claude/commands' },
-      { scope: 'project', kind: 'agent', directory: join(cwd, '.claude', 'agents'), marker: '.claude/agents' },
-      { scope: 'user', kind: 'command', directory: join(home, '.claude', 'commands'), marker: '~/.claude/commands' },
-      { scope: 'user', kind: 'agent', directory: join(home, '.claude', 'agents'), marker: '~/.claude/agents' },
+      {
+        scope: 'project',
+        kind: 'command',
+        directory: join(cwd, '.claude', 'commands'),
+        marker: '.claude/commands',
+      },
+      {
+        scope: 'project',
+        kind: 'agent',
+        directory: join(cwd, '.claude', 'agents'),
+        marker: '.claude/agents',
+      },
+      {
+        scope: 'user',
+        kind: 'command',
+        directory: join(home, '.claude', 'commands'),
+        marker: '~/.claude/commands',
+      },
+      {
+        scope: 'user',
+        kind: 'agent',
+        directory: join(home, '.claude', 'agents'),
+        marker: '~/.claude/agents',
+      },
     );
   }
   return entries;
@@ -75,7 +126,10 @@ function preview(text: string): ProviderComponentDescriptorV2['manifestPreview']
 
 async function within(root: string, candidate: string): Promise<boolean> {
   try {
-    const [canonicalRoot, canonicalCandidate] = await Promise.all([realpath(root), realpath(candidate)]);
+    const [canonicalRoot, canonicalCandidate] = await Promise.all([
+      realpath(root),
+      realpath(candidate),
+    ]);
     const suffix = relative(canonicalRoot, canonicalCandidate);
     return suffix === '' || (!suffix.startsWith(`..${sep}`) && suffix !== '..');
   } catch {
@@ -83,7 +137,11 @@ async function within(root: string, candidate: string): Promise<boolean> {
   }
 }
 
-async function scanRoot(provider: ProviderId, root: DiscoveryRoot, trusted: boolean): Promise<ProviderComponentDescriptorV2[]> {
+async function scanRoot(
+  provider: ProviderId,
+  root: DiscoveryRoot,
+  trusted: boolean,
+): Promise<ProviderComponentDescriptorV2[]> {
   let entries;
   try {
     entries = await readdir(root.directory, { withFileTypes: true });
@@ -101,7 +159,12 @@ async function scanRoot(provider: ProviderId, root: DiscoveryRoot, trusted: bool
     try {
       if (entry.isDirectory() && !root.fileName) {
         for (const manifest of ['plugin.json', 'manifest.json', 'README.md']) {
-          try { contents = await readFile(join(candidate, manifest), 'utf8'); break; } catch { /* bounded fallback */ }
+          try {
+            contents = await readFile(join(candidate, manifest), 'utf8');
+            break;
+          } catch {
+            /* bounded fallback */
+          }
         }
       } else {
         contents = await readFile(candidate, 'utf8');
@@ -124,9 +187,18 @@ async function scanRoot(provider: ProviderId, root: DiscoveryRoot, trusted: bool
       displayPath: `${root.marker}/${entry.name}${root.fileName ? `/${root.fileName}` : ''}`,
       enabled: root.scope === 'user' || trusted,
       trusted: root.scope === 'user' || trusted,
-      dependencies: metadata.dependencies ? metadata.dependencies.split(',').map((item) => item.trim()).filter(Boolean).slice(0, 256) : [],
-      capabilities: explicitInvoke ? ['direct_invoke'] : [],
-      supportsDirectInvoke: explicitInvoke,
+      dependencies: metadata.dependencies
+        ? metadata.dependencies
+            .split(',')
+            .map((item) => item.trim())
+            .filter(Boolean)
+            .slice(0, 256)
+        : [],
+      // The filesystem layout can declare provider-native invocation support, but this
+      // inspector has no provider invocation transport. Keep the declaration visible
+      // without advertising an operation that will always fail.
+      capabilities: explicitInvoke ? ['manifest_direct_invoke'] : [],
+      supportsDirectInvoke: false,
       supportsManage: false,
       manifestPreview: preview(contents),
     });
@@ -134,34 +206,85 @@ async function scanRoot(provider: ProviderId, root: DiscoveryRoot, trusted: bool
   return items;
 }
 
-async function scanClaudeHooks(path: string, scope: 'project' | 'user', trusted: boolean): Promise<ProviderComponentDescriptorV2[]> {
+async function scanClaudeHooks(
+  path: string,
+  scope: 'project' | 'user',
+  trusted: boolean,
+): Promise<ProviderComponentDescriptorV2[]> {
   let contents: string;
-  try { contents = await readFile(path, 'utf8'); } catch { return []; }
+  try {
+    contents = await readFile(path, 'utf8');
+  } catch {
+    return [];
+  }
   if (Buffer.byteLength(contents, 'utf8') > 1_000_000) return [];
   let parsed: unknown;
-  try { parsed = JSON.parse(contents); } catch {
-    return [{ id: `${scope}/hook/settings`, provider: 'claude', kind: 'hook', name: 'Hooks settings', scope, source: 'filesystem', displayPath: scope === 'project' ? '.claude/settings.json' : '~/.claude/settings.json', enabled: false, trusted: scope === 'user' || trusted, dependencies: [], capabilities: [], supportsDirectInvoke: false, supportsManage: false, loadError: { code: 'manifest_invalid', summary: 'Hook settings could not be parsed' }, manifestPreview: { hooks: 0, mcpServers: 0, executables: 0, environmentVariables: 0, skills: 0, agents: 0 } }];
+  try {
+    parsed = JSON.parse(contents);
+  } catch {
+    return [
+      {
+        id: `${scope}/hook/settings`,
+        provider: 'claude',
+        kind: 'hook',
+        name: 'Hooks settings',
+        scope,
+        source: 'filesystem',
+        displayPath: scope === 'project' ? '.claude/settings.json' : '~/.claude/settings.json',
+        enabled: false,
+        trusted: scope === 'user' || trusted,
+        dependencies: [],
+        capabilities: [],
+        supportsDirectInvoke: false,
+        supportsManage: false,
+        loadError: { code: 'manifest_invalid', summary: 'Hook settings could not be parsed' },
+        manifestPreview: {
+          hooks: 0,
+          mcpServers: 0,
+          executables: 0,
+          environmentVariables: 0,
+          skills: 0,
+          agents: 0,
+        },
+      },
+    ];
   }
-  const hooks = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>).hooks : undefined;
+  const hooks =
+    parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>).hooks
+      : undefined;
   if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return [];
-  return Object.entries(hooks as Record<string, unknown>).slice(0, 256).map(([lifecycle, value], index) => ({
-    id: `${scope}/hook/${lifecycle.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 128)}:${index}`,
-    provider: 'claude' as const,
-    kind: 'hook' as const,
-    name: lifecycle.slice(0, 256),
-    scope,
-    source: 'filesystem' as const,
-    displayPath: scope === 'project' ? '.claude/settings.json' : '~/.claude/settings.json',
-    enabled: scope === 'user' || trusted,
-    trusted: scope === 'user' || trusted,
-    dependencies: [], capabilities: ['observe'], supportsDirectInvoke: false, supportsManage: false,
-    manifestPreview: { hooks: Array.isArray(value) ? Math.min(value.length, 10_000) : 1, mcpServers: 0, executables: JSON.stringify(value).includes('command') ? 1 : 0, environmentVariables: JSON.stringify(value).includes('env') ? 1 : 0, skills: 0, agents: 0 },
-  }));
+  return Object.entries(hooks as Record<string, unknown>)
+    .slice(0, 256)
+    .map(([lifecycle, value], index) => ({
+      id: `${scope}/hook/${lifecycle.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 128)}:${index}`,
+      provider: 'claude' as const,
+      kind: 'hook' as const,
+      name: lifecycle.slice(0, 256),
+      scope,
+      source: 'filesystem' as const,
+      displayPath: scope === 'project' ? '.claude/settings.json' : '~/.claude/settings.json',
+      enabled: scope === 'user' || trusted,
+      trusted: scope === 'user' || trusted,
+      dependencies: [],
+      capabilities: ['observe'],
+      supportsDirectInvoke: false,
+      supportsManage: false,
+      manifestPreview: {
+        hooks: Array.isArray(value) ? Math.min(value.length, 10_000) : 1,
+        mcpServers: 0,
+        executables: JSON.stringify(value).includes('command') ? 1 : 0,
+        environmentVariables: JSON.stringify(value).includes('env') ? 1 : 0,
+        skills: 0,
+        agents: 0,
+      },
+    }));
 }
 
 function revision(items: readonly ProviderComponentDescriptorV2[]): string {
   let hash = 0;
-  for (const character of JSON.stringify(items)) hash = (Math.imul(hash, 31) + character.charCodeAt(0)) >>> 0;
+  for (const character of JSON.stringify(items))
+    hash = (Math.imul(hash, 31) + character.charCodeAt(0)) >>> 0;
   return `components-${hash.toString(16).padStart(8, '0')}`;
 }
 
@@ -169,24 +292,62 @@ function revision(items: readonly ProviderComponentDescriptorV2[]): string {
 export class FilesystemProviderComponentControlPlane implements ProviderComponentControlPlane {
   constructor(private readonly provider: ProviderId) {}
 
-  async list(input: ProviderComponentListRequestV2, context: McpControlContext): Promise<ProviderComponentListV2> {
+  async list(
+    input: ProviderComponentListRequestV2,
+    context: McpControlContext,
+  ): Promise<ProviderComponentListV2> {
     const trusted = context.workspaceTrust.state === 'trusted';
-    const discovered = (await Promise.all(roots(this.provider, context.cwd).map((root) => scanRoot(this.provider, root, trusted)))).flat();
+    const discovered = (
+      await Promise.all(
+        roots(this.provider, context.cwd).map((root) => scanRoot(this.provider, root, trusted)),
+      )
+    ).flat();
     if (this.provider === 'claude') {
-      discovered.push(...await scanClaudeHooks(join(context.cwd, '.claude', 'settings.json'), 'project', trusted));
-      discovered.push(...await scanClaudeHooks(join(homedir(), '.claude', 'settings.json'), 'user', trusted));
+      discovered.push(
+        ...(await scanClaudeHooks(
+          join(context.cwd, '.claude', 'settings.json'),
+          'project',
+          trusted,
+        )),
+      );
+      discovered.push(
+        ...(await scanClaudeHooks(join(homedir(), '.claude', 'settings.json'), 'user', trusted)),
+      );
     }
     const items = input.kind ? discovered.filter((item) => item.kind === input.kind) : discovered;
     return { items, revision: revision(items) };
   }
 
-  async manage(input: ProviderComponentManageRequestV2, context: McpControlContext): Promise<ProviderComponentOperationResultV2> {
-    if (context.workspaceTrust.state !== 'trusted') return { componentId: input.componentId, status: 'blocked', safeSummary: 'Project components cannot be enabled before workspace trust' };
-    return { componentId: input.componentId, status: 'unsupported', safeSummary: 'This provider does not advertise an explicit component management API' };
+  async manage(
+    input: ProviderComponentManageRequestV2,
+    context: McpControlContext,
+  ): Promise<ProviderComponentOperationResultV2> {
+    if (context.workspaceTrust.state !== 'trusted')
+      return {
+        componentId: input.componentId,
+        status: 'blocked',
+        safeSummary: 'Project components cannot be enabled before workspace trust',
+      };
+    return {
+      componentId: input.componentId,
+      status: 'unsupported',
+      safeSummary: 'This provider does not advertise an explicit component management API',
+    };
   }
 
-  async invoke(input: ProviderComponentInvokeRequestV2, context: McpControlContext): Promise<ProviderComponentOperationResultV2> {
-    if (context.workspaceTrust.state !== 'trusted') return { componentId: input.componentId, status: 'blocked', safeSummary: 'Project components cannot execute before workspace trust' };
-    throw new ProviderControlError('operation_unsupported', 'Direct component invocation requires a provider-native manifest operation');
+  async invoke(
+    input: ProviderComponentInvokeRequestV2,
+    context: McpControlContext,
+  ): Promise<ProviderComponentOperationResultV2> {
+    if (context.workspaceTrust.state !== 'trusted')
+      return {
+        componentId: input.componentId,
+        status: 'blocked',
+        safeSummary: 'Project components cannot execute before workspace trust',
+      };
+    throw new ProviderControlError(
+      'operation_unsupported',
+      'Direct component invocation requires a provider-native manifest operation',
+    );
   }
 }

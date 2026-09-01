@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import {
@@ -32,7 +32,14 @@ interface PendingApproval {
   provider: ProviderId;
   serverId: string;
   toolId: string;
+  invocationHash: string;
   expiresAt: number;
+}
+
+function invocationHash(input: McpToolInvocationRequestV2, canonicalCwd: string): string {
+  return createHash('sha256')
+    .update(JSON.stringify([input.provider, input.serverId, input.toolId, canonicalCwd, input.arguments]))
+    .digest('hex');
 }
 
 function fail(reply: FastifyReply, status: number, code: string, message: string): void {
@@ -172,14 +179,20 @@ export function registerV2McpRoutes(
       if (!tool || tool.kind !== 'tool') return fail(reply, 404, 'mcp_tool_not_found', 'MCP tool was not found in the current catalog');
 
       if (tool.sideEffecting || tool.destructive) {
+        const now = Date.now();
+        for (const [requestId, approval] of approvals)
+          if (approval.expiresAt < now) approvals.delete(requestId);
+        const hash = invocationHash(input, resolved.context.cwd);
         if (!input.approval) {
+          if (approvals.size >= 1_000)
+            return fail(reply, 429, 'approval_capacity_exceeded', 'Too many MCP approvals are pending');
           const approvalRequestId = randomUUID();
-          approvals.set(approvalRequestId, { provider: input.provider, serverId: input.serverId, toolId: input.toolId, expiresAt: Date.now() + APPROVAL_TTL_MS });
+          approvals.set(approvalRequestId, { provider: input.provider, serverId: input.serverId, toolId: input.toolId, invocationHash: hash, expiresAt: now + APPROVAL_TTL_MS });
           return reply.send(mcpToolInvocationResultV2Schema.parse({ serverId: input.serverId, toolId: input.toolId, status: 'approval_required', approvalRequestId }));
         }
         const pending = approvals.get(input.approval.requestId);
         approvals.delete(input.approval.requestId);
-        if (!pending || pending.expiresAt < Date.now() || pending.provider !== input.provider || pending.serverId !== input.serverId || pending.toolId !== input.toolId) {
+        if (!pending || pending.expiresAt < now || pending.provider !== input.provider || pending.serverId !== input.serverId || pending.toolId !== input.toolId || pending.invocationHash !== hash) {
           return fail(reply, 409, 'approval_invalid', 'MCP tool approval is invalid or expired');
         }
         if (input.approval.decision === 'deny') {

@@ -63,10 +63,13 @@ describe('protocol-v2 MCP routes', () => {
     const first = await app.inject({ method: 'POST', url: '/v2/integrations/mcp/invoke', headers: { ...auth, 'content-type': 'application/json' }, payload: input });
     expect(first.statusCode, first.body).toBe(200);
     expect(first.json().status).toBe('approval_required');
-    const approved = await app.inject({ method: 'POST', url: '/v2/integrations/mcp/invoke', headers: { ...auth, 'content-type': 'application/json' }, payload: { ...input, approval: { decision: 'approve_once', requestId: first.json().approvalRequestId } } });
+    const tampered = await app.inject({ method: 'POST', url: '/v2/integrations/mcp/invoke', headers: { ...auth, 'content-type': 'application/json' }, payload: { ...input, arguments: { recordId: 'different' }, approval: { decision: 'approve_once', requestId: first.json().approvalRequestId } } });
+    expect(tampered.statusCode).toBe(409);
+    const second = await app.inject({ method: 'POST', url: '/v2/integrations/mcp/invoke', headers: { ...auth, 'content-type': 'application/json' }, payload: input });
+    const approved = await app.inject({ method: 'POST', url: '/v2/integrations/mcp/invoke', headers: { ...auth, 'content-type': 'application/json' }, payload: { ...input, approval: { decision: 'approve_once', requestId: second.json().approvalRequestId } } });
     expect(approved.statusCode, approved.body).toBe(200);
     expect(approved.json()).toMatchObject({ status: 'completed', output: { ok: true } });
-    const replay = await app.inject({ method: 'POST', url: '/v2/integrations/mcp/invoke', headers: { ...auth, 'content-type': 'application/json' }, payload: { ...input, approval: { decision: 'approve_once', requestId: first.json().approvalRequestId } } });
+    const replay = await app.inject({ method: 'POST', url: '/v2/integrations/mcp/invoke', headers: { ...auth, 'content-type': 'application/json' }, payload: { ...input, approval: { decision: 'approve_once', requestId: second.json().approvalRequestId } } });
     expect(replay.statusCode).toBe(409);
   });
 

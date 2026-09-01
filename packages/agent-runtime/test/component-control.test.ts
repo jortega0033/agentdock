@@ -9,11 +9,29 @@ describe('provider component inspection', () => {
     const cwd = await mkdtemp(join(tmpdir(), 'agent-dock-components-'));
     const skill = join(cwd, '.claude', 'skills', 'review');
     await mkdir(skill, { recursive: true });
-    await writeFile(join(skill, 'SKILL.md'), '---\nname: Review\ndescription: Safe review helper\nuser-invocable: true\n---\nHooks command env mcpServers');
+    await writeFile(
+      join(skill, 'SKILL.md'),
+      '---\nname: Review\ndescription: Safe review helper\nuser-invocable: true\n---\nHooks command env mcpServers',
+    );
     const control = new FilesystemProviderComponentControlPlane('claude');
-    const result = await control.list({ provider: 'claude', cwd, kind: 'skill' }, { cwd, workspaceTrust: { state: 'untrusted' } });
+    const result = await control.list(
+      { provider: 'claude', cwd, kind: 'skill' },
+      { cwd, workspaceTrust: { state: 'untrusted' } },
+    );
     const projectItem = result.items.find((item) => item.scope === 'project');
-    expect(projectItem).toMatchObject({ name: 'Review', enabled: false, trusted: false, supportsDirectInvoke: true, displayPath: '.claude/skills/review/SKILL.md' });
-    expect(projectItem?.manifestPreview).toMatchObject({ hooks: 1, mcpServers: 1, executables: 1, environmentVariables: 1 });
+    expect(projectItem).toMatchObject({
+      name: 'Review',
+      enabled: false,
+      trusted: false,
+      supportsDirectInvoke: false,
+      capabilities: ['manifest_direct_invoke'],
+      displayPath: '.claude/skills/review/SKILL.md',
+    });
+    expect(projectItem?.manifestPreview).toMatchObject({
+      hooks: 1,
+      mcpServers: 1,
+      executables: 1,
+      environmentVariables: 1,
+    });
   });
 });

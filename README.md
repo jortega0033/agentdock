@@ -20,15 +20,15 @@ API keys.
 ## What AgentDock is not
 
 AgentDock includes a working reference desktop, but it is not a finished chat product. It has no
-accounts, cloud backend, persistent history, or fixed end-user workflow. Those decisions belong in
-the product you build from the boilerplate.
+accounts, cloud backend, or fixed end-user workflow. Those decisions belong in the product you
+build from the boilerplate.
 
 ## Build your product with AgentDock
 
 1. Fork the repository and replace the reference UI with your product workflow.
 2. Keep daemon access in a trusted process. Never expose the daemon token to a renderer.
-3. Add persistence, accounts, and product data in your own layer. AgentDock's
-   `MemorySessionStore` is intentionally temporary.
+3. Add accounts, cloud sync, and product data in your own layer. AgentDock's local session and
+   history stores are runtime infrastructure, not a product database.
 4. Replace `appId`, `productName`, and the default assets by following
    [the asset guide](docs/assets.md).
 5. Run the build, test, and packaging checks, and review the security boundaries before
@@ -39,6 +39,13 @@ the product you build from the boilerplate.
 Open Vacancy Radar is a downstream product built from AgentDock. It keeps the Electron shell,
 local daemon, and connection to Claude Agent, the legacy Claude CLI, or Codex CLI, then adds a
 vacancy-focused workflow and its own product behavior.
+
+### Product concept directory
+
+Looking for a focused product wedge? The research-backed
+[product concept directory](docs/use-cases/README.md) expands validated workflow families into 45
+concrete app concepts, with MVP suggestions, human-approval boundaries, and Epic #4 dependency
+tags.
 
 ## What the boilerplate provides
 
@@ -118,7 +125,7 @@ apps/
 packages/
   agent-runtime/  Process management, adapters, normalized events
   client/         Typed daemon client for trusted Node/Electron contexts
-  shared/         Protocol v1 types and Zod schemas
+  shared/         Protocol v1/v2 types and Zod schemas
 scripts/assets/   Icon, documentation, and social-image generation tooling
 ```
 
@@ -201,6 +208,7 @@ Follow [the provider guide](docs/providers.md#adding-a-new-provider) for the com
 
 - [Development](DEVELOPMENT.md): setup, code map, and architectural rules
 - [Architecture](docs/architecture.md): runtime flow, responsibilities, and trust boundaries
+- [Product concepts](docs/use-cases/README.md): researched app directory, MVP wedges, and roadmap dependencies
 - [Security](SECURITY.md): threat model, loopback auth, and process hygiene
 - [Protocol v1](docs/protocol-v1.md): normalized events and wire guarantees
 - [Protocol v2](docs/protocol-v2.md): capability negotiation, correlated content, and versioned routes

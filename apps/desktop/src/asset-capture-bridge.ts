@@ -103,6 +103,12 @@ export function installAssetCaptureBridge(): void {
     onDaemonStatus: () => () => {},
     listProviders: async () => providers,
     listProvidersV2: async () => providersV2,
+    listMcpServers: async () => ({ servers: [], revision: 'asset-capture-1' }),
+    configureMcpServer: async () => ({ servers: [], revision: 'asset-capture-1' }),
+    actionMcpServer: async () => ({ servers: [], revision: 'asset-capture-1' }),
+    getMcpCatalog: async (_provider, serverId) => ({ serverId, items: [], revision: 'asset-capture-1' }),
+    startMcpOAuth: async (_provider, serverId) => ({ serverId, status: 'unsupported' }),
+    invokeMcpTool: async (input) => ({ serverId: input.serverId, toolId: input.toolId, status: 'failed', safeSummary: 'Unavailable in asset capture' }),
     createSession: async () => {
       window.setTimeout(() => {
         eventCallback?.(session.id, {

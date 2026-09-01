@@ -15,6 +15,12 @@ import {
   sessionListV2QuerySchema,
   workspaceInspectRequestV2Schema,
   workspaceTrustUpdateRequestV2Schema,
+  mcpCatalogRequestV2Schema,
+  mcpConfigureRequestV2Schema,
+  mcpListRequestV2Schema,
+  mcpOAuthStartRequestV2Schema,
+  mcpServerActionRequestV2Schema,
+  mcpToolInvocationRequestV2Schema,
   type AgentCommandV2,
   type AgentEventV2Envelope,
   type AgentSessionV2,
@@ -568,6 +574,52 @@ ipcMain.handle('daemon:list-providers', async () => {
 ipcMain.handle('daemon:list-providers-v2', async () => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.providers.list();
+});
+
+ipcMain.handle('daemon:list-mcp-servers', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  const parsed = mcpListRequestV2Schema.parse(input);
+  return client.v2.integrations.mcp.list(parsed.provider, parsed.cwd);
+});
+
+ipcMain.handle('daemon:configure-mcp-server', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.integrations.mcp.configure(mcpConfigureRequestV2Schema.parse(input));
+});
+
+ipcMain.handle('daemon:action-mcp-server', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.integrations.mcp.action(mcpServerActionRequestV2Schema.parse(input));
+});
+
+ipcMain.handle('daemon:get-mcp-catalog', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  const parsed = mcpCatalogRequestV2Schema.parse(input);
+  return client.v2.integrations.mcp.catalog(parsed.provider, parsed.serverId, parsed.cwd);
+});
+
+ipcMain.handle('daemon:start-mcp-oauth', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  const parsed = mcpOAuthStartRequestV2Schema.parse(input);
+  const result = await client.v2.integrations.mcp.oauth(parsed.provider, parsed.serverId, parsed.cwd);
+  let authorizationHost: string | undefined;
+  if (result.authorizationUrl) {
+    const url = new URL(result.authorizationUrl);
+    if (url.protocol !== 'https:') throw new Error('provider returned an unsafe OAuth URL');
+    authorizationHost = url.host;
+    await shell.openExternal(url.toString());
+  }
+  return {
+    serverId: result.serverId,
+    status: result.status,
+    ...(authorizationHost ? { authorizationHost } : {}),
+    ...(result.safeSummary ? { safeSummary: result.safeSummary } : {}),
+  };
+});
+
+ipcMain.handle('daemon:invoke-mcp-tool', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.integrations.mcp.invoke(mcpToolInvocationRequestV2Schema.parse(input));
 });
 
 ipcMain.handle('daemon:create-session', async (_event, input: unknown) => {

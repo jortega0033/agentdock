@@ -11,3 +11,4 @@ export * from './providers/codex/adapter.js';
 export * from './providers/fake/adapter.js';
 export * from './providers/compatibility-manifest.js';
 export * from './providers/common/session-supervisor.js';
+export * from './mcp-control.js';

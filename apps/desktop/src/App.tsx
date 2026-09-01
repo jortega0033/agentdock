@@ -15,6 +15,7 @@ import type {
   RendererQuestionResponse,
 } from '../electron/interaction-broker.js';
 import { ProviderPanel } from './components/ProviderPanel.js';
+import { McpPanel } from './components/McpPanel.js';
 import { ActivityTimeline } from './components/activity/ActivityTimeline.js';
 import { RendererInteractionTimelineProjector } from './components/activity/interaction-timeline.js';
 import { AgentDockMark } from './components/AgentDockMark.js';
@@ -502,6 +503,15 @@ export function App() {
               </div>
               {providersError && <div className="banner banner--error">{providersError}</div>}
               {providers && <ProviderPanel providers={providers} />}
+            </section>
+            <section className="card">
+              <div className="section-heading">
+                <div>
+                  <span className="eyebrow">Integrations</span>
+                  <h2>MCP servers</h2>
+                </div>
+              </div>
+              <McpPanel provider={provider} cwd={cwd} />
             </section>
             <section className="card">
               <div className="section-heading">

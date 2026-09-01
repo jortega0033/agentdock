@@ -9,6 +9,7 @@ import { registerV2ProviderRoutes } from './routes/v2-providers.js';
 import { registerV2SessionRoutes } from './routes/v2-sessions.js';
 import { registerV2AuditRoutes } from './routes/v2-audit.js';
 import { registerV2WorkspaceRoutes } from './routes/v2-workspaces.js';
+import { registerV2McpRoutes } from './routes/v2-mcp.js';
 import type { AuditStore } from './audit-store.js';
 import type { SessionManager } from './session-manager.js';
 import type { WorkspaceTrustStore } from './workspace-trust-store.js';
@@ -90,6 +91,7 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
     if (opts.auditStore) registerV2AuditRoutes(app, opts.auditStore);
     if (opts.trustStore) {
       registerV2WorkspaceRoutes(app, opts.trustStore, opts.sessionManager);
+      registerV2McpRoutes(app, opts.registry, opts.trustStore);
     }
   });
 

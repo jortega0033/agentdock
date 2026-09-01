@@ -896,3 +896,61 @@ textarea {
     min-height: auto;
   }
 }
+.mcp-panel__summary,
+.mcp-server__meta,
+.form-hint {
+  color: #64748b;
+  font-size: 0.78rem;
+}
+
+.row--spread {
+  justify-content: space-between;
+}
+
+.mcp-server-list {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0.75rem 0 1rem;
+}
+
+.mcp-server {
+  border: 1px solid #d8e1ed;
+  border-radius: 0.75rem;
+  padding: 0.75rem;
+}
+
+.mcp-server__failure {
+  color: #b91c1c;
+  font-size: 0.82rem;
+}
+
+.mcp-server__actions,
+.mcp-field-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+}
+
+.mcp-field-list span {
+  background: #eef2f8;
+  border-radius: 999px;
+  color: #64748b;
+  font-size: 0.72rem;
+  padding: 0.2rem 0.45rem;
+}
+
+.mcp-catalog {
+  margin: 0.75rem 0 0;
+  padding-left: 1.25rem;
+}
+
+.mcp-catalog span {
+  color: #64748b;
+  font-size: 0.75rem;
+}
+
+.mcp-config-form {
+  border-top: 1px solid #d8e1ed;
+  padding-top: 0.85rem;
+}

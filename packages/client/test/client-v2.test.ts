@@ -214,6 +214,32 @@ describe('AgentDockClient.v2 protocol discovery', () => {
   });
 });
 
+describe('AgentDockClient.v2 MCP control', () => {
+  it('uses fixed versioned routes and validates configuration before IPC-facing callers can send it', async () => {
+    const list = { servers: [], revision: 'mcp-1' };
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      if (url.includes('/v2/integrations/mcp')) return jsonResponse(200, list);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const client = makeClient(fetchImpl);
+    await expect(client.v2.integrations.mcp.list('codex', 'C:\\repo')).resolves.toEqual(list);
+    await expect(client.v2.integrations.mcp.configure({
+      provider: 'codex', cwd: 'C:\\repo', action: 'add', name: 'docs', scope: 'user',
+      config: { transport: 'streamable_http', url: 'https://mcp.example.test' },
+    })).resolves.toEqual(list);
+    await expect(client.v2.integrations.mcp.configure({
+      provider: 'codex', cwd: 'C:\\repo', action: 'add', name: 'unsafe', scope: 'user',
+      config: { transport: 'streamable_http', url: 'http://mcp.example.test' },
+    })).rejects.toBeInstanceOf(ValidationError);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(fetchImpl.mock.calls[2]?.[1]).toMatchObject({
+      method: 'POST',
+      headers: expect.objectContaining({ Authorization: `Bearer ${TOKEN}` }),
+    });
+  });
+});
+
 describe('AgentDockClient.v2 response validation', () => {
   it('creates, reads, cancels, and deletes sessions on the versioned routes', async () => {
     const fetchImpl = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {

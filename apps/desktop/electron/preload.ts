@@ -20,6 +20,15 @@ import {
   workspaceInspectRequestV2Schema,
   workspaceTrustUpdateRequestV2Schema,
   workspaceTrustViewV2Schema,
+  mcpCatalogRequestV2Schema,
+  mcpCatalogV2Schema,
+  mcpConfigureRequestV2Schema,
+  mcpListRequestV2Schema,
+  mcpOAuthStartRequestV2Schema,
+  mcpServerActionRequestV2Schema,
+  mcpServerListV2Schema,
+  mcpToolInvocationRequestV2Schema,
+  mcpToolInvocationResultV2Schema,
   type AgentCommandV2,
   type AgentEvent,
   type AgentEventV2Envelope,
@@ -41,6 +50,12 @@ import {
   type SessionListV2Query,
   type WorkspaceTrustUpdateRequestV2,
   type WorkspaceTrustViewV2,
+  type McpCatalogV2,
+  type McpConfigureRequestV2,
+  type McpServerActionRequestV2,
+  type McpServerListV2,
+  type McpToolInvocationRequestV2,
+  type McpToolInvocationResultV2,
 } from '@agent-dock/shared';
 import type {
   RendererInteraction,
@@ -81,6 +96,13 @@ export interface AuditReadOptionsV2 {
   sessionId?: string;
 }
 
+export interface RendererMcpOAuthStatus {
+  serverId: string;
+  status: 'pending' | 'authenticated' | 'failed' | 'unsupported';
+  authorizationHost?: string;
+  safeSummary?: string;
+}
+
 type WithoutCommandId<T> = T extends unknown ? Omit<T, 'commandId'> : never;
 export type RendererSessionCommand = WithoutCommandId<
   Exclude<AgentCommandV2, { type: 'approval.respond' | 'question.respond' }>
@@ -91,6 +113,12 @@ export interface AgentDockBridge {
   onDaemonStatus(callback: (status: DaemonStatus) => void): () => void;
   listProviders(): Promise<ProviderStatus[]>;
   listProvidersV2(): Promise<ProviderStatusV2[]>;
+  listMcpServers(provider: ProviderId, cwd: string): Promise<McpServerListV2>;
+  configureMcpServer(input: McpConfigureRequestV2): Promise<McpServerListV2>;
+  actionMcpServer(input: McpServerActionRequestV2): Promise<McpServerListV2>;
+  getMcpCatalog(provider: ProviderId, serverId: string, cwd: string): Promise<McpCatalogV2>;
+  startMcpOAuth(provider: ProviderId, serverId: string, cwd: string): Promise<RendererMcpOAuthStatus>;
+  invokeMcpTool(input: McpToolInvocationRequestV2): Promise<McpToolInvocationResultV2>;
   createSession(input: CreateSessionInput): Promise<AgentSession>;
   cancelSession(sessionId: string): Promise<void>;
   onSessionEvent(callback: (sessionId: string, event: AgentEvent) => void): () => void;
@@ -565,6 +593,43 @@ const api: AgentDockBridge = {
   async listProvidersV2() {
     const providers: unknown = await ipcRenderer.invoke('daemon:list-providers-v2');
     return providersV2ResponseSchema.parse({ providers }).providers;
+  },
+  async listMcpServers(provider, cwd) {
+    const input = mcpListRequestV2Schema.parse({ provider, cwd });
+    return mcpServerListV2Schema.parse(await ipcRenderer.invoke('daemon:list-mcp-servers', input));
+  },
+  async configureMcpServer(input) {
+    const parsed = mcpConfigureRequestV2Schema.parse(input);
+    return mcpServerListV2Schema.parse(await ipcRenderer.invoke('daemon:configure-mcp-server', parsed));
+  },
+  async actionMcpServer(input) {
+    const parsed = mcpServerActionRequestV2Schema.parse(input);
+    return mcpServerListV2Schema.parse(await ipcRenderer.invoke('daemon:action-mcp-server', parsed));
+  },
+  async getMcpCatalog(provider, serverId, cwd) {
+    const input = mcpCatalogRequestV2Schema.parse({ provider, serverId, cwd });
+    return mcpCatalogV2Schema.parse(await ipcRenderer.invoke('daemon:get-mcp-catalog', input));
+  },
+  async startMcpOAuth(provider, serverId, cwd) {
+    const input = mcpOAuthStartRequestV2Schema.parse({ provider, serverId, cwd });
+    const output: unknown = await ipcRenderer.invoke('daemon:start-mcp-oauth', input);
+    if (!isRecordWithAllowedKeys(output, ['serverId', 'status', 'authorizationHost', 'safeSummary']) || output.serverId !== serverId || !['pending', 'authenticated', 'failed', 'unsupported'].includes(String(output.status))) {
+      throw new Error('invalid MCP OAuth status');
+    }
+    if (output.authorizationHost !== undefined && (typeof output.authorizationHost !== 'string' || output.authorizationHost.length > 253 || !/^[A-Za-z0-9.-]+(?::\d{1,5})?$/.test(output.authorizationHost))) {
+      throw new Error('invalid MCP OAuth host');
+    }
+    if (output.safeSummary !== undefined && (typeof output.safeSummary !== 'string' || output.safeSummary.length > 1_024)) throw new Error('invalid MCP OAuth summary');
+    return {
+      serverId,
+      status: output.status as RendererMcpOAuthStatus['status'],
+      ...(typeof output.authorizationHost === 'string' ? { authorizationHost: output.authorizationHost } : {}),
+      ...(typeof output.safeSummary === 'string' ? { safeSummary: output.safeSummary } : {}),
+    };
+  },
+  async invokeMcpTool(input) {
+    const parsed = mcpToolInvocationRequestV2Schema.parse(input);
+    return mcpToolInvocationResultV2Schema.parse(await ipcRenderer.invoke('daemon:invoke-mcp-tool', parsed));
   },
   createSession(input) {
     return ipcRenderer.invoke('daemon:create-session', input);

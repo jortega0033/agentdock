@@ -19,6 +19,12 @@ import type {
   SessionListV2Query,
   WorkspaceTrustUpdateRequestV2,
   WorkspaceTrustViewV2,
+  McpCatalogV2,
+  McpConfigureRequestV2,
+  McpServerActionRequestV2,
+  McpServerListV2,
+  McpToolInvocationRequestV2,
+  McpToolInvocationResultV2,
 } from '@agent-dock/shared';
 import type {
   RendererInteraction,
@@ -49,6 +55,13 @@ export interface AuditReadOptionsV2 {
   sessionId?: string;
 }
 
+export interface RendererMcpOAuthStatus {
+  serverId: string;
+  status: 'pending' | 'authenticated' | 'failed' | 'unsupported';
+  authorizationHost?: string;
+  safeSummary?: string;
+}
+
 type WithoutCommandId<T> = T extends unknown ? Omit<T, 'commandId'> : never;
 export type RendererSessionCommand = WithoutCommandId<
   Exclude<AgentCommandV2, { type: 'approval.respond' | 'question.respond' }>
@@ -59,6 +72,12 @@ export interface AgentDockBridge {
   onDaemonStatus(callback: (status: DaemonStatus) => void): () => void;
   listProviders(): Promise<ProviderStatus[]>;
   listProvidersV2(): Promise<ProviderStatusV2[]>;
+  listMcpServers(provider: ProviderId, cwd: string): Promise<McpServerListV2>;
+  configureMcpServer(input: McpConfigureRequestV2): Promise<McpServerListV2>;
+  actionMcpServer(input: McpServerActionRequestV2): Promise<McpServerListV2>;
+  getMcpCatalog(provider: ProviderId, serverId: string, cwd: string): Promise<McpCatalogV2>;
+  startMcpOAuth(provider: ProviderId, serverId: string, cwd: string): Promise<RendererMcpOAuthStatus>;
+  invokeMcpTool(input: McpToolInvocationRequestV2): Promise<McpToolInvocationResultV2>;
   createSession(input: CreateSessionInput): Promise<AgentSession>;
   cancelSession(sessionId: string): Promise<void>;
   onSessionEvent(callback: (sessionId: string, event: AgentEvent) => void): () => void;

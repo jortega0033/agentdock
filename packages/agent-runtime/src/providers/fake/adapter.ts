@@ -21,6 +21,7 @@ import type {
   StartInteractiveSessionOptions,
   StartSessionOptions,
 } from '../../types.js';
+import type { ProviderMcpControlPlane } from '../../mcp-control.js';
 import {
   InteractiveSessionError,
   superviseInteractiveSession,
@@ -71,6 +72,7 @@ export const FAKE_PROVIDER_CAPABILITIES: ProviderCapabilities = {
 export class FakeProvider implements AgentProvider {
   readonly id: ProviderId;
   readonly name: string;
+  readonly mcp?: ProviderMcpControlPlane;
   readonly startedOptions: StartSessionOptions[] = [];
   readonly interactiveStartedOptions: StartInteractiveSessionOptions[] = [];
   readonly interactiveCommands: AgentCommandV2[] = [];
@@ -90,9 +92,11 @@ export class FakeProvider implements AgentProvider {
     },
     private readonly scenario: FakeScenario = 'success',
     private readonly interactiveScenario?: FakeInteractiveScenario,
+    mcp?: ProviderMcpControlPlane,
   ) {
     this.id = id;
     this.name = status.name;
+    this.mcp = mcp;
   }
 
   async detect(): Promise<ProviderStatus> {

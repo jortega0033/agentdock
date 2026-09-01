@@ -6,3 +6,4 @@ export * from './protocol.js';
 export * from './capabilities-v2.js';
 export * from './protocol-v2.js';
 export * from './policy-v2.js';
+export * from './mcp-control-v2.js';

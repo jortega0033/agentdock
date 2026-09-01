@@ -25,6 +25,14 @@ import {
   workspaceInspectRequestV2Schema,
   workspaceTrustUpdateRequestV2Schema,
   workspaceTrustViewV2Schema,
+  mcpCatalogV2Schema,
+  mcpConfigureRequestV2Schema,
+  mcpOAuthStartRequestV2Schema,
+  mcpOAuthStatusV2Schema,
+  mcpServerActionRequestV2Schema,
+  mcpServerListV2Schema,
+  mcpToolInvocationRequestV2Schema,
+  mcpToolInvocationResultV2Schema,
   type AgentEventEnvelope,
   type AgentEventV2Envelope,
   type AgentCommandV2,
@@ -46,6 +54,13 @@ import {
   type SessionListV2Query,
   type WorkspaceTrustUpdateRequestV2,
   type WorkspaceTrustViewV2,
+  type McpCatalogV2,
+  type McpConfigureRequestV2,
+  type McpOAuthStatusV2,
+  type McpServerActionRequestV2,
+  type McpServerListV2,
+  type McpToolInvocationRequestV2,
+  type McpToolInvocationResultV2,
 } from '@agent-dock/shared';
 import {
   DaemonError,
@@ -196,6 +211,22 @@ export class AgentDockClient {
     },
     audit: {
       list: (options?: AuditReadOptions): Promise<AuditReadResponseV2> => this.readAuditV2(options),
+    },
+    integrations: {
+      mcp: {
+        list: (provider: ProviderId, cwd: string): Promise<McpServerListV2> =>
+          this.listMcpServersV2(provider, cwd),
+        configure: (input: McpConfigureRequestV2): Promise<McpServerListV2> =>
+          this.configureMcpV2(input),
+        action: (input: McpServerActionRequestV2): Promise<McpServerListV2> =>
+          this.actionMcpV2(input),
+        catalog: (provider: ProviderId, serverId: string, cwd: string): Promise<McpCatalogV2> =>
+          this.getMcpCatalogV2(provider, serverId, cwd),
+        oauth: (provider: ProviderId, serverId: string, cwd: string): Promise<McpOAuthStatusV2> =>
+          this.startMcpOAuthV2(provider, serverId, cwd),
+        invoke: (input: McpToolInvocationRequestV2): Promise<McpToolInvocationResultV2> =>
+          this.invokeMcpToolV2(input),
+      },
     },
   };
 
@@ -486,6 +517,57 @@ export class AgentDockClient {
         notFound: () => new ProviderUnavailableError(`provider not registered: ${providerId}`),
       },
     );
+  }
+
+  private async listMcpServersV2(provider: ProviderId, cwd: string): Promise<McpServerListV2> {
+    const providerId = validateInput(providerIdSchema, provider, 'MCP provider id');
+    if (typeof cwd !== 'string' || cwd.length === 0 || cwd.length > 32_768) {
+      throw new ValidationError('MCP workspace path is invalid');
+    }
+    const query = new URLSearchParams({ provider: providerId, cwd });
+    return this.requestV2(
+      `/v2/integrations/mcp?${query.toString()}`,
+      mcpServerListV2Schema,
+      'protocol-v2 MCP server list',
+      {},
+      { expectedStatus: 200 },
+    );
+  }
+
+  private async configureMcpV2(input: McpConfigureRequestV2): Promise<McpServerListV2> {
+    const parsed = validateInput(mcpConfigureRequestV2Schema, input, 'MCP configuration request');
+    return this.requestV2('/v2/integrations/mcp/configure', mcpServerListV2Schema, 'protocol-v2 MCP server list', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed),
+    }, { expectedStatus: 200 });
+  }
+
+  private async actionMcpV2(input: McpServerActionRequestV2): Promise<McpServerListV2> {
+    const parsed = validateInput(mcpServerActionRequestV2Schema, input, 'MCP server action');
+    return this.requestV2('/v2/integrations/mcp/action', mcpServerListV2Schema, 'protocol-v2 MCP server list', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed),
+    }, { expectedStatus: 200 });
+  }
+
+  private async getMcpCatalogV2(provider: ProviderId, serverId: string, cwd: string): Promise<McpCatalogV2> {
+    const providerId = validateInput(providerIdSchema, provider, 'MCP provider id');
+    if (!/^[A-Za-z0-9._:-]{1,256}$/.test(serverId) || !cwd || cwd.length > 32_768) {
+      throw new ValidationError('MCP catalog request is invalid');
+    }
+    return this.requestV2(`/v2/integrations/mcp/${encodeURIComponent(providerId)}/${encodeURIComponent(serverId)}/catalog?${new URLSearchParams({ cwd }).toString()}`, mcpCatalogV2Schema, 'protocol-v2 MCP catalog', {}, { expectedStatus: 200 });
+  }
+
+  private async startMcpOAuthV2(provider: ProviderId, serverId: string, cwd: string): Promise<McpOAuthStatusV2> {
+    const parsed = validateInput(mcpOAuthStartRequestV2Schema, { provider, serverId, cwd }, 'MCP OAuth request');
+    return this.requestV2('/v2/integrations/mcp/oauth', mcpOAuthStatusV2Schema, 'protocol-v2 MCP OAuth status', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed),
+    }, { expectedStatus: 200 });
+  }
+
+  private async invokeMcpToolV2(input: McpToolInvocationRequestV2): Promise<McpToolInvocationResultV2> {
+    const parsed = validateInput(mcpToolInvocationRequestV2Schema, input, 'MCP tool invocation');
+    return this.requestV2('/v2/integrations/mcp/invoke', mcpToolInvocationResultV2Schema, 'protocol-v2 MCP tool result', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed),
+    }, { expectedStatus: 200 });
   }
 
   private async createSessionV2(

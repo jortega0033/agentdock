@@ -21,6 +21,7 @@ import {
   resolveCodexV2Support,
 } from './app-server-support.js';
 import { createCodexAppServerTransport } from './app-server/index.js';
+import { ProviderCliMcpControlPlane } from '../../mcp-control.js';
 
 export const CODEX_PROMPT_VIA_STDIN = false;
 
@@ -37,6 +38,7 @@ export const CODEX_PROMPT_VIA_STDIN = false;
 export class CodexProvider implements AgentProvider {
   readonly id = 'codex' as const;
   readonly name = 'Codex';
+  readonly mcp = new ProviderCliMcpControlPlane({ provider: 'codex', executableName: 'codex' });
 
   constructor(private readonly logger: Logger = noopLogger) {}
 

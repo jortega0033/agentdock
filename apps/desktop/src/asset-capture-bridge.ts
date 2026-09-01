@@ -112,6 +112,12 @@ export function installAssetCaptureBridge(): void {
     listProviderComponents: async () => ({ items: [], revision: 'asset-capture-1' }),
     manageProviderComponent: async (input) => ({ componentId: input.componentId, status: 'unsupported' }),
     invokeProviderComponent: async (input) => ({ componentId: input.componentId, status: 'unsupported' }),
+    getSubagentGraph: async (sessionId) => ({ sessionId, nodes: [] }),
+    controlSubagent: async (input) => ({ sessionId: input.sessionId, agentId: input.agentId, status: 'unsupported' }),
+    previewWorktree: async (input) => ({ workspaceId: 'a'.repeat(64), name: input.name, displayTarget: input.name, includeFiles: [], ignoredFiles: [], secretRisk: false, requiresConfirmation: true }),
+    createWorktree: async (input) => ({ id: '123e4567-e89b-42d3-a456-426614174099', workspaceId: 'a'.repeat(64), name: input.name, displayPath: input.name, status: 'ready', createdAt: '2026-01-01T00:00:00.000Z' }),
+    listWorktrees: async () => [],
+    cleanupWorktree: async (worktreeId) => ({ id: worktreeId, workspaceId: 'a'.repeat(64), name: 'worktree', displayPath: 'worktree', status: 'missing', createdAt: '2026-01-01T00:00:00.000Z' }),
     createSession: async () => {
       window.setTimeout(() => {
         eventCallback?.(session.id, {

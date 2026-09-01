@@ -30,6 +30,12 @@ import type {
   ProviderComponentListV2,
   ProviderComponentManageRequestV2,
   ProviderComponentOperationResultV2,
+  OwnedWorktreeV2,
+  SubagentControlRequestV2,
+  SubagentGraphV2,
+  WorktreeCreateRequestV2,
+  WorktreePreviewRequestV2,
+  WorktreePreviewV2,
 } from '@agent-dock/shared';
 import type {
   RendererInteraction,
@@ -86,6 +92,12 @@ export interface AgentDockBridge {
   listProviderComponents(input: ProviderComponentListRequestV2): Promise<ProviderComponentListV2>;
   manageProviderComponent(input: ProviderComponentManageRequestV2): Promise<ProviderComponentOperationResultV2>;
   invokeProviderComponent(input: ProviderComponentInvokeRequestV2): Promise<ProviderComponentOperationResultV2>;
+  getSubagentGraph(sessionId: string): Promise<SubagentGraphV2>;
+  controlSubagent(input: SubagentControlRequestV2): Promise<{ sessionId: string; agentId: string; status: 'accepted' | 'unsupported' | 'not_found'; safeSummary?: string }>;
+  previewWorktree(input: WorktreePreviewRequestV2): Promise<WorktreePreviewV2>;
+  createWorktree(input: WorktreeCreateRequestV2): Promise<OwnedWorktreeV2>;
+  listWorktrees(): Promise<OwnedWorktreeV2[]>;
+  cleanupWorktree(worktreeId: string): Promise<OwnedWorktreeV2>;
   createSession(input: CreateSessionInput): Promise<AgentSession>;
   cancelSession(sessionId: string): Promise<void>;
   onSessionEvent(callback: (sessionId: string, event: AgentEvent) => void): () => void;

@@ -17,6 +17,8 @@ import type {
 import { ProviderPanel } from './components/ProviderPanel.js';
 import { McpPanel } from './components/McpPanel.js';
 import { ComponentPanel } from './components/ComponentPanel.js';
+import { AgentGraphPanel } from './components/AgentGraphPanel.js';
+import { WorktreePanel } from './components/WorktreePanel.js';
 import { ActivityTimeline } from './components/activity/ActivityTimeline.js';
 import { RendererInteractionTimelineProjector } from './components/activity/interaction-timeline.js';
 import { AgentDockMark } from './components/AgentDockMark.js';
@@ -518,6 +520,8 @@ export function App() {
               <div className="section-heading"><div><span className="eyebrow">Trust inventory</span><h2>Skills, plugins & hooks</h2></div></div>
               <ComponentPanel provider={provider} cwd={cwd} />
             </section>
+            <section className="card"><div className="section-heading"><div><span className="eyebrow">Isolation</span><h2>Owned worktrees</h2></div></div><WorktreePanel cwd={cwd} /></section>
+            <section className="card"><div className="section-heading"><div><span className="eyebrow">Execution tree</span><h2>Child agents</h2></div></div><AgentGraphPanel sessionId={selectedEntry?.session.id} /></section>
             <section className="card">
               <div className="section-heading">
                 <div>

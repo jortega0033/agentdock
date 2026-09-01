@@ -15,6 +15,8 @@ import { SessionManager } from './session-manager.js';
 import { FileSessionStore } from './session-store.js';
 import { FileExecutionGraphStore } from './execution-graph-store.js';
 import { stateDirectory } from './state-directory.js';
+import { SubagentGraphStore } from './subagent-graph-store.js';
+import { OwnedWorktreeManager } from './worktree-manager.js';
 import { WorkspaceTrustStore } from './workspace-trust-store.js';
 
 async function settlesWithin(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
@@ -40,6 +42,9 @@ async function main() {
   assertNoLiveDaemon(appId);
   const registry = buildProviderRegistry(logger);
   const durableStateDirectory = stateDirectory({ appId });
+  const subagentStore = new SubagentGraphStore(join(durableStateDirectory, 'subagents-v1.json'));
+  const worktreeManager = new OwnedWorktreeManager(join(durableStateDirectory, 'worktrees'), join(durableStateDirectory, 'worktrees-v1.json'));
+  await worktreeManager.load();
   const auditStore = new AuditStore(join(durableStateDirectory, 'audit-v1.jsonl'));
   const trustStore = new WorkspaceTrustStore(
     join(durableStateDirectory, 'workspace-trust-v1.json'),
@@ -85,6 +90,8 @@ async function main() {
     logger,
     auditStore,
     trustStore,
+    subagentStore,
+    worktreeManager,
   });
 
   const requestedPort = Number(process.env.AGENT_DOCK_PORT ?? '0');

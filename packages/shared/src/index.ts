@@ -8,3 +8,4 @@ export * from './protocol-v2.js';
 export * from './policy-v2.js';
 export * from './mcp-control-v2.js';
 export * from './component-control-v2.js';
+export * from './agent-worktree-v2.js';

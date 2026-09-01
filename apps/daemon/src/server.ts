@@ -14,6 +14,9 @@ import { registerV2ComponentRoutes } from './routes/v2-components.js';
 import type { AuditStore } from './audit-store.js';
 import type { SessionManager } from './session-manager.js';
 import type { WorkspaceTrustStore } from './workspace-trust-store.js';
+import type { SubagentGraphStore } from './subagent-graph-store.js';
+import type { OwnedWorktreeManager } from './worktree-manager.js';
+import { registerV2AgentWorktreeRoutes } from './routes/v2-agents-worktrees.js';
 
 export interface BuildServerOptions {
   registry: ProviderRegistry;
@@ -22,6 +25,8 @@ export interface BuildServerOptions {
   logger: Logger;
   auditStore?: AuditStore;
   trustStore?: WorkspaceTrustStore;
+  subagentStore?: SubagentGraphStore;
+  worktreeManager?: OwnedWorktreeManager;
 }
 
 /**
@@ -95,6 +100,7 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
       registerV2McpRoutes(app, opts.registry, opts.trustStore);
       registerV2ComponentRoutes(app, opts.registry, opts.trustStore);
     }
+    registerV2AgentWorktreeRoutes(app, opts.subagentStore, opts.worktreeManager);
   });
 
   app.setErrorHandler((err: FastifyError, req, reply) => {

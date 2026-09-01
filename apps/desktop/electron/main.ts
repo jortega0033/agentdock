@@ -24,6 +24,10 @@ import {
   providerComponentInvokeRequestV2Schema,
   providerComponentListRequestV2Schema,
   providerComponentManageRequestV2Schema,
+  subagentControlRequestV2Schema,
+  worktreeCleanupRequestV2Schema,
+  worktreeCreateRequestV2Schema,
+  worktreePreviewRequestV2Schema,
   type AgentCommandV2,
   type AgentEventV2Envelope,
   type AgentSessionV2,
@@ -638,6 +642,33 @@ ipcMain.handle('daemon:manage-provider-component', async (_event, input: unknown
 ipcMain.handle('daemon:invoke-provider-component', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.integrations.components.invoke(providerComponentInvokeRequestV2Schema.parse(input));
+});
+
+ipcMain.handle('daemon:get-subagent-graph', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  const { sessionId } = sessionIdParamSchema.parse({ sessionId: input });
+  return client.v2.agents.graph(sessionId);
+});
+ipcMain.handle('daemon:control-subagent', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.agents.control(subagentControlRequestV2Schema.parse(input));
+});
+ipcMain.handle('daemon:preview-worktree', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.worktrees.preview(worktreePreviewRequestV2Schema.parse(input));
+});
+ipcMain.handle('daemon:create-worktree', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.worktrees.create(worktreeCreateRequestV2Schema.parse(input));
+});
+ipcMain.handle('daemon:list-worktrees', async () => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.worktrees.list();
+});
+ipcMain.handle('daemon:cleanup-worktree', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  const parsed = worktreeCleanupRequestV2Schema.parse({ worktreeId: input });
+  return client.v2.worktrees.cleanup(parsed.worktreeId);
 });
 
 ipcMain.handle('daemon:create-session', async (_event, input: unknown) => {

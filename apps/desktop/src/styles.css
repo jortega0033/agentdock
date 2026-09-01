@@ -972,3 +972,10 @@ textarea {
   font-size: 0.75rem;
   overflow-wrap: anywhere;
 }
+
+.agent-node,
+.worktree-preview {
+  border-left: 3px solid #c7d2fe;
+  margin-top: 0.6rem;
+  padding: 0.6rem 0.75rem;
+}

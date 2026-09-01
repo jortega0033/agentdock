@@ -71,6 +71,21 @@ import {
   type ProviderComponentListV2,
   type ProviderComponentManageRequestV2,
   type ProviderComponentOperationResultV2,
+  ownedWorktreeListV2Schema,
+  ownedWorktreeV2Schema,
+  subagentControlRequestV2Schema,
+  subagentControlResultV2Schema,
+  subagentGraphV2Schema,
+  worktreeCleanupRequestV2Schema,
+  worktreeCreateRequestV2Schema,
+  worktreePreviewRequestV2Schema,
+  worktreePreviewV2Schema,
+  type OwnedWorktreeV2,
+  type SubagentControlRequestV2,
+  type SubagentGraphV2,
+  type WorktreeCreateRequestV2,
+  type WorktreePreviewRequestV2,
+  type WorktreePreviewV2,
 } from '@agent-dock/shared';
 import {
   DaemonError,
@@ -221,6 +236,16 @@ export class AgentDockClient {
     },
     audit: {
       list: (options?: AuditReadOptions): Promise<AuditReadResponseV2> => this.readAuditV2(options),
+    },
+    agents: {
+      graph: (sessionId: string): Promise<SubagentGraphV2> => this.getSubagentGraphV2(sessionId),
+      control: (input: SubagentControlRequestV2) => this.controlSubagentV2(input),
+    },
+    worktrees: {
+      preview: (input: WorktreePreviewRequestV2): Promise<WorktreePreviewV2> => this.previewWorktreeV2(input),
+      create: (input: WorktreeCreateRequestV2): Promise<OwnedWorktreeV2> => this.createWorktreeV2(input),
+      list: (): Promise<OwnedWorktreeV2[]> => this.listWorktreesV2(),
+      cleanup: (worktreeId: string): Promise<OwnedWorktreeV2> => this.cleanupWorktreeV2(worktreeId),
     },
     integrations: {
       mcp: {
@@ -603,6 +628,35 @@ export class AgentDockClient {
   private async invokeProviderComponentV2(input: ProviderComponentInvokeRequestV2): Promise<ProviderComponentOperationResultV2> {
     const parsed = validateInput(providerComponentInvokeRequestV2Schema, input, 'provider component invocation');
     return this.requestV2('/v2/integrations/components/invoke', providerComponentOperationResultV2Schema, 'protocol-v2 provider component result', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }, { expectedStatus: 200 });
+  }
+
+  private async getSubagentGraphV2(id: string): Promise<SubagentGraphV2> {
+    const sessionId = validateSessionIdV2(id);
+    return this.requestV2(`/v2/sessions/${encodeURIComponent(sessionId)}/agents`, subagentGraphV2Schema, 'protocol-v2 subagent graph', {}, { expectedStatus: 200 });
+  }
+
+  private async controlSubagentV2(input: SubagentControlRequestV2) {
+    const parsed = validateInput(subagentControlRequestV2Schema, input, 'subagent control request');
+    return this.requestV2(`/v2/sessions/${encodeURIComponent(parsed.sessionId)}/agents/control`, subagentControlResultV2Schema, 'protocol-v2 subagent control result', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }, { expectedStatus: 200 });
+  }
+
+  private async previewWorktreeV2(input: WorktreePreviewRequestV2): Promise<WorktreePreviewV2> {
+    const parsed = validateInput(worktreePreviewRequestV2Schema, input, 'worktree preview request');
+    return this.requestV2('/v2/worktrees/preview', worktreePreviewV2Schema, 'protocol-v2 worktree preview', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }, { expectedStatus: 200 });
+  }
+
+  private async createWorktreeV2(input: WorktreeCreateRequestV2): Promise<OwnedWorktreeV2> {
+    const parsed = validateInput(worktreeCreateRequestV2Schema, input, 'worktree create request');
+    return this.requestV2('/v2/worktrees', ownedWorktreeV2Schema, 'protocol-v2 owned worktree', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }, { expectedStatus: 201 });
+  }
+
+  private async listWorktreesV2(): Promise<OwnedWorktreeV2[]> {
+    return (await this.requestV2('/v2/worktrees', ownedWorktreeListV2Schema, 'protocol-v2 owned worktrees', {}, { expectedStatus: 200 })).worktrees;
+  }
+
+  private async cleanupWorktreeV2(worktreeId: string): Promise<OwnedWorktreeV2> {
+    const parsed = validateInput(worktreeCleanupRequestV2Schema, { worktreeId }, 'worktree cleanup request');
+    return this.requestV2('/v2/worktrees/cleanup', ownedWorktreeV2Schema, 'protocol-v2 owned worktree', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }, { expectedStatus: 200 });
   }
 
   private async createSessionV2(

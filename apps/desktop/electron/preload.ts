@@ -34,6 +34,15 @@ import {
   providerComponentListV2Schema,
   providerComponentManageRequestV2Schema,
   providerComponentOperationResultV2Schema,
+  ownedWorktreeListV2Schema,
+  ownedWorktreeV2Schema,
+  subagentControlRequestV2Schema,
+  subagentControlResultV2Schema,
+  subagentGraphV2Schema,
+  worktreeCleanupRequestV2Schema,
+  worktreeCreateRequestV2Schema,
+  worktreePreviewRequestV2Schema,
+  worktreePreviewV2Schema,
   type AgentCommandV2,
   type AgentEvent,
   type AgentEventV2Envelope,
@@ -66,6 +75,12 @@ import {
   type ProviderComponentListV2,
   type ProviderComponentManageRequestV2,
   type ProviderComponentOperationResultV2,
+  type OwnedWorktreeV2,
+  type SubagentControlRequestV2,
+  type SubagentGraphV2,
+  type WorktreeCreateRequestV2,
+  type WorktreePreviewRequestV2,
+  type WorktreePreviewV2,
 } from '@agent-dock/shared';
 import type {
   RendererInteraction,
@@ -132,6 +147,12 @@ export interface AgentDockBridge {
   listProviderComponents(input: ProviderComponentListRequestV2): Promise<ProviderComponentListV2>;
   manageProviderComponent(input: ProviderComponentManageRequestV2): Promise<ProviderComponentOperationResultV2>;
   invokeProviderComponent(input: ProviderComponentInvokeRequestV2): Promise<ProviderComponentOperationResultV2>;
+  getSubagentGraph(sessionId: string): Promise<SubagentGraphV2>;
+  controlSubagent(input: SubagentControlRequestV2): Promise<{ sessionId: string; agentId: string; status: 'accepted' | 'unsupported' | 'not_found'; safeSummary?: string }>;
+  previewWorktree(input: WorktreePreviewRequestV2): Promise<WorktreePreviewV2>;
+  createWorktree(input: WorktreeCreateRequestV2): Promise<OwnedWorktreeV2>;
+  listWorktrees(): Promise<OwnedWorktreeV2[]>;
+  cleanupWorktree(worktreeId: string): Promise<OwnedWorktreeV2>;
   createSession(input: CreateSessionInput): Promise<AgentSession>;
   cancelSession(sessionId: string): Promise<void>;
   onSessionEvent(callback: (sessionId: string, event: AgentEvent) => void): () => void;
@@ -655,6 +676,30 @@ const api: AgentDockBridge = {
   async invokeProviderComponent(input) {
     const parsed = providerComponentInvokeRequestV2Schema.parse(input);
     return providerComponentOperationResultV2Schema.parse(await ipcRenderer.invoke('daemon:invoke-provider-component', parsed));
+  },
+  async getSubagentGraph(sessionId) {
+    const parsed = sessionIdParamSchema.parse({ sessionId }).sessionId;
+    return subagentGraphV2Schema.parse(await ipcRenderer.invoke('daemon:get-subagent-graph', parsed));
+  },
+  async controlSubagent(input) {
+    const parsed = subagentControlRequestV2Schema.parse(input);
+    return subagentControlResultV2Schema.parse(await ipcRenderer.invoke('daemon:control-subagent', parsed));
+  },
+  async previewWorktree(input) {
+    const parsed = worktreePreviewRequestV2Schema.parse(input);
+    return worktreePreviewV2Schema.parse(await ipcRenderer.invoke('daemon:preview-worktree', parsed));
+  },
+  async createWorktree(input) {
+    const parsed = worktreeCreateRequestV2Schema.parse(input);
+    return ownedWorktreeV2Schema.parse(await ipcRenderer.invoke('daemon:create-worktree', parsed));
+  },
+  async listWorktrees() {
+    const worktrees: unknown = await ipcRenderer.invoke('daemon:list-worktrees');
+    return ownedWorktreeListV2Schema.parse({ worktrees }).worktrees;
+  },
+  async cleanupWorktree(worktreeId) {
+    const parsed = worktreeCleanupRequestV2Schema.parse({ worktreeId });
+    return ownedWorktreeV2Schema.parse(await ipcRenderer.invoke('daemon:cleanup-worktree', parsed.worktreeId));
   },
   createSession(input) {
     return ipcRenderer.invoke('daemon:create-session', input);

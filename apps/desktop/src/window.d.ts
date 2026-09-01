@@ -36,6 +36,9 @@ import type {
   WorktreeCreateRequestV2,
   WorktreePreviewRequestV2,
   WorktreePreviewV2,
+  AttachmentMetadataV2,
+  StructuredWorkflowRequestV2,
+  StructuredWorkflowResultV2,
 } from '@agent-dock/shared';
 import type {
   RendererInteraction,
@@ -98,6 +101,8 @@ export interface AgentDockBridge {
   createWorktree(input: WorktreeCreateRequestV2): Promise<OwnedWorktreeV2>;
   listWorktrees(): Promise<OwnedWorktreeV2[]>;
   cleanupWorktree(worktreeId: string): Promise<OwnedWorktreeV2>;
+  selectAndUploadAttachments(sessionId?: string): Promise<AttachmentMetadataV2[]>;
+  validateStructuredOutput(input: StructuredWorkflowRequestV2): Promise<StructuredWorkflowResultV2>;
   createSession(input: CreateSessionInput): Promise<AgentSession>;
   cancelSession(sessionId: string): Promise<void>;
   onSessionEvent(callback: (sessionId: string, event: AgentEvent) => void): () => void;

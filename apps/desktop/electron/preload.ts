@@ -43,6 +43,9 @@ import {
   worktreeCreateRequestV2Schema,
   worktreePreviewRequestV2Schema,
   worktreePreviewV2Schema,
+  attachmentListV2Schema,
+  structuredWorkflowRequestV2Schema,
+  structuredWorkflowResultV2Schema,
   type AgentCommandV2,
   type AgentEvent,
   type AgentEventV2Envelope,
@@ -81,6 +84,9 @@ import {
   type WorktreeCreateRequestV2,
   type WorktreePreviewRequestV2,
   type WorktreePreviewV2,
+  type AttachmentMetadataV2,
+  type StructuredWorkflowRequestV2,
+  type StructuredWorkflowResultV2,
 } from '@agent-dock/shared';
 import type {
   RendererInteraction,
@@ -153,6 +159,8 @@ export interface AgentDockBridge {
   createWorktree(input: WorktreeCreateRequestV2): Promise<OwnedWorktreeV2>;
   listWorktrees(): Promise<OwnedWorktreeV2[]>;
   cleanupWorktree(worktreeId: string): Promise<OwnedWorktreeV2>;
+  selectAndUploadAttachments(sessionId?: string): Promise<AttachmentMetadataV2[]>;
+  validateStructuredOutput(input: StructuredWorkflowRequestV2): Promise<StructuredWorkflowResultV2>;
   createSession(input: CreateSessionInput): Promise<AgentSession>;
   cancelSession(sessionId: string): Promise<void>;
   onSessionEvent(callback: (sessionId: string, event: AgentEvent) => void): () => void;
@@ -700,6 +708,15 @@ const api: AgentDockBridge = {
   async cleanupWorktree(worktreeId) {
     const parsed = worktreeCleanupRequestV2Schema.parse({ worktreeId });
     return ownedWorktreeV2Schema.parse(await ipcRenderer.invoke('daemon:cleanup-worktree', parsed.worktreeId));
+  },
+  async selectAndUploadAttachments(sessionId) {
+    const parsedSessionId = sessionId === undefined ? undefined : sessionIdParamSchema.parse({ sessionId }).sessionId;
+    const attachments: unknown = await ipcRenderer.invoke('dialog:select-and-upload-attachments', parsedSessionId ? { sessionId: parsedSessionId } : {});
+    return attachmentListV2Schema.parse({ attachments }).attachments;
+  },
+  async validateStructuredOutput(input) {
+    const parsed = structuredWorkflowRequestV2Schema.parse(input);
+    return structuredWorkflowResultV2Schema.parse(await ipcRenderer.invoke('daemon:validate-structured-output', parsed));
   },
   createSession(input) {
     return ipcRenderer.invoke('daemon:create-session', input);

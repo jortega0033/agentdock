@@ -17,6 +17,8 @@ import type { WorkspaceTrustStore } from './workspace-trust-store.js';
 import type { SubagentGraphStore } from './subagent-graph-store.js';
 import type { OwnedWorktreeManager } from './worktree-manager.js';
 import { registerV2AgentWorktreeRoutes } from './routes/v2-agents-worktrees.js';
+import type { AttachmentStore } from './attachment-store.js';
+import { registerV2MultimodalRoutes } from './routes/v2-multimodal.js';
 
 export interface BuildServerOptions {
   registry: ProviderRegistry;
@@ -27,6 +29,7 @@ export interface BuildServerOptions {
   trustStore?: WorkspaceTrustStore;
   subagentStore?: SubagentGraphStore;
   worktreeManager?: OwnedWorktreeManager;
+  attachmentStore?: AttachmentStore;
 }
 
 /**
@@ -85,6 +88,7 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
   });
 
   app.register(rateLimit, { global: false });
+  app.addContentTypeParser('application/octet-stream', (request, payload, done) => done(null, payload));
 
   registerHealthRoute(app, startedAt);
   registerProviderRoutes(app, opts.registry);
@@ -101,6 +105,7 @@ export function buildServer(opts: BuildServerOptions): FastifyInstance {
       registerV2ComponentRoutes(app, opts.registry, opts.trustStore);
     }
     registerV2AgentWorktreeRoutes(app, opts.subagentStore, opts.worktreeManager);
+    if (opts.attachmentStore) registerV2MultimodalRoutes(app, opts.attachmentStore);
   });
 
   app.setErrorHandler((err: FastifyError, req, reply) => {

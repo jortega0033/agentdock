@@ -121,6 +121,8 @@ function installBridge(overrides: Partial<AgentDockBridge> = {}): {
     createWorktree: vi.fn().mockResolvedValue({ id: SESSION_ID, workspaceId: 'a'.repeat(64), name: 'test', displayPath: 'test', status: 'ready', createdAt: '2026-01-01T00:00:00.000Z' }),
     listWorktrees: vi.fn().mockResolvedValue([]),
     cleanupWorktree: vi.fn().mockResolvedValue({ id: SESSION_ID, workspaceId: 'a'.repeat(64), name: 'test', displayPath: 'test', status: 'missing', createdAt: '2026-01-01T00:00:00.000Z' }),
+    selectAndUploadAttachments: vi.fn().mockResolvedValue([]),
+    validateStructuredOutput: vi.fn().mockImplementation(async (input) => ({ valid: true, normalizedOutput: input.output, errors: [] })),
     createSession: vi.fn(),
     cancelSession: vi.fn().mockResolvedValue(undefined),
     onSessionEvent: vi.fn().mockReturnValue(() => {}),

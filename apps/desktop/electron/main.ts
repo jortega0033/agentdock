@@ -1,9 +1,9 @@
 import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { basename, join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   agentCommandV2Schema,
@@ -28,6 +28,7 @@ import {
   worktreeCleanupRequestV2Schema,
   worktreeCreateRequestV2Schema,
   worktreePreviewRequestV2Schema,
+  structuredWorkflowRequestV2Schema,
   type AgentCommandV2,
   type AgentEventV2Envelope,
   type AgentSessionV2,
@@ -669,6 +670,28 @@ ipcMain.handle('daemon:cleanup-worktree', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   const parsed = worktreeCleanupRequestV2Schema.parse({ worktreeId: input });
   return client.v2.worktrees.cleanup(parsed.worktreeId);
+});
+
+ipcMain.handle('dialog:select-and-upload-attachments', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  if (!isRecordWithAllowedKeys(input, ['sessionId'])) throw new Error('invalid attachment picker input');
+  const sessionId = input.sessionId === undefined ? undefined : sessionIdParamSchema.parse({ sessionId: input.sessionId }).sessionId;
+  if (!mainWindow) return [];
+  const result = await dialog.showOpenDialog(mainWindow, { properties: ['openFile', 'multiSelections'] });
+  if (result.canceled) return [];
+  if (result.filePaths.length > 20) throw new Error('select at most 20 files');
+  const uploaded = [];
+  for (const path of result.filePaths) {
+    const metadata = statSync(path);
+    if (!metadata.isFile()) throw new Error('attachment selection must contain files only');
+    uploaded.push(await client.v2.attachments.upload({ fileName: basename(path), size: metadata.size, stream: createReadStream(path), ...(sessionId ? { sessionId } : {}) }));
+  }
+  return uploaded;
+});
+
+ipcMain.handle('daemon:validate-structured-output', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.structured.validate(structuredWorkflowRequestV2Schema.parse(input));
 });
 
 ipcMain.handle('daemon:create-session', async (_event, input: unknown) => {

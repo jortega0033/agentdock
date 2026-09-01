@@ -86,6 +86,15 @@ import {
   type WorktreeCreateRequestV2,
   type WorktreePreviewRequestV2,
   type WorktreePreviewV2,
+  ATTACHMENT_LIMITS_V2,
+  attachmentListV2Schema,
+  attachmentMetadataV2Schema,
+  attachmentReferenceRequestV2Schema,
+  structuredWorkflowRequestV2Schema,
+  structuredWorkflowResultV2Schema,
+  type AttachmentMetadataV2,
+  type StructuredWorkflowRequestV2,
+  type StructuredWorkflowResultV2,
 } from '@agent-dock/shared';
 import {
   DaemonError,
@@ -129,6 +138,13 @@ export interface SessionRequestOptions {
 export interface AuditReadOptions {
   cursor?: string;
   limit?: number;
+  sessionId?: string;
+}
+
+export interface AttachmentUploadInput {
+  fileName: string;
+  size: number;
+  stream: unknown;
   sessionId?: string;
 }
 
@@ -246,6 +262,14 @@ export class AgentDockClient {
       create: (input: WorktreeCreateRequestV2): Promise<OwnedWorktreeV2> => this.createWorktreeV2(input),
       list: (): Promise<OwnedWorktreeV2[]> => this.listWorktreesV2(),
       cleanup: (worktreeId: string): Promise<OwnedWorktreeV2> => this.cleanupWorktreeV2(worktreeId),
+    },
+    attachments: {
+      upload: (input: AttachmentUploadInput): Promise<AttachmentMetadataV2> => this.uploadAttachmentV2(input),
+      list: (): Promise<AttachmentMetadataV2[]> => this.listAttachmentsV2(),
+      reference: (attachmentIds: string[], sessionId: string): Promise<AttachmentMetadataV2[]> => this.referenceAttachmentsV2(attachmentIds, sessionId),
+    },
+    structured: {
+      validate: (input: StructuredWorkflowRequestV2): Promise<StructuredWorkflowResultV2> => this.validateStructuredWorkflowV2(input),
     },
     integrations: {
       mcp: {
@@ -657,6 +681,32 @@ export class AgentDockClient {
   private async cleanupWorktreeV2(worktreeId: string): Promise<OwnedWorktreeV2> {
     const parsed = validateInput(worktreeCleanupRequestV2Schema, { worktreeId }, 'worktree cleanup request');
     return this.requestV2('/v2/worktrees/cleanup', ownedWorktreeV2Schema, 'protocol-v2 owned worktree', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }, { expectedStatus: 200 });
+  }
+
+  private async uploadAttachmentV2(input: AttachmentUploadInput): Promise<AttachmentMetadataV2> {
+    if (!input.fileName || input.fileName.length > 255 || !Number.isInteger(input.size) || input.size < 0 || input.size > ATTACHMENT_LIMITS_V2.maxFileBytes) throw new ValidationError('Attachment selection is invalid');
+    const res = await this.fetchAuthenticated(PROTOCOL_V2, '/v2/attachments', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(input.size), 'X-AgentDock-Filename': encodeURIComponent(input.fileName), ...(input.sessionId ? { 'X-AgentDock-Session-Id': validateSessionIdV2(input.sessionId) } : {}) },
+      body: input.stream as RequestInit['body'],
+      duplex: 'half',
+    } as RequestInit);
+    if (res.status !== 201) throw new ValidationError(`daemon returned status ${res.status} for attachment upload`);
+    return validate(attachmentMetadataV2Schema, await res.json().catch(() => undefined), 'attachment metadata');
+  }
+
+  private async listAttachmentsV2(): Promise<AttachmentMetadataV2[]> {
+    return (await this.requestV2('/v2/attachments', attachmentListV2Schema, 'protocol-v2 attachments', {}, { expectedStatus: 200 })).attachments;
+  }
+
+  private async referenceAttachmentsV2(attachmentIds: string[], sessionId: string): Promise<AttachmentMetadataV2[]> {
+    const parsed = validateInput(attachmentReferenceRequestV2Schema, { attachmentIds, sessionId }, 'attachment reference request');
+    return (await this.requestV2('/v2/attachments/reference', attachmentListV2Schema, 'protocol-v2 attachments', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }, { expectedStatus: 200 })).attachments;
+  }
+
+  private async validateStructuredWorkflowV2(input: StructuredWorkflowRequestV2): Promise<StructuredWorkflowResultV2> {
+    const parsed = validateInput(structuredWorkflowRequestV2Schema, input, 'structured workflow request');
+    return this.requestV2('/v2/workflows/structured/validate', structuredWorkflowResultV2Schema, 'protocol-v2 structured workflow result', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) }, { expectedStatus: 200 });
   }
 
   private async createSessionV2(

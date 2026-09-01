@@ -62,6 +62,8 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
         'createWorktree',
         'listWorktrees',
         'cleanupWorktree',
+        'selectAndUploadAttachments',
+        'validateStructuredOutput',
         'createSession',
         'cancelSession',
         'onSessionEvent',

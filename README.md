@@ -1,15 +1,8 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./apps/desktop/assets/brand/agent-dock-lockup-horizontal-dark.svg">
-    <img src="./apps/desktop/assets/brand/agent-dock-lockup-horizontal-light.svg" alt="AgentDock" width="420">
-  </picture>
-</p>
+![AgentDock desktop runtime](./docs/images/social/readme-hero.webp)
 
 <p align="center"><strong>Open-source Electron and local-daemon boilerplate for desktop apps that use Claude Agent, the legacy Claude CLI, or Codex CLI.</strong></p>
 
 <p align="center">Electron · Fastify · React · TypeScript · Apache-2.0</p>
-
-![AgentDock desktop runtime](./docs/images/social/readme-hero.webp)
 
 AgentDock is built for fork-based reuse. Fork the repository, replace the reference workflow and
 visual identity, and keep the local runtime pieces your product needs. Users provide credentials

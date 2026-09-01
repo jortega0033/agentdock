@@ -87,6 +87,9 @@ BLOCKED_ELEMENTS = {
     "use",
 }
 EXTERNAL_REFERENCE = re.compile(r"(?i)(?:https?|file|ftp):|data:|url\s*\(")
+LOCAL_FRAGMENT_REFERENCE = re.compile(
+    r"(?i)url\s*\(\s*(['\"]?)#([a-z_][\w:.-]*)\1\s*\)"
+)
 LOCAL_PATH = re.compile(r"(?i)(?:[a-z]:[\\/]|/(?:home|users|tmp)/)")
 CSS_IMPORT = re.compile(r"(?i)@import\b")
 SENSITIVE_INFO_KEYS = {
@@ -130,6 +133,20 @@ def local_name(value: str) -> str:
     return value.rsplit("}", 1)[-1].lower()
 
 
+def has_unsafe_reference(value: str) -> bool:
+    without_local_fragments = LOCAL_FRAGMENT_REFERENCE.sub("", value)
+    return bool(
+        "\\" in value
+        or EXTERNAL_REFERENCE.search(without_local_fragments)
+        or LOCAL_PATH.search(without_local_fragments)
+        or CSS_IMPORT.search(without_local_fragments)
+    )
+
+
+def local_fragment_ids(value: str) -> set[str]:
+    return {match.group(2) for match in LOCAL_FRAGMENT_REFERENCE.finditer(value)}
+
+
 def check_exact_files(directory: Path, expected: set[str]) -> None:
     if not directory.is_dir():
         ERRORS.append(f"Missing directory: {relative(directory)}")
@@ -164,6 +181,10 @@ def validate_svg(path: Path, expected_viewbox: str) -> None:
         return
 
     check(local_name(root.tag) == "svg", f"Wrong root element: {relative(path)}")
+    identifiers = [element.attrib["id"] for element in root.iter() if "id" in element.attrib]
+    check(all(identifiers), f"Empty SVG id: {relative(path)}")
+    check(len(identifiers) == len(set(identifiers)), f"Duplicate SVG id: {relative(path)}")
+    known_ids = set(identifiers)
     actual_viewbox = " ".join(root.attrib.get("viewBox", "").split())
     check(
         actual_viewbox == expected_viewbox,
@@ -180,10 +201,13 @@ def validate_svg(path: Path, expected_viewbox: str) -> None:
         for text in (element.text, element.tail):
             if text:
                 check(
-                    EXTERNAL_REFERENCE.search(text) is None
-                    and LOCAL_PATH.search(text) is None
-                    and CSS_IMPORT.search(text) is None,
+                    not has_unsafe_reference(text),
                     f"External or local text reference in {relative(path)}",
+                )
+                missing_ids = local_fragment_ids(text) - known_ids
+                check(
+                    not missing_ids,
+                    f"Missing local references {sorted(missing_ids)}: {relative(path)}",
                 )
 
         for raw_name, value in element.attrib.items():
@@ -198,11 +222,20 @@ def validate_svg(path: Path, expected_viewbox: str) -> None:
                     normalized.startswith("#"),
                     f"External reference {attribute_name}={normalized!r}: {relative(path)}",
                 )
+            missing_ids = local_fragment_ids(normalized) - known_ids
+            if (
+                attribute_name in {"href", "src"}
+                and normalized.startswith("#")
+                and normalized[1:] not in known_ids
+            ):
+                missing_ids.add(normalized[1:])
             check(
-                EXTERNAL_REFERENCE.search(normalized) is None
-                and LOCAL_PATH.search(normalized) is None
-                and CSS_IMPORT.search(normalized) is None,
+                not has_unsafe_reference(normalized),
                 f"External or local path in {relative(path)}",
+            )
+            check(
+                not missing_ids,
+                f"Missing local references {sorted(missing_ids)}: {relative(path)}",
             )
 
 

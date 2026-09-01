@@ -6,15 +6,16 @@ remain `agent-dock`.
 
 ## Identity
 
-The **Dock Gate** mark combines three ideas:
+The AgentDock badge combines three ideas:
 
-- opposed brackets form a protected local boundary;
-- the central hexagon is an agent module entering the runtime;
-- the lower contact indicates a live daemon connection.
+- the central chevron is both an agent launch path and an abstract letter A;
+- the lower plate is the dock where provider sessions connect;
+- the graphite hexagonal badge represents the protected local runtime boundary.
 
-The core palette is deep navy (`#0B1020`), cobalt (`#5B6CFF`), and mint (`#2DD4BF`). The small
-themeable marks use `currentColor`; fixed lockups provide explicit light- and dark-background
-variants. No provider logo is part of the AgentDock identity.
+The mark uses a monochrome graphite-to-silver palette so it stays provider-neutral and remains
+legible beside any provider. Light- and dark-background variants share the same geometry and adjust
+rim contrast; fixed lockups pair the badge with the AgentDock wordmark. Product surfaces may still
+use cobalt and mint as interface accents. No provider logo is part of the AgentDock identity.
 
 ## Source-of-truth files
 
@@ -39,8 +40,10 @@ apps/desktop/assets/
     runtime-unavailable.svg
 ```
 
-`agent-dock-app-icon.svg` is the canonical native icon source. The lockups and illustrations are
-hand-authored SVGs committed as source, not exported from an opaque design file.
+`agent-dock-app-icon.svg` is the canonical native icon source. It uses same-document gradients,
+clipping, and explicit vector shadow shapes that render consistently in browsers and CairoSVG; it
+does not depend on unsupported SVG filters. The lockups and illustrations are hand-authored SVGs
+committed as source, not exported from an opaque design file.
 
 ## Generated app icons
 
@@ -121,10 +124,11 @@ Open a capture URL such as:
 http://127.0.0.1:4173/?asset-capture=1&mode=completed
 ```
 
-Use a viewport near 1248 × 900 and take a full-page capture. Confirm the full status badge and
-session card are visible, replace the matching file in `docs/images/screenshots/`, then run the
-public asset generator and validator. The generator pads captures no larger than 1440 × 900 to RGB
-at the exact target size; it cannot recover content clipped during capture.
+Use a 1248 × 900 viewport and capture the visible page from the top. Confirm the complete brand
+header, runtime-status badge, and session timeline are visible, replace the matching file in
+`docs/images/screenshots/`, then run the public asset generator and validator. The generator pads
+captures no larger than 1440 × 900 to RGB at the exact target size; it cannot recover content
+clipped during capture.
 
 ## Rebrand a fork
 

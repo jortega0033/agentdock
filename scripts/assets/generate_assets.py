@@ -42,7 +42,7 @@ BLOCKED_ELEMENTS = {
 }
 EXTERNAL_REFERENCE = re.compile(r"(?i)(?:https?|file|ftp):|data:|url\s*\(")
 LOCAL_FRAGMENT_REFERENCE = re.compile(
-    r"(?i)url\s*\(\s*(['\"]?)#[a-z_][\w:.-]*\1\s*\)"
+    r"(?i)url\s*\(\s*(['\"]?)#([a-z_][\w:.-]*)\1\s*\)"
 )
 LOCAL_PATH = re.compile(r"(?i)(?:[a-z]:[\\/]|/(?:home|users|tmp)/)")
 CSS_IMPORT = re.compile(r"(?i)@import\b")
@@ -55,10 +55,15 @@ def local_name(value: str) -> str:
 def has_unsafe_reference(value: str) -> bool:
     without_local_fragments = LOCAL_FRAGMENT_REFERENCE.sub("", value)
     return bool(
-        EXTERNAL_REFERENCE.search(without_local_fragments)
+        "\\" in value
+        or EXTERNAL_REFERENCE.search(without_local_fragments)
         or LOCAL_PATH.search(without_local_fragments)
         or CSS_IMPORT.search(without_local_fragments)
     )
+
+
+def local_fragment_ids(value: str) -> set[str]:
+    return {match.group(2) for match in LOCAL_FRAGMENT_REFERENCE.finditer(value)}
 
 
 def assert_safe_svg(svg: bytes, source: Path = SOURCE) -> None:
@@ -72,6 +77,13 @@ def assert_safe_svg(svg: bytes, source: Path = SOURCE) -> None:
     if local_name(root.tag) != "svg":
         raise ValueError(f"Expected SVG root in {source}")
 
+    identifiers = [element.attrib["id"] for element in root.iter() if "id" in element.attrib]
+    if any(not identifier for identifier in identifiers):
+        raise ValueError(f"Empty SVG id in {source}")
+    if len(identifiers) != len(set(identifiers)):
+        raise ValueError(f"Duplicate SVG id in {source}")
+    known_ids = set(identifiers)
+
     for element in root.iter():
         element_name = local_name(element.tag)
         if element_name in BLOCKED_ELEMENTS:
@@ -80,6 +92,9 @@ def assert_safe_svg(svg: bytes, source: Path = SOURCE) -> None:
         for text in (element.text, element.tail):
             if text and has_unsafe_reference(text):
                 raise ValueError(f"Blocked external or local text reference in {source}")
+            missing_ids = local_fragment_ids(text or "") - known_ids
+            if missing_ids:
+                raise ValueError(f"Missing local references {sorted(missing_ids)} in {source}")
 
         for raw_name, value in element.attrib.items():
             attribute_name = local_name(raw_name)
@@ -90,6 +105,15 @@ def assert_safe_svg(svg: bytes, source: Path = SOURCE) -> None:
                 raise ValueError(f"Blocked reference {attribute_name}={normalized!r} in {source}")
             if has_unsafe_reference(normalized):
                 raise ValueError(f"Blocked external or local reference in {source}")
+            missing_ids = local_fragment_ids(normalized) - known_ids
+            if (
+                attribute_name in {"href", "src"}
+                and normalized.startswith("#")
+                and normalized[1:] not in known_ids
+            ):
+                missing_ids.add(normalized[1:])
+            if missing_ids:
+                raise ValueError(f"Missing local references {sorted(missing_ids)} in {source}")
 
 
 def rasterize(svg: bytes, size: int) -> Image.Image:

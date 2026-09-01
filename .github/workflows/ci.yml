@@ -49,7 +49,9 @@ jobs:
           git diff --exit-code -- apps/desktop/assets/app-icons
 
       - name: Validate assets
-        run: python scripts/assets/validate_assets.py
+        run: |
+          python scripts/assets/test_svg_safety.py
+          python scripts/assets/validate_assets.py
 
       - name: Provider conformance
         run: pnpm test:provider-conformance

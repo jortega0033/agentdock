@@ -103,7 +103,10 @@ python -m venv .venv-assets
 On POSIX systems, use `.venv-assets/bin/python` instead. The generators perform no network access.
 Validation checks exact inventories, dimensions, color modes, ICO/ICNS representations, unsafe SVG
 features, embedded metadata, and accidental local paths or secret-like strings in source and
-metadata bytes. Visible raster text still requires human review.
+metadata bytes. CI also rerenders every native icon representation and compares its decoded RGBA
+pixels exactly with the committed files. PNG compression streams can differ between platform zlib
+builds even when every decoded pixel is identical, so container-byte equality is not used as a
+cross-platform visual check. Visible raster text still requires human review.
 
 The root aliases `pnpm assets:generate` and `pnpm assets:validate` use the active `python`
 interpreter; activate the environment first if preferred.

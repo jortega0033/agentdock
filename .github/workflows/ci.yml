@@ -44,9 +44,7 @@ jobs:
         run: python -m pip install -r scripts/assets/requirements.txt
 
       - name: Verify icon assets are reproducible
-        run: |
-          python scripts/assets/generate_assets.py
-          git diff --exit-code -- apps/desktop/assets/app-icons
+        run: python scripts/assets/verify_generated_assets.py
 
       - name: Validate assets
         run: |

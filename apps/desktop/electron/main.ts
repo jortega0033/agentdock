@@ -43,6 +43,13 @@ import {
   relayInteractiveSessionEvents,
 } from './interactive-session-lifecycle.js';
 import { InteractionBroker, type RendererInteractionResolution } from './interaction-broker.js';
+import {
+  externalUrlLogSummary,
+  handleWillNavigate,
+  handleWindowOpen,
+  resolveOAuthLaunch,
+} from './allowed-external-url.js';
+import { isFromMainWindowFrame } from './ipc-sender-guard.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -538,15 +545,16 @@ function createWindow(): void {
 
   // Defense in depth for forks of this boilerplate that later render untrusted content (e.g. a
   // link in a tool result): never let the window navigate away from our own app, and never let
-  // it spawn an unrestricted child window. Legitimate external links go to the OS browser instead.
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
-    return { action: 'deny' };
-  });
+  // it spawn an unrestricted child window. Legitimate external links go to the OS browser instead,
+  // and only after passing the same validated allowlist (see allowed-external-url.ts) -- an
+  // unvalidated URL must never reach shell.openExternal.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) =>
+    handleWindowOpen(url, (target) => shell.openExternal(target)),
+  );
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (isAllowedNavigationTarget(url)) return;
-    event.preventDefault();
-    void shell.openExternal(url);
+    if (handleWillNavigate(url, isAllowedNavigationTarget, (target) => shell.openExternal(target))) {
+      event.preventDefault();
+    }
   });
 
   // Deny every permission request by default: nothing in this UI currently asks for camera,
@@ -570,53 +578,66 @@ function createWindow(): void {
   });
 }
 
-ipcMain.handle('daemon:get-status', (): DaemonStatus =>
+type IpcHandlerListener = Parameters<typeof ipcMain.handle>[1];
+
+/** Every privileged handler below routes through this instead of `ipcMain.handle` directly: the
+ * message must come from the current main window's own top-level frame, not a devtools window, a
+ * destroyed window, or a non-main child frame (see ipc-sender-guard.ts). */
+function handle(channel: string, listener: IpcHandlerListener): void {
+  ipcMain.handle(channel, (event, ...args) => {
+    if (!isFromMainWindowFrame(mainWindow, event)) {
+      throw new Error(`rejected IPC message on ${channel} from an unexpected sender`);
+    }
+    return listener(event, ...args);
+  });
+}
+
+handle('daemon:get-status', (): DaemonStatus =>
   client ? { state: 'ready' } : { state: 'connecting' },
 );
 
-ipcMain.handle('daemon:list-providers', async () => {
+handle('daemon:list-providers', async () => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.providers.list();
 });
 
-ipcMain.handle('daemon:list-providers-v2', async () => {
+handle('daemon:list-providers-v2', async () => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.providers.list();
 });
 
-ipcMain.handle('daemon:list-mcp-servers', async (_event, input: unknown) => {
+handle('daemon:list-mcp-servers', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   const parsed = mcpListRequestV2Schema.parse(input);
   return client.v2.integrations.mcp.list(parsed.provider, parsed.cwd);
 });
 
-ipcMain.handle('daemon:configure-mcp-server', async (_event, input: unknown) => {
+handle('daemon:configure-mcp-server', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.integrations.mcp.configure(mcpConfigureRequestV2Schema.parse(input));
 });
 
-ipcMain.handle('daemon:action-mcp-server', async (_event, input: unknown) => {
+handle('daemon:action-mcp-server', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.integrations.mcp.action(mcpServerActionRequestV2Schema.parse(input));
 });
 
-ipcMain.handle('daemon:get-mcp-catalog', async (_event, input: unknown) => {
+handle('daemon:get-mcp-catalog', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   const parsed = mcpCatalogRequestV2Schema.parse(input);
   return client.v2.integrations.mcp.catalog(parsed.provider, parsed.serverId, parsed.cwd);
 });
 
-ipcMain.handle('daemon:start-mcp-oauth', async (_event, input: unknown) => {
+handle('daemon:start-mcp-oauth', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   const parsed = mcpOAuthStartRequestV2Schema.parse(input);
   const result = await client.v2.integrations.mcp.oauth(parsed.provider, parsed.serverId, parsed.cwd);
-  let authorizationHost: string | undefined;
-  if (result.authorizationUrl) {
-    const url = new URL(result.authorizationUrl);
-    if (url.protocol !== 'https:') throw new Error('provider returned an unsafe OAuth URL');
-    authorizationHost = url.host;
-    await shell.openExternal(url.toString());
+  const launch = resolveOAuthLaunch(result.authorizationUrl);
+  if (launch) {
+    console.log('[main] opening external URL', externalUrlLogSummary(launch.url));
+    await shell.openExternal(launch.url.toString());
   }
+  const authorizationHost = launch?.host;
   return {
     serverId: result.serverId,
     status: result.status,
@@ -625,54 +646,54 @@ ipcMain.handle('daemon:start-mcp-oauth', async (_event, input: unknown) => {
   };
 });
 
-ipcMain.handle('daemon:invoke-mcp-tool', async (_event, input: unknown) => {
+handle('daemon:invoke-mcp-tool', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.integrations.mcp.invoke(mcpToolInvocationRequestV2Schema.parse(input));
 });
 
-ipcMain.handle('daemon:list-provider-components', async (_event, input: unknown) => {
+handle('daemon:list-provider-components', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.integrations.components.list(providerComponentListRequestV2Schema.parse(input));
 });
 
-ipcMain.handle('daemon:manage-provider-component', async (_event, input: unknown) => {
+handle('daemon:manage-provider-component', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.integrations.components.manage(providerComponentManageRequestV2Schema.parse(input));
 });
 
-ipcMain.handle('daemon:invoke-provider-component', async (_event, input: unknown) => {
+handle('daemon:invoke-provider-component', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.integrations.components.invoke(providerComponentInvokeRequestV2Schema.parse(input));
 });
 
-ipcMain.handle('daemon:get-subagent-graph', async (_event, input: unknown) => {
+handle('daemon:get-subagent-graph', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   const { sessionId } = sessionIdParamSchema.parse({ sessionId: input });
   return client.v2.agents.graph(sessionId);
 });
-ipcMain.handle('daemon:control-subagent', async (_event, input: unknown) => {
+handle('daemon:control-subagent', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.agents.control(subagentControlRequestV2Schema.parse(input));
 });
-ipcMain.handle('daemon:preview-worktree', async (_event, input: unknown) => {
+handle('daemon:preview-worktree', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.worktrees.preview(worktreePreviewRequestV2Schema.parse(input));
 });
-ipcMain.handle('daemon:create-worktree', async (_event, input: unknown) => {
+handle('daemon:create-worktree', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.worktrees.create(worktreeCreateRequestV2Schema.parse(input));
 });
-ipcMain.handle('daemon:list-worktrees', async () => {
+handle('daemon:list-worktrees', async () => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.worktrees.list();
 });
-ipcMain.handle('daemon:cleanup-worktree', async (_event, input: unknown) => {
+handle('daemon:cleanup-worktree', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   const parsed = worktreeCleanupRequestV2Schema.parse({ worktreeId: input });
   return client.v2.worktrees.cleanup(parsed.worktreeId);
 });
 
-ipcMain.handle('dialog:select-and-upload-attachments', async (_event, input: unknown) => {
+handle('dialog:select-and-upload-attachments', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   if (!isRecordWithAllowedKeys(input, ['sessionId'])) throw new Error('invalid attachment picker input');
   const sessionId = input.sessionId === undefined ? undefined : sessionIdParamSchema.parse({ sessionId: input.sessionId }).sessionId;
@@ -689,12 +710,12 @@ ipcMain.handle('dialog:select-and-upload-attachments', async (_event, input: unk
   return uploaded;
 });
 
-ipcMain.handle('daemon:validate-structured-output', async (_event, input: unknown) => {
+handle('daemon:validate-structured-output', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.structured.validate(structuredWorkflowRequestV2Schema.parse(input));
 });
 
-ipcMain.handle('daemon:create-session', async (_event, input: unknown) => {
+handle('daemon:create-session', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   // Validated here too, at the IPC boundary from the (untrusted) renderer. @agent-dock/client
   // validates again before it ever builds a request, but that's a different concern (protecting
@@ -707,13 +728,13 @@ ipcMain.handle('daemon:create-session', async (_event, input: unknown) => {
   return session;
 });
 
-ipcMain.handle('daemon:cancel-session', async (_event, input: unknown) => {
+handle('daemon:cancel-session', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   const { sessionId } = sessionIdParamSchema.parse({ sessionId: input });
   await client.sessions.cancel(sessionId);
 });
 
-ipcMain.handle('daemon:create-interactive-session', async (_event, input: unknown) => {
+handle('daemon:create-interactive-session', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   const parsed = createSessionV2RequestSchema.parse(input);
   const activeClient = client;
@@ -722,12 +743,12 @@ ipcMain.handle('daemon:create-interactive-session', async (_event, input: unknow
   );
 });
 
-ipcMain.handle('daemon:list-interactive-sessions', async (_event, input: unknown) => {
+handle('daemon:list-interactive-sessions', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.sessions.list(sessionListV2QuerySchema.parse(input));
 });
 
-ipcMain.handle('daemon:read-interactive-session-history', async (_event, input: unknown) => {
+handle('daemon:read-interactive-session-history', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   if (!isRecordWithExactKeys(input, ['sessionId', 'query'])) {
     throw new Error('invalid interactive session history input');
@@ -737,7 +758,7 @@ ipcMain.handle('daemon:read-interactive-session-history', async (_event, input: 
   return client.v2.sessions.history(sessionId, query);
 });
 
-ipcMain.handle('daemon:reconnect-interactive-session', async (_event, input: unknown) => {
+handle('daemon:reconnect-interactive-session', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   const { sessionId } = sessionIdParamSchema.parse({ sessionId: input });
   const session = await client.v2.sessions.get(sessionId);
@@ -746,7 +767,7 @@ ipcMain.handle('daemon:reconnect-interactive-session', async (_event, input: unk
 });
 
 for (const kind of ['resume', 'fork'] as const) {
-  ipcMain.handle(`daemon:${kind}-interactive-session`, async (_event, input: unknown) => {
+  handle(`daemon:${kind}-interactive-session`, async (_event, input: unknown) => {
     if (!client) throw new Error('daemon is not ready yet');
     if (!isRecordWithExactKeys(input, ['sessionId', 'input'])) {
       throw new Error(`invalid interactive session ${kind} input`);
@@ -760,7 +781,7 @@ for (const kind of ['resume', 'fork'] as const) {
   });
 }
 
-ipcMain.handle('daemon:delete-interactive-session', async (_event, input: unknown) => {
+handle('daemon:delete-interactive-session', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   const { sessionId } = sessionIdParamSchema.parse({ sessionId: input });
   await client.v2.sessions.delete(sessionId);
@@ -770,45 +791,45 @@ ipcMain.handle('daemon:delete-interactive-session', async (_event, input: unknow
   clearInteractionSession(sessionId, 'stream_disconnected');
 });
 
-ipcMain.handle('daemon:send-session-command', async (_event, input: unknown) => {
+handle('daemon:send-session-command', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.sessions.send(parseRendererSessionCommand(input));
 });
 
-ipcMain.handle('daemon:respond-approval', async (_event, input: unknown) => {
+handle('daemon:respond-approval', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return sendInteractionCommand(client, interactionBroker.resolveApproval(input));
 });
 
-ipcMain.handle('daemon:answer-questions', async (_event, input: unknown) => {
+handle('daemon:answer-questions', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return sendInteractionCommand(client, interactionBroker.resolveQuestions(input));
 });
 
-ipcMain.handle('daemon:cancel-interactive-session', async (_event, input: unknown) => {
+handle('daemon:cancel-interactive-session', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   const { sessionId } = sessionIdParamSchema.parse({ sessionId: input });
   return client.v2.sessions.cancel(sessionId);
 });
 
-ipcMain.handle('daemon:inspect-workspace', async (_event, input: unknown) => {
+handle('daemon:inspect-workspace', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   const { cwd } = workspaceInspectRequestV2Schema.parse(input);
   return client.v2.workspaces.inspect(cwd);
 });
 
-ipcMain.handle('daemon:set-workspace-trust', async (_event, input: unknown) => {
+handle('daemon:set-workspace-trust', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   const { workspaceId, update } = parseWorkspaceTrustInput(input);
   return client.v2.workspaces.setTrust(workspaceId, update);
 });
 
-ipcMain.handle('daemon:read-audit', async (_event, input: unknown) => {
+handle('daemon:read-audit', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.audit.list(parseAuditReadInput(input));
 });
 
-ipcMain.handle('dialog:select-directory', async () => {
+handle('dialog:select-directory', async () => {
   if (!mainWindow) return null;
   const result = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] });
   if (result.canceled || result.filePaths.length === 0) return null;

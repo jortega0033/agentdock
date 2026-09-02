@@ -6,11 +6,18 @@ the evidence this checklist asks for; neither runs automatically, and neither pu
 
 ## Generating the evidence
 
-1. **Live provider smoke matrix** (issue #65, `.github/workflows/live-provider-smoke.yml` /
-   `pnpm --filter @agent-dock/daemon run smoke:live-providers` with
-   `AGENT_DOCK_LIVE_PROVIDER_SMOKE=1`): proves a specific, installed, authenticated provider CLI
-   still completes a real session at its exact pinned version. Costs real provider usage; run it
-   deliberately, not on every commit. Writes a redacted evidence JSONL.
+1. **Live provider smoke matrix** (issue #65, `.github/workflows/live-provider-smoke.yml`):
+   proves a specific, installed, authenticated provider CLI still completes a real session at its
+   exact pinned version (confirm `packages/agent-runtime/src/providers/compatibility-manifest.ts`,
+   and for the Claude Agent SDK `providers/claude/sdk-version.ts`, name the exact version you're
+   claiming support for first). Costs real provider usage; run it deliberately, not on every
+   commit:
+   ```bash
+   AGENT_DOCK_LIVE_PROVIDER_SMOKE=1 pnpm --filter @agent-dock/daemon run smoke:live-providers
+   ```
+   Writes a redacted evidence JSONL to `apps/daemon/live-provider-smoke-evidence.jsonl`. Every row
+   you rely on must have `resultCode: "success"` -- a `skipped_*` row means that transport wasn't
+   actually exercised (no binary, no auth, or a version mismatch), and is not evidence of anything.
 2. **Release-candidate evidence bundle** (issue #66, `.github/workflows/release-candidate.yml`,
    `workflow_dispatch` only): runs the full quality gate (frozen install, assets, lint, typecheck,
    the full Windows test suite, build, production dependency audit, provider conformance),
@@ -41,10 +48,10 @@ the evidence this checklist asks for; neither runs automatically, and neither pu
   imported for this candidate -- not that every provider failed. Don't read an unavailable matrix
   as a claim about provider support one way or the other.
 - **`providerMatrix.rows[].verified`**: `true` only when that row's `resultCode` is exactly
-  `"success"`. A skipped or failed row is never verified, even though it's still listed --
-  issue #65's live-provider-smoke matrix (once merged, see `docs/providers.md`) and
-  `docs/capability-matrix.md` (once #63 merges) are what a public claim about a specific transport
-  should actually point at.
+  `"success"`. A skipped or failed row is never verified, even though it's still listed -- issue
+  #65's live-provider-smoke matrix (see [providers.md](providers.md#live-provider-smoke-matrix))
+  and [capability-matrix.md](capability-matrix.md) are what a public claim about a specific
+  transport should actually point at.
 
 ## Before calling a build a release candidate
 
@@ -65,3 +72,11 @@ explicit, separate, human decisions this workflow deliberately never makes. It d
 provider transport was verified; check `providerMatrix` for that specifically. And it proves the
 *packaged Windows build* works -- see [packaging.md's platform matrix](packaging.md#platform-matrix)
 for what remains unverified on macOS/Linux.
+
+A `providerMatrix` row's `verified: true` proves one thing: this repo's daemon, talking to that
+exact provider CLI version, completed one real session with real content and no protocol
+violation, on the OS that smoke run used. It is not a claim about every prompt, every auth source,
+every OS, or every edge case a real user might hit -- see that row's own `authSourceCategory` and
+the live-provider-smoke evidence's `os` field before generalizing beyond what it actually covers.
+If you're publishing a release that changes what a public doc says a transport can do, update that
+doc in the same change -- see [CONTRIBUTING.md](../CONTRIBUTING.md#before-opening-a-pr).

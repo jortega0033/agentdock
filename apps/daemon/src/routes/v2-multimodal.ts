@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import {
+  attachmentIdV2Schema,
   attachmentListV2Schema,
   attachmentMetadataV2Schema,
   attachmentReferenceRequestV2Schema,
@@ -86,6 +87,15 @@ export function registerV2MultimodalRoutes(
     } catch (error) {
       attachmentFailure(reply, error);
     }
+  });
+  app.delete('/v2/attachments/:id', async (req, reply) => {
+    const parsed = attachmentIdV2Schema.safeParse((req.params as { id?: unknown }).id);
+    if (!parsed.success)
+      return fail(reply, 400, 'invalid_attachment_request', 'Invalid attachment id');
+    // Deletion is idempotent and unconditional -- explicit user-triggered release, same as
+    // `apps/daemon/src/worktree-manager.ts`'s cleanup route, not gated on reference/session state.
+    await store.deleteAttachments([parsed.data]);
+    reply.code(204).send();
   });
   app.post('/v2/workflows/structured/validate', async (req, reply) => {
     const parsed = structuredWorkflowRequestV2Schema.safeParse(req.body);

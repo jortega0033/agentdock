@@ -7,7 +7,7 @@ import {
   type AttachmentMetadataV2,
 } from '@agent-dock/shared';
 
-interface StoredAttachment extends AttachmentMetadataV2 {
+export interface StoredAttachment extends AttachmentMetadataV2 {
   path: string;
 }
 interface Manifest {
@@ -164,13 +164,21 @@ export class AttachmentStore {
   }
 
   async reference(ids: string[], sessionId: string): Promise<AttachmentMetadataV2[]> {
-    return this.serializeMutation(() => this.referenceUnlocked(ids, sessionId));
+    const records = await this.serializeMutation(() => this.referenceUnlocked(ids, sessionId));
+    return records.map(({ path: _path, ...metadata }) => structuredClone(metadata));
   }
 
-  private async referenceUnlocked(
-    ids: string[],
-    sessionId: string,
-  ): Promise<AttachmentMetadataV2[]> {
+  /**
+   * Daemon-internal only -- unlike `reference()`, the result carries each attachment's real,
+   * canonical on-disk path, so a provider transport can read the file directly. Never expose this
+   * to a route response or log; only a trusted in-process caller (SessionManager) should call it.
+   */
+  async referenceForDispatch(ids: string[], sessionId: string): Promise<StoredAttachment[]> {
+    const records = await this.serializeMutation(() => this.referenceUnlocked(ids, sessionId));
+    return records.map((record) => structuredClone(record));
+  }
+
+  private async referenceUnlocked(ids: string[], sessionId: string): Promise<StoredAttachment[]> {
     const uniqueIds = [...new Set(ids)];
     const records = uniqueIds.map((id) => {
       const record = this.#records.get(id);
@@ -203,7 +211,29 @@ export class AttachmentStore {
       record.sessionId = sessionId;
     }
     await this.persist();
-    return records.map(({ path: _path, ...metadata }) => structuredClone(metadata));
+    return records;
+  }
+
+  /**
+   * Explicit, immediate deletion -- unlike `cleanupExpired()`'s unreferenced-only TTL sweep, this
+   * deletes whatever ids are given regardless of reference state, so a session-terminal hook or a
+   * user-triggered `DELETE /v2/attachments/:id` can actually recover quota instead of waiting up
+   * to 24h. Unknown ids are silently ignored (already gone is not an error for a delete call).
+   */
+  async deleteAttachments(ids: readonly string[]): Promise<void> {
+    return this.serializeMutation(() => this.deleteAttachmentsUnlocked(ids));
+  }
+
+  private async deleteAttachmentsUnlocked(ids: readonly string[]): Promise<void> {
+    let changed = false;
+    for (const id of ids) {
+      const record = this.#records.get(id);
+      if (!record) continue;
+      await unlink(record.path).catch(() => undefined);
+      this.#records.delete(id);
+      changed = true;
+    }
+    if (changed) await this.persist();
   }
 
   async cleanupExpired(): Promise<void> {

@@ -73,13 +73,18 @@ const NO_SESSION_SELECTED_STATUS: PanelStatusDescriptor = descriptor(
 );
 
 /**
- * Attachment staging and structured-output validation both run entirely locally: neither is
- * dispatched to any provider session by any current adapter (see
- * apps/daemon/src/routes/v2-multimodal.ts). This does not vary by provider.
+ * This panel's own actions (staging a file, validating a pasted JSON payload) are local-only and
+ * never create or touch a session -- that stays true for every provider (see
+ * apps/desktop/src/components/WorkflowPanel.tsx, which never calls session creation with an
+ * attachment or schema). Separately, as of issue #59, the daemon's session-creation API itself
+ * *can* dispatch a staged PNG/JPEG and a JSON Schema to a real Codex app-server turn
+ * (`POST /v2/sessions` with `initialAttachmentIds`/`outputSchema`,
+ * apps/daemon/src/routes/v2-multimodal.ts + v2-sessions.ts) -- this reference panel just doesn't
+ * offer a way to start a session from what you stage here yet.
  */
 const WORKFLOW_STATUS: PanelStatusDescriptor = descriptor(
   'scaffold_only',
-  'Files you stage here are not included in any run. Structured-output validation checks a JSON payload you paste in -- it does not constrain what a provider actually generates.',
+  'Files you stage here and JSON you validate here are never sent to a provider from this panel -- it only exercises the daemon\'s local staging/validation API. Codex app-server can accept a staged image and a structured-output schema through session creation directly, but this panel does not offer that yet.',
 );
 
 export function mcpPanelStatus(): PanelStatusDescriptor {

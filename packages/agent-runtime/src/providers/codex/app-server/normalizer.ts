@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { AgentEventV2, Effect } from '@agent-dock/shared';
+import type { AgentEventV2, BoundedJson, Effect } from '@agent-dock/shared';
+import { validateStructuredOutput } from '../../../structured-output.js';
 import { CodexAppServerProtocolError, boundedUtf8, safeDisplay } from './errors.js';
 
 type JsonObject = Record<string, unknown>;
@@ -164,6 +165,9 @@ export class CodexAppServerNormalizer {
   private readonly messageDeltas = new Map<string, DeltaDigest>();
   private readonly summarizedReasoning = new Set<string>();
   private readonly summarizedMessageDeltas = new Set<string>();
+  // Set once at session start (issue #59); applied to every turn's final agentMessage for the
+  // life of the session, since the schema is negotiated at session-creation time, not per turn.
+  private outputSchemaValue: unknown;
 
   constructor(private readonly emit: (event: AgentEventV2) => void) {}
 
@@ -182,6 +186,7 @@ export class CodexAppServerNormalizer {
     providerThreadId: string,
     transportId: string,
     selection: Extract<AgentEventV2, { type: 'session.started' }>['selection'],
+    outputSchema?: unknown,
   ): void {
     if (this.sessionStarted) {
       throw new CodexAppServerProtocolError('state_invalid', 'Codex session started twice');
@@ -195,6 +200,7 @@ export class CodexAppServerNormalizer {
     }
     this.providerThreadIdValue = normalizedThreadId;
     this.sessionStarted = true;
+    this.outputSchemaValue = outputSchema;
     this.emit({ type: 'session.started', provider: 'codex', transport: transportId, selection });
   }
 
@@ -507,6 +513,7 @@ export class CodexAppServerNormalizer {
         turnId,
         block,
       });
+      this.emitStructuredOutputIfValid(turnId, text);
       return;
     }
     if (item.type === 'reasoning') {
@@ -684,6 +691,52 @@ export class CodexAppServerNormalizer {
       message: 'Codex app-server reported a turn error',
       recoverable: params.willRetry === true,
     });
+  }
+
+  /**
+   * Codex has no dedicated "structured output" item type (issue #59) -- the final assistant
+   * message always arrives as plain `agentMessage` text, already emitted above as a normal text
+   * content block regardless of what happens here. When a caller negotiated `output.structured`,
+   * this additionally tries to parse that same text as JSON and AJV-validate it against the
+   * session's schema; on success it emits one more content block carrying the parsed, validated
+   * data. On failure (not JSON, or JSON that fails the schema) nothing more is emitted -- the
+   * plain text block already emitted is the only representation, satisfying "invalid output
+   * remains inspectable but cannot be consumed as valid": no `structured_data` block ever exists
+   * for output that didn't actually validate.
+   */
+  private emitStructuredOutputIfValid(turnId: string, text: string): void {
+    if (this.outputSchemaValue === undefined) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return;
+    }
+    const result = validateStructuredOutput(this.outputSchemaValue, parsed);
+    if (!result.valid) return;
+    // Safe: JSON.parse() always returns a JSON-shaped value, and AJV just confirmed it matches
+    // the caller's own schema. The wire schema's own bounds (depth/size/node count) are still
+    // enforced downstream when this event is validated for the SSE/storage layer.
+    const block = { type: 'structured_data' as const, id: randomUUID(), data: parsed as BoundedJson };
+    const encoded = jsonBytes(block);
+    if (encoded.byteLength > MAX_CONTENT_BLOCK_BYTES) {
+      this.emit({
+        type: 'content.completed',
+        turnId,
+        block: {
+          type: 'provider_extension',
+          id: block.id,
+          extensionName: 'codex.structured_output',
+          representation: 'safe_summary',
+          safeSummary: 'Codex structured output exceeded the 256 KiB content-block limit',
+          reason: 'truncated',
+          originalBytes: encoded.byteLength,
+          sha256: createHash('sha256').update(encoded).digest('hex'),
+        },
+      });
+      return;
+    }
+    this.emit({ type: 'content.completed', turnId, block });
   }
 
   private startTool(

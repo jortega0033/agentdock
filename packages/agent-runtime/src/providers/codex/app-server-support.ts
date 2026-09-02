@@ -159,6 +159,14 @@ const CAPABILITY_METHODS = {
   'content.tools': ['item/started', 'item/completed'],
   'content.plans': ['turn/plan/updated'],
   'content.usage.tokens': ['thread/tokenUsage/updated', 'turn/completed'],
+  // First slice only (issue #59): PNG/JPEG local images delivered as `localImage` turn input, and
+  // the final agentMessage's text parsed/AJV-validated against a negotiated JSON Schema. Both are
+  // real, evidenced by the pinned vendored schema's `TurnStartParams.input[].localImage` and
+  // `outputSchema` fields, carried on the same allowlisted `turn/start` request `content.tools`
+  // already uses; the completed structured value arrives via the same `item/completed`
+  // notification a tool result would.
+  'input.image': ['turn/start'],
+  'output.structured': ['turn/start', 'item/completed'],
 } as const satisfies Partial<Record<CoreCapabilityId, readonly string[]>>;
 
 type SupportedCapabilityId = keyof typeof CAPABILITY_METHODS;
@@ -214,6 +222,26 @@ function constraintsFor<I extends SupportedCapabilityId>(id: I): CapabilityConst
       } as unknown as CapabilityConstraintById[I];
     case 'content.usage.tokens':
       return { kind: 'usage', scopes: ['turn'] } as unknown as CapabilityConstraintById[I];
+    case 'input.image':
+      // AttachmentStore's MIME-sniffing allowlist is broader than this (it also recognizes GIF,
+      // PDF, JSON, and plain text -- see apps/daemon/src/attachment-store.ts's sniffMime()); this
+      // is the narrower subset this transport actually accepts (see localImageInputs() in
+      // providers/codex/app-server/transport.ts), never a broader claim than that. The byte cap
+      // does match the store's real per-file limit exactly.
+      return {
+        kind: 'attachment',
+        mimeTypes: ['image/png', 'image/jpeg'],
+        maxBytes: 25 * 1024 * 1024,
+      } as unknown as CapabilityConstraintById[I];
+    case 'output.structured':
+      // Matches the bounds `boundedJsonSchema` (packages/shared/src/capabilities-v2.ts) already
+      // enforces on the wire for `createSessionV2RequestSchema.outputSchema`.
+      return {
+        kind: 'structured_output',
+        maxSchemaBytes: 64 * 1024,
+        maxSchemaDepth: 16,
+        maxSchemaNodes: 1_024,
+      } as unknown as CapabilityConstraintById[I];
   }
 }
 
@@ -232,6 +260,10 @@ function sessionStatesFor(
       return ['starting', 'active', 'idle'];
     case 'session.resume':
     case 'session.fork':
+    case 'input.image':
+    case 'output.structured':
+      // Session-creation-time only (issue #59's scope): attachments and the output schema are
+      // negotiated and bound once, at `POST /v2/sessions`, not renegotiable mid-session.
       return ['starting'];
     default:
       return ['starting', 'active', 'idle', 'terminal'];

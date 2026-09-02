@@ -13,6 +13,7 @@ import {
   type Effect,
 } from './capabilities-v2.js';
 import { approvalDecisionV2Schema, permissionActionV2Schema } from './policy-v2.js';
+import { ATTACHMENT_LIMITS_V2, attachmentIdV2Schema } from './multimodal-workflow-v2.js';
 
 const MAX_CONTENT_BYTES = 256 * 1024;
 const MAX_COMMAND_BYTES = 1024 * 1024;
@@ -359,6 +360,18 @@ export interface CreateSessionV2Request {
   /** Explicit consent to add a read-only session to an already-shared dirty Git worktree. */
   allowDirtyWorkspaceShare?: boolean;
   /**
+   * Already-staged attachment IDs (see `POST /v2/attachments`) to bind to this session and, for
+   * the first supported provider/transport, deliver as real turn input. Resolution/binding is
+   * transactional with session creation: any invalid ID (cross-session, missing, unsupported MIME)
+   * fails the whole request before a session is created.
+   */
+  initialAttachmentIds?: string[];
+  /**
+   * A JSON Schema constraining the session's final structured output, for the first supported
+   * provider/transport. Bounded the same way `POST /v2/workflows/structured/validate` is.
+   */
+  outputSchema?: unknown;
+  /**
    * @deprecated Use the daemon-owned `POST /v2/sessions/:sessionId/resume` or `/fork` routes.
    * Kept parse-compatible until consumers have migrated; new callers must not supply native IDs.
    */
@@ -372,6 +385,12 @@ export const createSessionV2RequestSchema = z
     prompt: z.string().min(1, 'prompt is required').max(200_000, 'prompt is too long'),
     capabilities: capabilityRequestSchema.optional(),
     allowDirtyWorkspaceShare: z.boolean().optional(),
+    initialAttachmentIds: z
+      .array(attachmentIdV2Schema)
+      .min(1)
+      .max(ATTACHMENT_LIMITS_V2.maxSessionFiles)
+      .optional(),
+    outputSchema: boundedJsonSchema.optional(),
     continuation: sessionContinuationV2Schema.optional(),
   })
   .strict()

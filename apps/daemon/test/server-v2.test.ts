@@ -1365,6 +1365,50 @@ describe('POST /v2/sessions capability negotiation', () => {
     expect(provider.startedOptions).toEqual([]);
   });
 
+  it('returns 422 when attachments are requested but the provider does not support input.image (issue #59)', async () => {
+    const { app, provider } = setup();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: {
+        provider: 'claude',
+        cwd,
+        prompt: 'must not start',
+        initialAttachmentIds: ['123e4567-e89b-42d3-a456-426614174099'],
+      },
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(response.json().code).toBe('required_capability_unavailable');
+    expect(response.json().details.unavailableRequired).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'input.image' })]),
+    );
+    expect(provider.startedOptions).toEqual([]);
+  });
+
+  it('returns 422 when an output schema is requested but the provider does not support output.structured (issue #59)', async () => {
+    const { app, provider } = setup();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: {
+        provider: 'claude',
+        cwd,
+        prompt: 'must not start',
+        outputSchema: { type: 'object', required: ['answer'] },
+      },
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(response.json().code).toBe('required_capability_unavailable');
+    expect(response.json().details.unavailableRequired).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'output.structured' })]),
+    );
+    expect(provider.startedOptions).toEqual([]);
+  });
+
   it('round-trips an unknown optional opaque request as unavailable without blocking startup', async () => {
     const { app, provider } = setup();
     const response = await app.inject({

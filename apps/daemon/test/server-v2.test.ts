@@ -628,7 +628,10 @@ describe('POST /v2/sessions capability negotiation', () => {
       providerSessionId: resumedSession.providerSessionId,
     });
     await cancelAndWait(forkedSession.id);
-  });
+    // Three full interactive session lifecycles (fresh, resume, fork) genuinely exceed the
+    // default 5000ms budget under Windows CI's parallel-worker CPU contention (issue #60); this
+    // test-specific headroom isn't a blanket global timeout increase.
+  }, 15_000);
 
   it('derives legacy resume identity from a terminal parent and rejects unsupported fork', async () => {
     const status: ProviderStatus = {

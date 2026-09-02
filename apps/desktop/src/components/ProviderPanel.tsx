@@ -1,10 +1,20 @@
 import type { ProviderStatusV2 } from '@agent-dock/shared';
 import noProvidersIllustration from '../../assets/illustrations/no-providers.svg';
 
+const AUTH_SOURCE_LABELS: Record<string, string> = {
+  chatgpt: 'ChatGPT sign-in',
+  api_key: 'API key',
+  claude_subscription: 'Claude subscription',
+  bedrock: 'Amazon Bedrock',
+  vertex: 'Google Vertex',
+  foundry: 'Azure AI Foundry',
+  unknown: 'source unknown',
+};
+
 function authLabel(status: ProviderStatusV2): string {
-  if (status.authenticated === 'authenticated') return 'yes';
   if (status.authenticated === 'unauthenticated') return 'no';
-  return 'unknown';
+  if (status.authenticated === 'unknown') return 'unknown';
+  return status.authSource ? AUTH_SOURCE_LABELS[status.authSource] ?? status.authSource : 'yes';
 }
 
 function sandboxLabel(status: ProviderStatusV2): string {

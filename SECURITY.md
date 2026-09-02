@@ -191,6 +191,12 @@ correct for what this daemon actually needs to be reachable by.
   `/token|secret|password|authorization|api[-_]?key|credential/i`; legacy provider stderr is counted
   without being decoded, persisted, logged, or surfaced. A non-zero exit logs only bounded numeric
   metadata such as exit code, signal, and `stderrBytes`.
+- Log a provider-controlled string (e.g. an unrecognized native event type) verbatim. Both legacy
+  parsers (`packages/agent-runtime/src/providers/claude/parser.ts`,
+  `.../providers/codex/parser.ts`) bound and control-character-strip an unrecognized event type
+  through `safeDisplay()` (`packages/agent-runtime/src/providers/common/safe-display.ts`) before it
+  reaches a `logger.debug()` call, so a malicious or buggy provider process cannot inject multiline
+  or control content into structured logs (issue #67).
 - Leak the token back through any API response, even an error body. **Verified** by regression
   test (`apps/daemon/test/server.test.ts`).
 

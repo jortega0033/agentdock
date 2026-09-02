@@ -1,6 +1,7 @@
 import type { AgentEvent } from '@agent-dock/shared';
 import type { Logger } from '../../logger.js';
 import type { ParsedLine } from '../common/run-session.js';
+import { safeDisplay } from '../common/safe-display.js';
 
 interface ClaudeUsage {
   input_tokens?: number;
@@ -98,7 +99,11 @@ export function parseClaudeLine(raw: unknown, logger: Logger): ParsedLine {
       return { events, providerSessionId: sessionId };
     }
     default:
-      logger.debug('claude: unrecognized event type', { eventType: String(obj.type) });
+      // eventType is provider-controlled (an arbitrary field from parsed CLI stdout) -- bounded
+      // and control-character-stripped before it ever reaches a log line (issue #67).
+      logger.debug('claude: unrecognized event type', {
+        eventType: safeDisplay(obj.type, 128, 'unknown'),
+      });
       return { events: [] };
   }
 }

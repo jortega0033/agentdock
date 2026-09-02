@@ -261,6 +261,7 @@ Follow [the provider guide](docs/providers.md#adding-a-new-provider) for the com
 - [Packaging](docs/packaging.md): electron-builder and NSIS details
 - [Assets](docs/assets.md): brand sources, generated files, and replacement guide
 - [Troubleshooting](docs/troubleshooting.md): common failures and diagnostics
+- [Release checklist](docs/release-checklist.md): what backs a "release candidate" or a public "verified" provider claim
 - [Contributing](CONTRIBUTING.md): workflow and pull-request checklist
 
 ## License

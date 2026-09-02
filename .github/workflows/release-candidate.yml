@@ -1,0 +1,201 @@
+name: Release candidate
+
+# Issue #66: an explicitly triggered, non-publishing evidence bundle for a Windows release
+# candidate. Core CI (ci.yml) and Windows Packaging (package-windows.yml) already run on every
+# push/PR; neither proves the packaged GUI app actually starts its bundled daemon, that the NSIS
+# installer installs and uninstalls cleanly, or aggregates a single reviewable manifest a
+# maintainer can check before calling a build a release candidate. This workflow adds exactly
+# that, and nothing else: it never publishes, signs, or tags anything, and a single failed check
+# anywhere in it makes the resulting manifest's `ready` field false -- see
+# scripts/release-candidate/manifest.mjs and docs/release-checklist.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider_matrix_evidence_path:
+        description: >-
+          Optional path (relative to the repo root) to a live-provider-smoke evidence JSONL file
+          (issue #65) to import into this manifest, e.g. downloaded from that workflow's own
+          artifact and placed here by hand before dispatching. Left empty, the manifest records
+          the provider matrix as unavailable rather than implying anything was verified.
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  release-candidate:
+    name: Windows release-candidate evidence bundle
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Record commit and dirty state
+        id: git-state
+        shell: pwsh
+        run: |
+          $commit = (git rev-parse HEAD).Trim()
+          $status = (git status --porcelain)
+          $dirty = if ($status) { 'true' } else { 'false' }
+          "commit=$commit" >> $env:GITHUB_OUTPUT
+          "dirty=$dirty" >> $env:GITHUB_OUTPUT
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        id: setup-node
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies (frozen lockfile)
+        id: install
+        run: pnpm install --frozen-lockfile
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+
+      - name: Install asset tooling
+        run: python -m pip install -r scripts/assets/requirements.txt
+
+      - name: Validate assets
+        id: assets
+        continue-on-error: true
+        run: |
+          python scripts/assets/test_svg_safety.py
+          python scripts/assets/validate_assets.py
+
+      - name: Lint
+        id: lint
+        continue-on-error: true
+        run: pnpm lint
+
+      - name: Typecheck
+        id: typecheck
+        continue-on-error: true
+        run: pnpm typecheck
+
+      - name: Test (full Windows suite)
+        id: test
+        continue-on-error: true
+        run: pnpm test
+
+      - name: Build
+        id: build
+        continue-on-error: true
+        run: pnpm build
+
+      - name: Production dependency audit
+        id: audit
+        continue-on-error: true
+        run: pnpm audit --prod
+
+      - name: Provider conformance
+        id: provider-conformance
+        continue-on-error: true
+        run: pnpm test:provider-conformance
+
+      - name: Package (electron-builder, NSIS)
+        id: package
+        continue-on-error: true
+        run: pnpm package:win
+
+      - name: Verify installer was produced
+        id: installer-present
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem -Path "dist-packages" -Filter "AgentDock-Setup-*.exe" -ErrorAction SilentlyContinue
+          if (-not $installer) { Write-Error "No NSIS installer found"; exit 1 }
+          $exePath = "dist-packages/win-unpacked/AgentDock.exe"
+          if (-not (Test-Path $exePath)) { Write-Error "Unpacked executable not found"; exit 1 }
+
+      - name: Packaged daemon smoke (fake Codex CLI)
+        id: packaged-daemon-smoke
+        continue-on-error: true
+        run: pnpm --filter @agent-dock/desktop run test:packaged-daemon-win
+
+      - name: Packaged app launch, bundled-daemon discovery, and graceful shutdown
+        id: packaged-app-smoke
+        continue-on-error: true
+        run: node apps/desktop/scripts/packaged-app-win-smoke.mjs
+
+      - name: Silent installer install/uninstall
+        id: installer-lifecycle
+        continue-on-error: true
+        run: node apps/desktop/scripts/installer-lifecycle-win.mjs
+
+      - name: Generate release-candidate manifest
+        id: manifest
+        shell: pwsh
+        run: |
+          $gates = @(
+            @{ name = 'assets'; passed = '${{ steps.assets.outcome }}' -eq 'success' },
+            @{ name = 'lint'; passed = '${{ steps.lint.outcome }}' -eq 'success' },
+            @{ name = 'typecheck'; passed = '${{ steps.typecheck.outcome }}' -eq 'success' },
+            @{ name = 'test'; passed = '${{ steps.test.outcome }}' -eq 'success' },
+            @{ name = 'build'; passed = '${{ steps.build.outcome }}' -eq 'success' },
+            @{ name = 'audit'; passed = '${{ steps.audit.outcome }}' -eq 'success' },
+            @{ name = 'provider-conformance'; passed = '${{ steps.provider-conformance.outcome }}' -eq 'success' },
+            @{ name = 'package'; passed = '${{ steps.package.outcome }}' -eq 'success' },
+            @{ name = 'installer-present'; passed = '${{ steps.installer-present.outcome }}' -eq 'success' },
+            @{ name = 'packaged-daemon-smoke'; passed = '${{ steps.packaged-daemon-smoke.outcome }}' -eq 'success' },
+            @{ name = 'packaged-app-smoke'; passed = '${{ steps.packaged-app-smoke.outcome }}' -eq 'success'; detail = 'Real AgentDock.exe launch, bundled-daemon discovery/health, graceful shutdown' },
+            @{ name = 'installer-lifecycle'; passed = '${{ steps.installer-lifecycle.outcome }}' -eq 'success'; detail = 'Silent NSIS install/uninstall in an isolated directory' }
+          )
+          $gatesJson = ($gates | ConvertTo-Json -Compress -AsArray)
+
+          $artifacts = @(
+            @{ name = 'installer'; path = (Get-ChildItem -Path "dist-packages" -Filter "AgentDock-Setup-*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName) },
+            @{ name = 'unpacked-exe'; path = 'dist-packages/win-unpacked/AgentDock.exe' }
+          ) | Where-Object { $_.path -and (Test-Path $_.path) }
+          $artifactsJson = ($artifacts | ConvertTo-Json -Compress -AsArray)
+
+          $exceptions = @(
+            'pnpm audit (not --prod) currently exits nonzero for two electron-builder dev-tool advisories -- see docs/packaging.md#current-dependency-audit-exception'
+          )
+          $exceptionsJson = ($exceptions | ConvertTo-Json -Compress -AsArray)
+
+          $evidencePath = '${{ github.event.inputs.provider_matrix_evidence_path }}'
+          $evidenceArg = if ($evidencePath) { @('--provider-matrix-evidence', $evidencePath) } else { @() }
+
+          node scripts/release-candidate/generate.mjs `
+            --commit '${{ steps.git-state.outputs.commit }}' `
+            --dirty '${{ steps.git-state.outputs.dirty }}' `
+            --os-image 'windows-latest' `
+            --node-version '${{ steps.setup-node.outputs.node-version }}' `
+            --pnpm-version '10.29.2' `
+            --gates-json "$gatesJson" `
+            --artifacts-json "$artifactsJson" `
+            --documented-exceptions-json "$exceptionsJson" `
+            --out 'release-candidate-manifest.json' `
+            @evidenceArg
+
+      - name: Fail the job if the manifest is not ready
+        if: always() && steps.manifest.outcome == 'success'
+        shell: pwsh
+        run: |
+          $manifest = Get-Content 'release-candidate-manifest.json' | ConvertFrom-Json
+          if (-not $manifest.ready) {
+            Write-Error "Release candidate is NOT ready. Failed gates: $($manifest.failedGates -join ', ')"
+            exit 1
+          }
+          Write-Host "Release candidate is ready."
+
+      - name: Upload release-candidate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-candidate-evidence
+          path: |
+            release-candidate-manifest.json
+            dist-packages/AgentDock-Setup-*.exe
+          if-no-files-found: warn
+          retention-days: 90

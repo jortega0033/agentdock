@@ -3,6 +3,7 @@ import type { ChildProcessByStdio } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import type { Readable, Writable } from 'node:stream';
 import { encodeWindowsJobHostArguments, resolveWindowsJobHostPath } from './windows-job-host.js';
+import { buildBaseProcessEnvironment } from './provider-environment.js';
 
 export interface ProcessExitResult {
   code: number | null;
@@ -242,7 +243,10 @@ export function spawnProcess(command: string, args: string[], opts: SpawnOptions
     : args;
   const nativeChild = spawn(actualCommand, actualArgs, {
     cwd: opts.cwd,
-    env: opts.env ?? process.env,
+    // Structural, not convention-dependent (issue #53): every caller of this shared low-level
+    // primitive gets a sanitized floor by default, not the daemon's full process.env, even a
+    // future one that forgets to pass an explicit env.
+    env: opts.env ?? buildBaseProcessEnvironment(),
     shell: false,
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,

@@ -1,4 +1,10 @@
 import type { AuthSource } from '@agent-dock/shared';
+import {
+  copyCanonicalEnvKeys,
+  envValue,
+  findEnvEntries,
+  REVIEWED_OS_RUNTIME_ENV_KEYS,
+} from '../../process/provider-environment.js';
 import { CLAUDE_AGENT_SDK_VERSION } from './sdk-version.js';
 
 export type ClaudeSdkAuthSource = Extract<AuthSource, 'api_key' | 'bedrock' | 'vertex' | 'foundry'>;
@@ -25,28 +31,6 @@ export const CLAUDE_SDK_PROHIBITED_ENV_KEYS = Object.freeze([
   'ANTHROPIC_BEDROCK_MANTLE_BASE_URL',
   'ANTHROPIC_VERTEX_BASE_URL',
   'ANTHROPIC_FOUNDRY_BASE_URL',
-] as const);
-
-/** Minimal host state needed for the pinned native child to start and locate cloud credentials. */
-const PROCESS_ENV_KEYS = Object.freeze([
-  'APPDATA',
-  'COMSPEC',
-  'HOME',
-  'HOMEDRIVE',
-  'HOMEPATH',
-  'LANG',
-  'LC_ALL',
-  'LC_CTYPE',
-  'LOCALAPPDATA',
-  'PATH',
-  'PATHEXT',
-  'SYSTEMROOT',
-  'TEMP',
-  'TMP',
-  'TMPDIR',
-  'TZ',
-  'USERPROFILE',
-  'WINDIR',
 ] as const);
 
 /** Reviewed credential-chain inputs for each permitted commercial auth source. */
@@ -107,38 +91,8 @@ const AUTH_SOURCE_ENV_KEYS = Object.freeze({
   ],
 } as const satisfies Record<ClaudeSdkAuthSource, readonly string[]>);
 
-function findEnvEntries(
-  env: Readonly<Record<string, string | undefined>>,
-  name: string,
-): Array<[string, string | undefined]> {
-  const normalized = name.toUpperCase();
-  return Object.entries(env).filter(([key]) => key.toUpperCase() === normalized);
-}
-
-function envValue(
-  env: Readonly<Record<string, string | undefined>>,
-  name: string,
-): string | undefined {
-  return findEnvEntries(env, name)[0]?.[1];
-}
-
 function isPresent(value: string | undefined): boolean {
   return value !== undefined && value.length > 0;
-}
-
-function copyCanonicalEnvKeys(
-  source: Readonly<Record<string, string | undefined>>,
-  names: readonly string[],
-  target: Record<string, string | undefined>,
-): void {
-  for (const name of names) {
-    const entries = findEnvEntries(source, name);
-    if (entries.length > 1) {
-      throw new Error('Claude SDK environment contains duplicate reviewed keys');
-    }
-    const value = entries[0]?.[1];
-    if (value !== undefined) target[name] = value;
-  }
 }
 
 /** Resolves only the four reviewed SDK auth modes and never returns credential material. */
@@ -188,7 +142,7 @@ export function buildClaudeSdkEnvironment(
   }
 
   const childEnv: Record<string, string | undefined> = {};
-  copyCanonicalEnvKeys(env, PROCESS_ENV_KEYS, childEnv);
+  copyCanonicalEnvKeys(env, REVIEWED_OS_RUNTIME_ENV_KEYS, childEnv);
   copyCanonicalEnvKeys(env, AUTH_SOURCE_ENV_KEYS[auth.source], childEnv);
 
   if (auth.source !== 'api_key') {

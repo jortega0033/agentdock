@@ -585,3 +585,36 @@ describe('ManagedAppServerProcess lifecycle failures', () => {
     },
   );
 });
+
+describe('ManagedAppServerProcess default environment (issue #53)', () => {
+  beforeEach(() => terminateProcessTree.mockReset());
+
+  it('never inherits the daemon\'s full process.env when options.env is omitted', async () => {
+    process.env.AGENT_DOCK_ENV_ISOLATION_TEST_CANARY = 'CANARY-do-not-leak';
+    let stdout = '';
+    // platform: 'linux' takes the plain-spawn path (no Windows Job Host wrapping), matching the
+    // simpler pattern the file's other constructor-level tests already use; the sanitized-env
+    // fallback itself lives in the one spawn() call shared by both paths (managed-process.ts).
+    const processHandle = new ManagedAppServerProcess({
+      executable: process.execPath,
+      executableArgs: ['-e', 'process.stdout.write(JSON.stringify(process.env))'],
+      cwd: process.cwd(),
+      platform: 'linux',
+      onStdout: (chunk) => {
+        stdout += chunk.toString('utf8');
+      },
+      onStdoutEnd: () => undefined,
+      onFailure: () => undefined,
+    });
+
+    try {
+      await waitUntil(() => stdout.length > 0);
+      const childEnv = JSON.parse(stdout) as Record<string, string>;
+      expect(childEnv).not.toHaveProperty('AGENT_DOCK_ENV_ISOLATION_TEST_CANARY');
+      expect(childEnv.PATH ?? childEnv.Path).toBeDefined();
+    } finally {
+      delete process.env.AGENT_DOCK_ENV_ISOLATION_TEST_CANARY;
+      await processHandle.forceClose().catch(() => undefined);
+    }
+  });
+});

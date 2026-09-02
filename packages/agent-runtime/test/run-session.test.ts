@@ -56,6 +56,31 @@ describe('runProviderSession (spawns real node child processes via fixtures)', (
     });
   });
 
+  it('never inherits the daemon\'s full process.env by default (issue #53)', async () => {
+    process.env.AGENT_DOCK_ENV_ISOLATION_TEST_CANARY = 'CANARY-do-not-leak';
+    try {
+      const handle = runProviderSession(
+        {
+          providerId: 'claude',
+          executableNames: [process.execPath],
+          buildArgs: () => [join(fixturesDir, 'fake-env-echo.mjs')],
+          parseLine: parseClaudeLine,
+        },
+        { sessionId: 'test-session-env', cwd, prompt: 'hello' },
+        noopLogger,
+      );
+      const events = await collectEvents(handle.events);
+      const message = events.find((e) => e.type === 'assistant.message') as
+        | { text: string }
+        | undefined;
+      const childEnv = JSON.parse(message?.text ?? '{}') as Record<string, string>;
+      expect(childEnv).not.toHaveProperty('AGENT_DOCK_ENV_ISOLATION_TEST_CANARY');
+      expect(childEnv.PATH ?? childEnv.Path).toBeDefined(); // still enough to boot Node itself
+    } finally {
+      delete process.env.AGENT_DOCK_ENV_ISOLATION_TEST_CANARY;
+    }
+  });
+
   it('surfaces a non-zero exit without exposing provider stderr', async () => {
     const handle = runProviderSession(
       {

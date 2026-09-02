@@ -3,6 +3,7 @@ import type { AgentEvent, ProviderId } from '@agent-dock/shared';
 import { AsyncChannel } from '../../process/async-channel.js';
 import { readLines } from '../../process/line-reader.js';
 import { spawnProcess } from '../../process/spawn-process.js';
+import { buildLegacyProviderEnvironment } from '../../process/provider-environment.js';
 import { findExecutable } from '../../detect-executable.js';
 import type { Logger } from '../../logger.js';
 import type { ProviderSessionHandle, StartSessionOptions } from '../../types.js';
@@ -119,7 +120,11 @@ export function runProviderSession(
 
     const args = config.buildArgs(options);
     logger.info(`${config.providerId}: starting session`, { sessionId: options.sessionId });
-    spawned = spawnProcess(exePath, args, { cwd: options.cwd, env: options.env });
+    // Sanitized by default (issue #53): the daemon's full process.env only reaches this child if
+    // a caller explicitly overrides `options.env` (a test/fork seam), never silently.
+    const env =
+      options.env ?? buildLegacyProviderEnvironment(process.env, { provider: config.providerId });
+    spawned = spawnProcess(exePath, args, { cwd: options.cwd, env });
     // AD-05: when the adapter supports it, the prompt travels over stdin rather than argv, see
     // ProviderRunConfig.promptViaStdin and build-args.ts for why. `.write()` followed immediately
     // by `.end()` is safe and standard: Node buffers and flushes the write before actually

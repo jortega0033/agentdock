@@ -48,4 +48,25 @@ describe('ProviderPanel', () => {
     render(<ProviderPanel providers={providers} />);
     expect(screen.getByText('Authenticated: yes')).toBeInTheDocument();
   });
+
+  it('shows the actual auth source instead of a generic yes/no when one is known', () => {
+    const providers: ProviderStatusV2[] = [
+      provider({ id: 'claude', name: 'Claude Code', authSource: 'claude_subscription' }),
+    ];
+    render(<ProviderPanel providers={providers} />);
+    expect(screen.getByText('Authenticated: Claude subscription')).toBeInTheDocument();
+  });
+
+  it('falls back to the raw auth source value for an auth source this UI has no label for', () => {
+    const providers: ProviderStatusV2[] = [
+      provider({
+        id: 'codex',
+        name: 'Codex',
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- deliberately outside the known AuthSource union
+        authSource: 'future_auth_source' as any,
+      }),
+    ];
+    render(<ProviderPanel providers={providers} />);
+    expect(screen.getByText('Authenticated: future_auth_source')).toBeInTheDocument();
+  });
 });

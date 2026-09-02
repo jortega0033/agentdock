@@ -199,14 +199,14 @@ Claude's response and token usage came back as normalized events, and the sessio
 
 ### Claude transport modes
 
-`AGENT_DOCK_CLAUDE_TRANSPORT` accepts `auto` (default), `sdk`, or `cli`. The `cli` mode is the legacy
-path documented above and remains unchanged. The SDK path requires Windows, the exact pinned SDK
-executable, an authenticated detection snapshot whose source still matches, a trusted workspace at
-launch, and either a user-provided `ANTHROPIC_API_KEY` or exactly one supported Bedrock, Vertex, or
-Foundry configuration. Claude.ai/subscription OAuth and `CLAUDE_CODE_OAUTH_TOKEN` are never SDK
-credentials. `auto` selects the legacy CLI when an SDK eligibility gate fails before transport
-selection; `sdk` fails closed. Once the SDK transport is selected, import, startup, or query failure
-does not fall back to the CLI.
+`AGENT_DOCK_CLAUDE_TRANSPORT` accepts `auto` (default), `sdk`, or `cli`. The `cli` mode is the
+Claude CLI compatibility transport documented above and remains unchanged. The SDK path requires
+Windows, the exact pinned SDK executable, an authenticated detection snapshot whose source still
+matches, a trusted workspace at launch, and either a user-provided `ANTHROPIC_API_KEY` or exactly
+one supported Bedrock, Vertex, or Foundry configuration. Claude.ai/subscription OAuth and
+`CLAUDE_CODE_OAUTH_TOKEN` are never SDK credentials. `auto` selects the Claude CLI compatibility
+transport when an SDK eligibility gate fails before transport selection; `sdk` fails closed. Once
+the SDK transport is selected, import, startup, or query failure does not fall back to the CLI.
 
 The SDK and its Windows executable are pinned to `@anthropic-ai/claude-agent-sdk` **0.3.251** and
 the embedded Claude executable **2.1.251**. Windows packaging stages the executable and notices
@@ -252,7 +252,8 @@ one-turn JSONL adapter and its v1 contract.
 Protocol v2 now has a native `codex-app-server` transport for the exact validated
 **codex-cli 0.147.0** scope. `AGENT_DOCK_CODEX_TRANSPORT` accepts `auto` (default), `app-server`, or
 `exec`: `auto` advertises app-server only when the detected version matches that compatibility
-record, while `exec` keeps v2 on the conservative legacy bridge. Starting app-server additionally
+record, while `exec` keeps v2 on the conservative Codex exec compatibility transport. Starting
+app-server additionally
 requires an exact detected executable, authenticated provider status, and a trusted workspace; it
 uses the provider's `workspace-write` sandbox request and `on-request` approval policy.
 

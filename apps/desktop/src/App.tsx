@@ -523,7 +523,7 @@ export function App() {
             </section>
             <section className="card"><div className="section-heading"><div><span className="eyebrow">Isolation</span><h2>Owned worktrees</h2></div></div><WorktreePanel cwd={cwd} /></section>
             <section className="card"><div className="section-heading"><div><span className="eyebrow">Execution tree</span><h2>Child agents</h2></div></div><AgentGraphPanel sessionId={selectedEntry?.session.id} /></section>
-            <section className="card"><div className="section-heading"><div><span className="eyebrow">Inputs & outputs</span><h2>Multimodal workflow</h2></div></div><WorkflowPanel sessionId={selectedEntry?.session.id} /></section>
+            <section className="card"><div className="section-heading"><div><span className="eyebrow">Staging & validation only</span><h2>Attachments & structured output</h2></div></div><WorkflowPanel sessionId={selectedEntry?.session.id} /></section>
             <section className="card">
               <div className="section-heading">
                 <div>

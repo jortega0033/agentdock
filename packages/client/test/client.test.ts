@@ -320,6 +320,26 @@ describe('AgentDockClient — SSE event streaming', () => {
     expect(collected).toHaveLength(1); // the one valid event before the malformed one
   });
 
+  it('throws ValidationError on an SSE frame over the 1 MiB v1 frame ceiling', async () => {
+    const oversized = `data: ${JSON.stringify({
+      type: 'assistant.message',
+      text: 'x'.repeat(2 * 1024 * 1024),
+      sequence: 0,
+      timestamp: '2026-01-01T00:00:00.000Z',
+    })}\n\n`;
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthOk();
+      return sseResponse([oversized]);
+    });
+    const client = makeClient(fetchImpl);
+
+    await expect(async () => {
+      for await (const _event of client.sessions.events('s1')) {
+        // no-op
+      }
+    }).rejects.toThrow(/larger than the 1048576-byte/);
+  });
+
   it('throws SessionNotFoundError when opening the stream for an unknown session', async () => {
     const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
       if (url.endsWith('/health')) return healthOk();

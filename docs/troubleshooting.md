@@ -1,5 +1,31 @@
 # Troubleshooting
 
+## `corepack enable` fails with "command not found"
+
+Some newer Node releases no longer bundle Corepack by default. Install it first, then retry:
+
+```bash
+npm install -g corepack
+corepack enable
+```
+
+Or skip Corepack entirely and install the exact pinned pnpm version directly:
+
+```bash
+npm install -g pnpm@10.29.2
+```
+
+Both commands install globally; depending on how Node was installed, that may need administrator
+rights (Windows) or `sudo` (Linux/macOS), or may work without either if you installed Node through a
+per-user version manager (nvm, fnm, volta) rather than a system-wide installer.
+
+Either way, run `pnpm install` afterward. Its first step runs `node scripts/preflight.mjs`
+automatically, which reports your active Node version, active pnpm version, and platform, and fails
+with a specific fix (rather than a generic error later in install) if either doesn't match what
+this repo actually tests. This repo's CI only exercises Node 20.x and 22.x (`package.json`'s
+`engines` field); an unsupported Node major is the most common cause of `preflight.mjs` failing --
+see [README.md#quick-start](../README.md#quick-start).
+
 ## Claude transport mode is unavailable
 
 `AGENT_DOCK_CLAUDE_TRANSPORT` must be exactly `auto`, `sdk`, or `cli`; it defaults to `auto`.

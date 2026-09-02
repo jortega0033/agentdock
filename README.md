@@ -65,13 +65,25 @@ vacancy-focused workflow and its own product behavior.
 
 ## Quick start
 
-You need [Node.js 20+](https://nodejs.org/) and pnpm 10 (declared through Corepack):
+You need [Node.js](https://nodejs.org/) 20.x or 22.x (the only versions this repo's CI actually
+tests) and the exact pnpm version pinned in `package.json`'s `packageManager` field:
 
 ```bash
 corepack enable
 pnpm install
 pnpm dev:desktop
 ```
+
+If `corepack enable` fails with "command not found" (some newer Node releases no longer bundle
+Corepack by default), install it first, then retry: `npm install -g corepack`. If you'd rather
+skip Corepack entirely, install pnpm directly instead: `npm install -g pnpm@10.29.2`, then run
+`pnpm install`. Both `npm install -g` commands install globally, which may need administrator
+rights (Windows) or `sudo` (Linux/macOS) unless Node came from a per-user version manager (nvm,
+fnm, volta). `pnpm install`'s first step runs `node scripts/preflight.mjs` automatically, which
+checks your active Node and pnpm versions against what's actually supported and fails with a clear
+fix before touching your `node_modules` if either is wrong. See
+[docs/troubleshooting.md#corepack-enable-fails-with-command-not-found](docs/troubleshooting.md#corepack-enable-fails-with-command-not-found)
+for more.
 
 Configure at least one provider path. The Claude Agent SDK path uses the pinned Windows asset plus
 an eligible Anthropic API key, Bedrock, Vertex, or Foundry environment and does not require a

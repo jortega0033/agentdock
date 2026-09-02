@@ -17,9 +17,15 @@ concurrency:
 
 jobs:
   build-and-test:
-    name: Lint, typecheck, test, build
+    name: Lint, typecheck, test, build (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # package.json's "engines" field declares 20.x-22.x as the actually-tested range (issue
+        # #64) — exercise both edges, not just the minimum.
+        node-version: [20, 22]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -30,7 +36,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node-version }}
           cache: pnpm
 
       - name: Install dependencies

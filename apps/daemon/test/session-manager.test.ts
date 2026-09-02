@@ -30,6 +30,7 @@ import type {
   StartSessionOptions,
 } from '@agent-dock/agent-runtime';
 import { SessionManager, type SessionManagerSecurityOptions } from '../src/session-manager.js';
+import { SessionAdmissionController, SessionCapacityError } from '../src/session-admission.js';
 import { AuditStore } from '../src/audit-store.js';
 import { V2ProviderStartupError, V2SessionFacade } from '../src/v2-session-facade.js';
 import { planLegacyProviderFallback, type ProviderV2Manifest } from '../src/provider-v2.js';
@@ -2704,5 +2705,218 @@ describe('SessionManager — interactive removal', () => {
     interactive.finish();
     await expect(removing).resolves.toBe(true);
     expect(sessionManager.get(session.id)).toBeUndefined();
+  });
+});
+
+/**
+ * Supports both the legacy (v1) and interactive (v2) launch paths on one provider instance, each
+ * session individually controllable and independently trackable, so mixed v1/v2 admission tests
+ * can hold an arbitrary number of sessions open and finish them one at a time.
+ */
+class MixedAdmissionProvider implements AgentProvider {
+  readonly id: ProviderId = 'claude';
+  readonly name = 'Mixed Admission Test Provider';
+  readonly legacySessions = new Map<string, ControllableSession>();
+  readonly interactiveSessions = new Map<string, ControllableInteractiveSession>();
+
+  async detect(): Promise<ProviderStatus> {
+    return {
+      id: this.id,
+      name: this.name,
+      installed: true,
+      authenticated: 'authenticated',
+      capabilities: {
+        resume: false,
+        cancellation: true,
+        tools: false,
+        usage: false,
+        thinking: false,
+      },
+    };
+  }
+
+  startSession(options: StartSessionOptions): ProviderSessionHandle {
+    const session = makeControllableSession();
+    this.legacySessions.set(options.sessionId, session);
+    return session.handle;
+  }
+
+  async startInteractiveSession(
+    options: StartInteractiveSessionOptions,
+  ): Promise<InteractiveProviderSessionHandle> {
+    const session = makeControllableInteractiveSession();
+    this.interactiveSessions.set(options.sessionId, session);
+    return session.handle;
+  }
+}
+
+describe('SessionManager — admission control (issue #52)', () => {
+  function setupMixed(maxActiveSessions: number) {
+    const provider = new MixedAdmissionProvider();
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const admission = new SessionAdmissionController({ maxActiveSessions });
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, { admission });
+    return { provider, admission, sessionManager };
+  }
+
+  it('rejects the (N+1)th start once N sessions are pending/active, across mixed v1 and v2 calls, with no phantom durable record', async () => {
+    const { provider, sessionManager } = setupMixed(2);
+
+    const a = sessionManager.create('claude', '/tmp', 'a');
+    const b = await sessionManager.createInteractive(
+      'claude',
+      '/tmp',
+      'b',
+      INTERACTIVE_SELECTION,
+      INTERACTIVE_TRANSPORT,
+      INTERACTIVE_EXECUTION_ID,
+      INTERACTIVE_TURN_ID,
+    );
+
+    expect(() => sessionManager.create('claude', '/tmp', 'c')).toThrow(SessionCapacityError);
+    await expect(
+      sessionManager.createInteractive(
+        'claude',
+        '/tmp',
+        'd',
+        INTERACTIVE_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+      ),
+    ).rejects.toThrow(SessionCapacityError);
+
+    // Exactly the two admitted sessions exist; the rejected attempts never reached the provider
+    // and left no durable record behind.
+    expect(
+      sessionManager
+        .list()
+        .map((session) => session.id)
+        .sort(),
+    ).toEqual([a.id, b.id].sort());
+    expect(provider.legacySessions.size).toBe(1);
+    expect(provider.interactiveSessions.size).toBe(1);
+  });
+
+  it('N+1 simultaneous starts at limit N launch exactly N providers and reject exactly one', async () => {
+    const { provider, admission, sessionManager } = setupMixed(3);
+
+    const results = await Promise.allSettled([
+      (async () => sessionManager.create('claude', '/tmp', 'a'))(),
+      sessionManager.createInteractive(
+        'claude',
+        '/tmp',
+        'b',
+        INTERACTIVE_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+      ),
+      (async () => sessionManager.create('claude', '/tmp', 'c'))(),
+      sessionManager.createInteractive(
+        'claude',
+        '/tmp',
+        'd',
+        INTERACTIVE_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+      ),
+    ]);
+
+    const fulfilled = results.filter((result) => result.status === 'fulfilled');
+    const rejected = results.filter((result) => result.status === 'rejected');
+    expect(fulfilled).toHaveLength(3);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(SessionCapacityError);
+    expect(admission.activeCount).toBe(3);
+    expect(sessionManager.list()).toHaveLength(3);
+    expect(provider.legacySessions.size + provider.interactiveSessions.size).toBe(3);
+  });
+
+  it('releases the slot exactly once on normal completion, making it immediately reusable', async () => {
+    const { provider, sessionManager } = setupMixed(1);
+    const a = sessionManager.create('claude', '/tmp', 'a');
+    expect(() => sessionManager.create('claude', '/tmp', 'blocked')).toThrow(SessionCapacityError);
+
+    provider.legacySessions.get(a.id)!.push({ type: 'session.completed' });
+    provider.legacySessions.get(a.id)!.finish();
+    await tick();
+
+    const b = sessionManager.create('claude', '/tmp', 'b');
+    expect(b.id).not.toBe(a.id);
+    expect(
+      sessionManager
+        .list()
+        .map((session) => session.id)
+        .sort(),
+    ).toEqual([a.id, b.id].sort());
+  });
+
+  it('releases the slot on cancel()', async () => {
+    const { provider, sessionManager } = setupMixed(1);
+    const a = sessionManager.create('claude', '/tmp', 'a');
+    expect(() => sessionManager.create('claude', '/tmp', 'blocked')).toThrow(SessionCapacityError);
+
+    const testSession = provider.legacySessions.get(a.id)!;
+    // Simulate the provider actually reacting to cancellation, the way run-session.ts does:
+    // handle.cancel() alone doesn't end the event stream, so runtime.done never resolves without it.
+    const cancelling = sessionManager.cancel(a.id);
+    testSession.push({ type: 'session.cancelled' });
+    testSession.finish();
+    await cancelling;
+    await tick();
+
+    const b = sessionManager.create('claude', '/tmp', 'b');
+    expect(b.id).not.toBe(a.id);
+  });
+
+  it('releases the slot on remove()', async () => {
+    const { provider, sessionManager } = setupMixed(1);
+    const a = sessionManager.create('claude', '/tmp', 'a');
+    expect(() => sessionManager.create('claude', '/tmp', 'blocked')).toThrow(SessionCapacityError);
+
+    const testSession = provider.legacySessions.get(a.id)!;
+    const removing = sessionManager.remove(a.id);
+    testSession.push({ type: 'session.cancelled' });
+    testSession.finish();
+    await removing;
+    await tick();
+
+    const b = sessionManager.create('claude', '/tmp', 'b');
+    expect(b.id).not.toBe(a.id);
+  });
+
+  it('releases the slot when interactive session startup fails before the runtime is ever admitted', async () => {
+    const failing = new PendingInteractiveProvider();
+    const registry = new ProviderRegistry();
+    registry.register(failing);
+    const admission = new SessionAdmissionController({ maxActiveSessions: 1 });
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, { admission });
+
+    const controller = new AbortController();
+    const starting = sessionManager.createInteractive(
+      failing.id,
+      '/tmp',
+      'hello',
+      INTERACTIVE_SELECTION,
+      INTERACTIVE_TRANSPORT,
+      INTERACTIVE_EXECUTION_ID,
+      INTERACTIVE_TURN_ID,
+      controller.signal,
+    );
+    controller.abort();
+    await expect(starting).rejects.toThrow();
+    expect(admission.activeCount).toBe(0);
+
+    // The freed slot is immediately usable by a fresh start.
+    const session = sessionManager.create(failing.id, '/tmp', 'reuses the freed slot');
+    expect(session.id).toBeDefined();
+  });
+
+  it('rejects invalid startup configuration (maxActiveSessions out of the 1..32 range) synchronously', () => {
+    expect(() => new SessionAdmissionController({ maxActiveSessions: 0 })).toThrow();
+    expect(() => new SessionAdmissionController({ maxActiveSessions: 33 })).toThrow();
   });
 });

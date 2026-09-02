@@ -12,6 +12,7 @@ import {
 import { buildProviderRegistry } from './providers.js';
 import { buildServer } from './server.js';
 import { SessionManager } from './session-manager.js';
+import { SessionAdmissionController, resolveMaxActiveSessions } from './session-admission.js';
 import { FileSessionStore } from './session-store.js';
 import { FileExecutionGraphStore } from './execution-graph-store.js';
 import { stateDirectory } from './state-directory.js';
@@ -44,9 +45,15 @@ async function main() {
   const registry = buildProviderRegistry(logger);
   const durableStateDirectory = stateDirectory({ appId });
   const subagentStore = new SubagentGraphStore(join(durableStateDirectory, 'subagents-v1.json'));
-  const worktreeManager = new OwnedWorktreeManager(join(durableStateDirectory, 'worktrees'), join(durableStateDirectory, 'worktrees-v1.json'));
+  const worktreeManager = new OwnedWorktreeManager(
+    join(durableStateDirectory, 'worktrees'),
+    join(durableStateDirectory, 'worktrees-v1.json'),
+  );
   await worktreeManager.load();
-  const attachmentStore = new AttachmentStore(join(durableStateDirectory, 'attachments-v1'), join(durableStateDirectory, 'attachments-v1.json'));
+  const attachmentStore = new AttachmentStore(
+    join(durableStateDirectory, 'attachments-v1'),
+    join(durableStateDirectory, 'attachments-v1.json'),
+  );
   await attachmentStore.load();
   const auditStore = new AuditStore(join(durableStateDirectory, 'audit-v1.jsonl'));
   const trustStore = new WorkspaceTrustStore(
@@ -78,11 +85,18 @@ async function main() {
       interruptedExecutions: graphRecovery.interruptedSessionIds.length,
     });
   }
+  // Fails fast (throws, caught by main().catch() below) on an out-of-range or non-integer value
+  // rather than silently clamping, so a misconfigured deployment never launches with a capacity
+  // limit it never intended.
+  const admission = new SessionAdmissionController({
+    maxActiveSessions: resolveMaxActiveSessions(process.env.AGENT_DOCK_MAX_ACTIVE_SESSIONS),
+  });
   const sessionManager = new SessionManager(registry, logger, sessionStore, {
     auditStore,
     trustStore,
     providerStateDirectory: durableStateDirectory,
     executionGraphStore,
+    admission,
   });
   const token = generateToken();
 

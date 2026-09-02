@@ -5,6 +5,7 @@ import type { ProviderRegistry } from '@agent-dock/agent-runtime';
 import type { SessionManager } from '../session-manager.js';
 import type { WorkspaceTrustStore } from '../workspace-trust-store.js';
 import { resolveWorkspaceIdentity, revalidateWorkspaceIdentity } from '../workspace-identity.js';
+import { SessionCapacityError } from '../session-admission.js';
 
 export function registerSessionRoutes(
   app: FastifyInstance,
@@ -12,61 +13,75 @@ export function registerSessionRoutes(
   registry: ProviderRegistry,
   trustStore?: WorkspaceTrustStore,
 ): void {
-  app.post('/sessions', async (req, reply) => {
-    const parsed = createSessionRequestSchema.safeParse(req.body);
-    if (!parsed.success) {
-      reply.code(400).send({ error: 'invalid request body', details: parsed.error.flatten() });
-      return;
-    }
-    const { provider, cwd, prompt, resumeProviderSessionId } = parsed.data;
-
-    const providerImpl = registry.get(provider);
-    if (!providerImpl) {
-      reply.code(400).send({ error: `unsupported provider: ${provider}` });
-      return;
-    }
-    const workspace = trustStore
-      ? await resolveWorkspaceIdentity(cwd).catch(() => undefined)
-      : undefined;
-    if (trustStore) {
-      if (!workspace) {
-        reply.code(400).send({ error: 'workspace could not be resolved' });
+  app.post(
+    '/sessions',
+    // Parity with protocol v2's start-rate limiter (AD-52): a secondary burst control alongside
+    // the shared active-session admission cap below.
+    { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } },
+    async (req, reply) => {
+      const parsed = createSessionRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        reply.code(400).send({ error: 'invalid request body', details: parsed.error.flatten() });
         return;
       }
-      if ((await trustStore.inspect(workspace)).state !== 'trusted') {
-        reply.code(409).send({ error: 'workspace is not trusted', code: 'workspace_untrusted' });
+      const { provider, cwd, prompt, resumeProviderSessionId } = parsed.data;
+
+      const providerImpl = registry.get(provider);
+      if (!providerImpl) {
+        reply.code(400).send({ error: `unsupported provider: ${provider}` });
         return;
       }
-    }
-    if (resumeProviderSessionId && !(await providerImpl.detect()).capabilities.resume) {
-      reply.code(400).send({ error: `provider does not support resume: ${provider}` });
-      return;
-    }
-    if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
-      reply.code(400).send({ error: `working directory does not exist: ${cwd}` });
-      return;
-    }
+      const workspace = trustStore
+        ? await resolveWorkspaceIdentity(cwd).catch(() => undefined)
+        : undefined;
+      if (trustStore) {
+        if (!workspace) {
+          reply.code(400).send({ error: 'workspace could not be resolved' });
+          return;
+        }
+        if ((await trustStore.inspect(workspace)).state !== 'trusted') {
+          reply.code(409).send({ error: 'workspace is not trusted', code: 'workspace_untrusted' });
+          return;
+        }
+      }
+      if (resumeProviderSessionId && !(await providerImpl.detect()).capabilities.resume) {
+        reply.code(400).send({ error: `provider does not support resume: ${provider}` });
+        return;
+      }
+      if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
+        reply.code(400).send({ error: `working directory does not exist: ${cwd}` });
+        return;
+      }
 
-    if (
-      trustStore &&
-      workspace &&
-      (!(await revalidateWorkspaceIdentity(workspace)) ||
-        (await trustStore.inspect(workspace)).state !== 'trusted')
-    ) {
-      reply.code(409).send({ error: 'workspace trust changed', code: 'workspace_untrusted' });
-      return;
-    }
+      if (
+        trustStore &&
+        workspace &&
+        (!(await revalidateWorkspaceIdentity(workspace)) ||
+          (await trustStore.inspect(workspace)).state !== 'trusted')
+      ) {
+        reply.code(409).send({ error: 'workspace trust changed', code: 'workspace_untrusted' });
+        return;
+      }
 
-    const session = sessionManager.create(
-      provider,
-      workspace?.canonicalPath ?? cwd,
-      prompt,
-      resumeProviderSessionId,
-      1,
-      workspace,
-    );
-    reply.code(201).send(session);
-  });
+      try {
+        const session = sessionManager.create(
+          provider,
+          workspace?.canonicalPath ?? cwd,
+          prompt,
+          resumeProviderSessionId,
+          1,
+          workspace,
+        );
+        reply.code(201).send(session);
+      } catch (error) {
+        if (error instanceof SessionCapacityError) {
+          reply.code(429).send({ error: error.message, code: error.code });
+          return;
+        }
+        throw error;
+      }
+    },
+  );
 
   app.get('/sessions/:sessionId', async (req, reply) => {
     const params = sessionIdParamSchema.safeParse(req.params);

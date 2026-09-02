@@ -24,6 +24,7 @@ const toolCallId = '123e4567-e89b-42d3-a456-426614174005';
 const executionId = '123e4567-e89b-42d3-a456-426614174006';
 const questionId = '123e4567-e89b-42d3-a456-426614174007';
 const optionId = '123e4567-e89b-42d3-a456-426614174008';
+const agentId = '123e4567-e89b-42d3-a456-426614174009';
 const timestamp = '2026-08-30T12:00:00.000Z';
 const selection = {
   transport: 'cli',
@@ -441,6 +442,14 @@ describe('protocol v2 event envelope schema', () => {
         toolName: 'read_file',
         status: 'completed',
         summary: 'done',
+      },
+      {
+        ...turnMeta,
+        type: 'subagent.status',
+        agentId,
+        name: 'reviewer',
+        status: 'running',
+        controls: { steer: false, interrupt: false, cancel: false },
       },
       {
         ...turnMeta,

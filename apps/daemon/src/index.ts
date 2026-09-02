@@ -83,6 +83,7 @@ async function main() {
     trustStore,
     providerStateDirectory: durableStateDirectory,
     executionGraphStore,
+    subagentStore,
   });
   const token = generateToken();
 

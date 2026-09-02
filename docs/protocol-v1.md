@@ -35,6 +35,19 @@ section is the protocol-level shape.
 V1 has no trust-management route or trust fields. In the production daemon, clients inspect and
 trust the exact workspace incarnation through `/v2/workspaces` before calling `POST /sessions`.
 
+`CreateSessionRequest`'s optional `resumeProviderSessionId` accepts an already-known
+provider-native id (e.g. a Claude CLI session id or Codex thread id) and passes it straight through
+to the provider's own resume flag (`claude --resume <id>` / `codex exec resume <id>`); the daemon
+never verifies that id against anything, and rejects it up front only if the target provider's
+`ProviderStatus.capabilities.resume` is `false`. This is a renderer-supplied, daemon-unverified
+value with **no durable lineage** — it is not the same mechanism as v2's `session.resume`/
+`session.fork`, which requires the daemon to have itself stored a durable, non-secret account/model
+binding for a terminal parent session before it will ever negotiate continuation (see
+[capability-security-v2.md](capability-security-v2.md#evidence-matrix)). A provider whose v1
+`resume` flag works (its CLI genuinely accepts a native id) is not thereby "v2-resume-capable";
+those are two independent claims, and issue #54 exists specifically because Claude's v1 flag being
+real was previously conflated with its (currently nonexistent) v2 durable binding support.
+
 ## The `AgentEvent` union
 
 Defined once, in `packages/shared/src/events.ts`. Every provider adapter normalizes its CLI's

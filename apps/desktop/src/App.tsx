@@ -411,6 +411,15 @@ export function App() {
     cwd.trim().length > 0 &&
     prompt.trim().length > 0;
   const selectedTerminal = selectedEntry ? isTerminal(selectedEntry.session) : false;
+  // A capability the daemon has not negotiated as supported can never actually dispatch (see
+  // apps/daemon/src/v2-legacy-provider.ts, issue #54) — hide the corresponding action rather than
+  // let the user hit a guaranteed server-side rejection.
+  const sessionSupports = (capabilityId: 'session.resume' | 'session.fork'): boolean =>
+    selectedSessionProviderStatus?.capabilities.some(
+      (record) => record.id === capabilityId && record.support === 'supported',
+    ) ?? false;
+  const canResumeSelected = selectedTerminal && sessionSupports('session.resume');
+  const canForkSelected = selectedTerminal && sessionSupports('session.fork');
 
   return (
     <div className="app-shell">
@@ -518,12 +527,41 @@ export function App() {
               <McpPanel provider={provider} cwd={cwd} />
             </section>
             <section className="card">
-              <div className="section-heading"><div><span className="eyebrow">Trust inventory</span><h2>Skills, plugins & hooks</h2></div></div>
+              <div className="section-heading">
+                <div>
+                  <span className="eyebrow">Trust inventory</span>
+                  <h2>Skills, plugins & hooks</h2>
+                </div>
+              </div>
               <ComponentPanel provider={provider} cwd={cwd} />
             </section>
-            <section className="card"><div className="section-heading"><div><span className="eyebrow">Isolation</span><h2>Owned worktrees</h2></div></div><WorktreePanel cwd={cwd} /></section>
-            <section className="card"><div className="section-heading"><div><span className="eyebrow">Execution tree</span><h2>Child agents</h2></div></div><AgentGraphPanel sessionId={selectedEntry?.session.id} /></section>
-            <section className="card"><div className="section-heading"><div><span className="eyebrow">Inputs & outputs</span><h2>Multimodal workflow</h2></div></div><WorkflowPanel sessionId={selectedEntry?.session.id} /></section>
+            <section className="card">
+              <div className="section-heading">
+                <div>
+                  <span className="eyebrow">Isolation</span>
+                  <h2>Owned worktrees</h2>
+                </div>
+              </div>
+              <WorktreePanel cwd={cwd} />
+            </section>
+            <section className="card">
+              <div className="section-heading">
+                <div>
+                  <span className="eyebrow">Execution tree</span>
+                  <h2>Child agents</h2>
+                </div>
+              </div>
+              <AgentGraphPanel sessionId={selectedEntry?.session.id} />
+            </section>
+            <section className="card">
+              <div className="section-heading">
+                <div>
+                  <span className="eyebrow">Inputs & outputs</span>
+                  <h2>Multimodal workflow</h2>
+                </div>
+              </div>
+              <WorkflowPanel sessionId={selectedEntry?.session.id} />
+            </section>
             <section className="card">
               <div className="section-heading">
                 <div>
@@ -621,7 +659,7 @@ export function App() {
                   className="button button--secondary"
                   type="button"
                   onClick={() => void handleContinuation('resume')}
-                  disabled={!selectedTerminal || !prompt.trim() || creating}
+                  disabled={!canResumeSelected || !prompt.trim() || creating}
                 >
                   Resume
                 </button>
@@ -629,7 +667,7 @@ export function App() {
                   className="button button--secondary"
                   type="button"
                   onClick={() => void handleContinuation('fork')}
-                  disabled={!selectedTerminal || !prompt.trim() || creating}
+                  disabled={!canForkSelected || !prompt.trim() || creating}
                 >
                   Fork
                 </button>

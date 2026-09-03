@@ -442,11 +442,11 @@ compatibility bridge retains its v1 process-runner limits.
 The current v2 implementation provides shared schemas and negotiation, provider discovery,
 durable sessions/history, trust and audit stores, versioned routes and client APIs, a
 provider-neutral supervisor, bounded SSE delivery, and narrow Electron/preload methods.
-`FakeProvider` exercises deterministic rich-interaction fixtures. Legacy Claude/Codex replay
+`FakeProvider` exercises deterministic rich-interaction fixtures. CLI one-shot compatibility replay
 fixtures remain pinned separately from the native-transport conformance harnesses.
 
 The Claude Agent SDK transport is available only when its pinned Windows asset, approved
-authentication source, and trusted-workspace requirements are satisfied; the legacy Claude CLI
+authentication source, and trusted-workspace requirements are satisfied; the Claude CLI
 compatibility path remains `legacy-one-shot`. Codex app-server is available only for its exact
 validated runtime, authentication, and trusted-workspace scope, with `legacy-one-shot` retained as
 the compatibility path. The Claude SDK launch profile disables project settings, MCP, hooks,

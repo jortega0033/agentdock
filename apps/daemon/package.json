@@ -11,7 +11,8 @@
     "start": "tsx src/index.ts",
     "build": "tsc -p tsconfig.build.json --noEmit && node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "smoke:live-providers": "tsx src/live-smoke/cli.ts"
   },
   "dependencies": {
     "@agent-dock/agent-runtime": "workspace:*",
@@ -22,6 +23,7 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@agent-dock/client": "workspace:*",
     "@types/node": "^22.10.5",
     "esbuild": "^0.25.0",
     "tsx": "^4.19.2",

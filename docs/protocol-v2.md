@@ -80,6 +80,7 @@ provider-control error when the selected provider does not implement the operati
 | `POST /v2/worktrees/cleanup`                             |   `200` | Clean up an owned worktree only when its current state is safe                  |
 | `POST /v2/attachments`                                   |   `201` | Stage one bounded attachment from an authenticated byte stream                  |
 | `GET /v2/attachments`                                    |   `200` | List staged attachment metadata                                                 |
+| `DELETE /v2/attachments/:id`                              |   `204` | Delete one staged attachment                                                    |
 | `POST /v2/attachments/reference`                         |   `200` | Bind staged attachments to an existing session                                  |
 | `POST /v2/workflows/structured/validate`                 |   `200` | Validate caller-supplied output against a bounded JSON Schema                   |
 

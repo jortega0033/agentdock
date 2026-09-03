@@ -55,7 +55,7 @@ The daemon refuses to start if its app id's discovery file's recorded pid is sti
 
 ```
 Error: another agent-dock daemon (app id "agent-dock") is already running (pid <pid>,
-discovery file <path>). Only one daemon per app id is supported at a time, stop it first.
+discovery file <path>). Only one daemon per app id is supported at a time. Stop it first.
 ```
 
 This is a best-effort **per app id** check, not a machine-global or atomic lock.
@@ -83,9 +83,9 @@ another app id's daemon, since they're different files. See
 | Route                              | Auth     | Behavior                                                                                                                                                                                                                      |
 | ---------------------------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `GET /health`                      | none     | `{ status: 'ok', uptimeSeconds, protocolVersion: 1, supportedProtocolVersions: [1, 2] }`                                                                                                                                      |
-| `GET /providers`                   | required | `{ providers: ProviderStatus[] }`, runs each adapter's `detect()`                                                                                                                                                             |
-| `GET /providers/:providerId`       | required | One `ProviderStatus`, or `404` for an unregistered id                                                                                                                                                                         |
-| `POST /sessions`                   | required | Body validated against `createSessionRequestSchema`. `400` for an invalid provider/resume/cwd; `409 workspace_untrusted` unless the current workspace incarnation is trusted; `201` + `AgentSession` on success               |
+| `GET /providers`                   | required | `{ providers: ProviderStatus[] }` with `accountFingerprint` and `selectedModel` stripped from each record, runs each adapter's `detect()`                                                                                    |
+| `GET /providers/:providerId`       | required | One `ProviderStatus` (same stripped fields), or `404` for an unregistered id                                                                                                                                                  |
+| `POST /sessions`                   | required | Rate-limited to 30 requests/minute. Body validated against `createSessionRequestSchema`. `400` for an invalid provider/resume/cwd; `409 workspace_untrusted` unless the current workspace incarnation is trusted; `429 session_capacity_exceeded` past the shared admission cap (see [Session admission](#session-admission) below); `201` + `AgentSession` on success |
 | `GET /sessions/:sessionId`         | required | Current `AgentSession` record, or `404`                                                                                                                                                                                       |
 | `GET /sessions/:sessionId/events`  | required | SSE stream, see [Event history and replay](#event-history-and-replay) below                                                                                                                                                   |
 | `POST /sessions/:sessionId/cancel` | required | `202` + `{ status: 'cancelling' }`. `404` for an unknown id **or** a session that's already terminal: cancelling a finished session is never reported as a success                                                            |
@@ -106,6 +106,14 @@ dispatch accepted interactive commands through
 `POST /v2/sessions/:sessionId/commands`. The unversioned routes above remain the v1 compatibility
 and rollback path. The complete v2 route, status, and wire-shape tables live in
 [protocol-v2.md](protocol-v2.md).
+
+## Session admission
+
+`POST /sessions` and `POST /v2/sessions` (including resume/fork) share one daemon-wide admission
+gate (`apps/daemon/src/session-admission.ts`): at most `AGENT_DOCK_MAX_ACTIVE_SESSIONS` provider
+processes pending-start-or-running at once, default 4, hard ceiling 32. An out-of-range or
+non-integer value fails the daemon at startup rather than silently clamping. Past the limit, a new
+session request gets `429 session_capacity_exceeded` immediately rather than queueing.
 
 ## Session lifecycle: SessionManager, SessionStore
 
@@ -165,7 +173,10 @@ available when supported; it is not cancellation or close.
 ## Event history and replay
 
 `SessionManager` buffers every session's emitted `AgentEventEnvelope`s in memory, capped at 5,000
-per session (`MAX_STORED_EVENTS_PER_SESSION`). `GET /sessions/:id/events`:
+events **or** 16 MiB of serialized envelopes per session (`MAX_STORED_EVENTS_PER_SESSION`,
+`MAX_STORED_EVENT_BYTES_PER_SESSION`), whichever is hit first. A single normalized v1 envelope over
+1 MiB (`MAX_LEGACY_EVENT_ENVELOPE_BYTES`) fails the whole session with a synthetic
+`session.failed` rather than being buffered or streamed. `GET /sessions/:id/events`:
 
 1. Writes the standard `text/event-stream` headers, then an SSE `:ok` comment immediately.
 2. Replays every buffered event from `sequence` 0 (or from `Last-Event-ID + 1`, if that header was
@@ -175,20 +186,25 @@ per session (`MAX_STORED_EVENTS_PER_SESSION`). `GET /sessions/:id/events`:
    `session.cancelled`) is written: the client never has to guess whether more events might still
    arrive.
 
-Past 5,000 buffered events, further events are no longer available to replay to a _new_
-subscriber, but they are always still delivered live to every currently-connected subscriber,
-including the terminal event: the cap only ever bounds replay history, never live delivery.
-`sequence` is stamped from a counter independent of the history buffer's length, so it keeps
-incrementing past the cap rather than resetting or gapping. The daemon logs a warning once history
-stops growing, rather than growing memory unbounded. This is regression-tested directly in
-`apps/daemon/test/session-manager.test.ts` (drives a session past the cap and asserts the terminal
-event still arrives live). See [protocol-v1.md#ordering-guarantees](protocol-v1.md#ordering-guarantees)
-for the full ordering contract this upholds.
+Past the 5,000-event/16 MiB cap, further events are no longer available to replay to a _new_
+subscriber. `sequence` is stamped from a counter independent of the history buffer's length, so it
+keeps incrementing past the cap rather than resetting or gapping. The daemon logs a warning once
+history stops growing, rather than growing memory unbounded. See
+[protocol-v1.md#ordering-guarantees](protocol-v1.md#ordering-guarantees) for the full ordering
+contract this upholds.
+
+Live delivery to an already-connected subscriber is bounded too, by the same per-connection writer
+v2 uses (`apps/daemon/src/sse-writer.ts`): each v1 SSE connection gets an independent 256-event /
+4 MiB write queue (`apps/daemon/src/v1-sse-writer.ts`). A subscriber that falls behind past that
+queue has its connection dropped and ended outright — v1 has no overflow frame to announce it
+(unlike v2's `stream.error`/`stream_overflow` below), so a backpressured v1 client sees the
+connection simply close, potentially before the terminal event. This is regression-tested in
+`apps/daemon/test/session-manager.test.ts`.
 
 Protocol v2 keeps a separate normalized replay window capped at 5,000 events or 16 MiB, evicting
 oldest frames first. A resume cursor outside `[earliestSequence, nextSequence]` returns
-`409 replay_gap`. Each connected v2 subscriber also gets an independent 256-event / 4 MiB write
-queue. Backpressure on one connection cannot stall the provider or another subscriber. A terminal
+`409 replay_gap`. Each connected v2 subscriber gets the same 256-event / 4 MiB write queue described
+above. Backpressure on one connection cannot stall the provider or another subscriber. A terminal
 event closes only after queued frames drain; subscriber overflow drops that connection's queue and
 ends it with `stream.error` / `stream_overflow`, including the last sequence handed to the socket
 when available.
@@ -237,8 +253,9 @@ the record, so deleting a live session doesn't orphan its process either.
 
 On `SIGINT`/`SIGTERM`, the daemon (`apps/daemon/src/index.ts`): cancels every in-flight session and
 waits (bounded, 16 seconds by default, covering interactive graceful-close and force-reap phases)
-for their processes to actually exit
-(`SessionManager.cancelAll()`), closes the Fastify server, removes the discovery file, then exits.
+for their processes to actually exit (`SessionManager.cancelAll()`), closes every open MCP stdio
+connection (`closeAllMcpConnections()`), closes the Fastify server (bounded: 5 seconds, then
+`closeAllConnections()` plus a further 1-second bound), removes the discovery file, then exits.
 This is idempotent: a second signal while shutdown is already in progress is a no-op. The bounded
 wait means shutdown won't hang forever if teardown stalls. Legacy cancellation awaits the owned
 process-tree termination/reap operation; the interactive supervisor performs its own bounded

@@ -177,11 +177,16 @@ correct for what this daemon actually needs to be reachable by.
 ## What the daemon will never do
 
 - Read a Claude/Codex/any-provider credential file, keychain entry, or OAuth token directly.
-- Accept an executable path or name from a request body: `POST /sessions` only accepts a
+- Accept an executable path or name from a request body for `POST /sessions`: it only accepts a
   `provider` id from a closed enum (`packages/shared/src/schemas.ts`); the actual executable is
   always resolved internally via `findExecutable()`. **Verified**: an unknown `provider` value
   fails Zod validation with `400` before reaching any handler; extra/unknown body fields (e.g. an
   `executable` or `env` field slipped into the request) are silently dropped by Zod, never read.
+  This invariant is narrower than it may first read: `POST /v2/integrations/mcp/configure`
+  (trusted-workspace-gated) does accept an arbitrary `command`/`args` for a stdio MCP server
+  (`packages/shared/src/mcp-control-v2.ts`, `apps/daemon/src/routes/v2-mcp.ts`), which the daemon
+  later spawns itself on catalog/invoke -- a deliberate, gated exception, not an oversight in this
+  bullet's original scope.
 - Interpolate a prompt (or anything else request-supplied) into a shell string. Every process is
   spawned with `shell: false` and an argv array (`packages/agent-runtime/src/process/spawn-process.ts`).
 - Listen on any interface other than `127.0.0.1` by default. **Verified**: `http://[::1]:<port>`
@@ -232,12 +237,20 @@ Windows packaging workflow; focused unit tests cover both platform branches.
 ## Provider subprocess environment isolation
 
 Every provider subprocess -- one-shot Claude/Codex, Codex app-server, version/auth probes, and
-provider CLI control operations (MCP list/configure/act/catalog) -- is spawned with a sanitized,
-default-deny environment, never the daemon's full `process.env`. A downstream fork that adds
-database or connector secrets to the daemon process cannot have those secrets silently reach a
-spawned provider CLI just because a call site forgot to pass an explicit environment: the *default*
-itself, at every low-level spawn point (`spawnProcess`/`execCapture` callers, the Codex app-server's
-own child spawn), is the sanitized environment, not raw inheritance.
+provider CLI control operations that shell out to the CLI itself (MCP list/configure/act via
+`claude mcp ...`/`codex mcp ...`) -- is spawned with a sanitized, default-deny environment, never
+the daemon's full `process.env`. A downstream fork that adds database or connector secrets to the
+daemon process cannot have those secrets silently reach a spawned provider CLI just because a call
+site forgot to pass an explicit environment: the *default* itself, at every low-level spawn point
+(`spawnProcess`/`execCapture` callers, the Codex app-server's own child spawn), is the sanitized
+environment, not raw inheritance.
+
+**Known gap:** this does not yet cover the MCP *server* subprocess itself -- the stdio process an
+enabled MCP server config actually starts for catalog/invoke
+(`packages/agent-runtime/src/mcp/stdio-mcp-connection.ts`) is a separate spawn path from the
+provider-CLI control operations above, and currently receives the daemon's full `process.env`
+rather than the sanitized set. Tracked in #103; do not rely on this section for that path until
+it's closed.
 
 `packages/agent-runtime/src/process/provider-environment.ts` builds it:
 `buildLegacyProviderEnvironment(env, { provider })` starts from nothing and copies in only two

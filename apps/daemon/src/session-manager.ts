@@ -1057,6 +1057,7 @@ export class SessionManager {
         session.status = 'failed';
         session.completedAt = new Date().toISOString();
         session.error = event.message;
+        this.logger.warn('legacy session failed', { sessionId: session.id, message: event.message });
         break;
       case 'session.cancelled':
         session.status = 'cancelled';
@@ -1077,6 +1078,11 @@ export class SessionManager {
         session.status = 'failed';
         session.completedAt = new Date().toISOString();
         session.error = event.message;
+        this.logger.warn('interactive session failed', {
+          sessionId: session.id,
+          code: event.code,
+          message: event.message,
+        });
         break;
       case 'session.cancelled':
         session.status = 'cancelled';

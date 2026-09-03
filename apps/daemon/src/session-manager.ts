@@ -27,13 +27,17 @@ import {
   type ProviderContinuationEvidence,
   type ProviderDetectionOptions,
   type ProviderRegistry,
+  type ProviderAttachmentInput,
   type ProviderSessionHandle,
   type StartSessionOptions,
   type WorkspaceTrustEvidence,
 } from '@agent-dock/agent-runtime';
+import { basename } from 'node:path';
 import { MemorySessionStore, type SessionStore } from './session-store.js';
+import type { AttachmentStore } from './attachment-store.js';
 import type { AuditStore } from './audit-store.js';
 import type { ExecutionGraphStore } from './execution-graph-store.js';
+import type { SubagentGraphStore } from './subagent-graph-store.js';
 import {
   InteractionState,
   type InteractionResolutionReason,
@@ -42,6 +46,7 @@ import {
 import { evaluatePermissionPolicy, normalizeApprovalAction } from './permission-policy.js';
 import type { WorkspaceTrustStore } from './workspace-trust-store.js';
 import { revalidateWorkspaceIdentity, type WorkspaceIdentity } from './workspace-identity.js';
+import { SessionAdmissionController, UNCONFIGURED_ADMISSION_CEILING } from './session-admission.js';
 
 interface RuntimeStateBase {
   protocolVersion: 1 | 2;
@@ -54,6 +59,12 @@ interface LegacyRuntimeState extends RuntimeStateBase {
   kind: 'legacy';
   handle: ProviderSessionHandle;
   events: AgentEventEnvelope[];
+  /** UTF-8 serialized bytes of every envelope currently in `events`, kept incrementally instead of
+   * re-summed on each append so a long-running session's replay accounting stays O(1) per event. */
+  replayBytes: number;
+  /** True once the 5,000-event or 16 MiB replay ceiling has been hit, so the daemon logs the
+   * "history full" warning at most once per session instead of once per subsequent event. */
+  replayFull: boolean;
   listeners: Set<(index: number, event: AgentEventEnvelope) => void>;
   nextSequence: number;
 }
@@ -89,6 +100,8 @@ interface InteractiveRuntimeState extends RuntimeStateBase {
   providerSessionId?: string;
   runtimeMetadata?: Readonly<ProviderRuntimeMetadata>;
   continuationEvidence?: Readonly<ProviderContinuationEvidence>;
+  /** Attachment ids bound to this session at creation (issue #59), released once it terminates. */
+  attachmentIds?: readonly string[];
 }
 
 interface PendingInteractiveStart {
@@ -119,6 +132,14 @@ export interface SessionManagerSecurityOptions {
   interactionTimeoutMs?: number;
   providerStateDirectory?: string;
   executionGraphStore?: ExecutionGraphStore;
+  attachmentStore?: AttachmentStore;
+  subagentStore?: SubagentGraphStore;
+  /**
+   * Daemon-owned cap on concurrent pending+running provider processes, shared by every session
+   * creation path. Defaults to a generous but still-bounded ceiling when not supplied, so an
+   * embedder that never configures one still gets a structural limit rather than none.
+   */
+  admission?: SessionAdmissionController;
 }
 
 export class WorkspaceAccessError extends Error {
@@ -136,6 +157,10 @@ export type DispatchResult =
 
 const MAX_STORED_EVENTS_PER_SESSION = 5_000;
 const MAX_STORED_EVENT_BYTES_PER_SESSION = 16 * 1024 * 1024;
+/** One normalized v1 envelope over this size cannot be safely replayed or streamed at all (it
+ * would itself already exceed a single subscriber's whole queue budget); the session fails rather
+ * than silently dropping or truncating provider-controlled content. */
+const MAX_LEGACY_EVENT_ENVELOPE_BYTES = 1024 * 1024;
 const MAX_RETAINED_COMPLETED_RUNTIMES = 50;
 const MAX_PENDING_COMMANDS = 64;
 const MAX_PENDING_COMMAND_BYTES = 1024 * 1024;
@@ -173,6 +198,7 @@ export class SessionManager {
   private readonly shutdownController = new AbortController();
   private readonly blockedWorkspaces = new Set<string>();
   private readonly workspaceRevocationEpochs = new Map<string, number>();
+  private readonly admission: SessionAdmissionController;
   private shuttingDown = false;
 
   constructor(
@@ -181,6 +207,9 @@ export class SessionManager {
     private readonly store: SessionStore = new MemorySessionStore(),
     private readonly security: SessionManagerSecurityOptions = {},
   ) {
+    this.admission =
+      security.admission ??
+      new SessionAdmissionController({ maxActiveSessions: UNCONFIGURED_ADMISSION_CEILING });
     const graph = security.executionGraphStore;
     if (graph) {
       for (const session of store.list()) {
@@ -215,44 +244,57 @@ export class SessionManager {
     const providerImpl = this.registry.get(provider);
     if (!providerImpl) throw new Error(`no provider registered for id: ${provider}`);
 
-    const id = randomUUID();
-    const session = this.newSession(id, provider, cwd, prompt);
-    this.store.create(session, protocolVersion);
+    // Counted before the provider process ever launches; released exactly once, either here on
+    // any failure before the runtime is handed off, or via runtime.done once the provider stream
+    // terminates and its supervisor has reaped the host (completion, cancellation, or failure).
+    const lease = this.admission.acquire();
+    let leaseTransferred = false;
     try {
-      beforeProviderDispatch?.(session);
-    } catch (error) {
-      this.store.delete(id);
-      throw error;
+      const id = randomUUID();
+      const session = this.newSession(id, provider, cwd, prompt);
+      this.store.create(session, protocolVersion);
+      try {
+        beforeProviderDispatch?.(session);
+      } catch (error) {
+        this.store.delete(id);
+        throw error;
+      }
+      let handle: ProviderSessionHandle;
+      try {
+        handle = providerImpl.startSession({
+          sessionId: id,
+          cwd,
+          prompt,
+          resumeProviderSessionId,
+          ...(providerStatus ? { providerStatus } : {}),
+          ...(sandbox ? { sandbox } : {}),
+          ...(model ? { model } : {}),
+        });
+      } catch (error) {
+        this.store.delete(id);
+        throw error;
+      }
+      const runtime: LegacyRuntimeState = {
+        kind: 'legacy',
+        handle,
+        protocolVersion,
+        events: [],
+        replayBytes: 0,
+        replayFull: false,
+        listeners: new Set(),
+        nextSequence: 0,
+        ...(workspace ? { workspace } : {}),
+        done: Promise.resolve(),
+      };
+      this.runtime.set(id, runtime);
+      runtime.done = this.consumeLegacy(id, runtime);
+      void runtime.done.finally(() => lease.release());
+      leaseTransferred = true;
+      this.logCreated(session, !!resumeProviderSessionId, 'legacy');
+      return session;
+    } finally {
+      if (!leaseTransferred) lease.release();
     }
-    let handle: ProviderSessionHandle;
-    try {
-      handle = providerImpl.startSession({
-        sessionId: id,
-        cwd,
-        prompt,
-        resumeProviderSessionId,
-        ...(providerStatus ? { providerStatus } : {}),
-        ...(sandbox ? { sandbox } : {}),
-        ...(model ? { model } : {}),
-      });
-    } catch (error) {
-      this.store.delete(id);
-      throw error;
-    }
-    const runtime: LegacyRuntimeState = {
-      kind: 'legacy',
-      handle,
-      protocolVersion,
-      events: [],
-      listeners: new Set(),
-      nextSequence: 0,
-      ...(workspace ? { workspace } : {}),
-      done: Promise.resolve(),
-    };
-    this.runtime.set(id, runtime);
-    runtime.done = this.consumeLegacy(id, runtime);
-    this.logCreated(session, !!resumeProviderSessionId, 'legacy');
-    return session;
   }
 
   /** Rich v2 path: one supervised provider host per AgentDock session. */
@@ -273,10 +315,65 @@ export class SessionManager {
       evidence: Readonly<ProviderContinuationEvidence> | undefined,
     ) => Promise<void>,
     beforeProviderDispatch?: (session: Readonly<AgentSession>) => void,
+    initialAttachmentIds?: string[],
+    outputSchema?: unknown,
   ): Promise<AgentSession> {
     if (this.shuttingDown) {
       throw new InteractiveSessionError('session_terminal', 'session manager is shutting down');
     }
+    // Counted before the provider process ever launches; released exactly once, either here on
+    // any failure before the runtime is handed off, or via runtime.done once the provider stream
+    // terminates and its supervisor has reaped the host (completion, cancellation, or failure).
+    const lease = this.admission.acquire();
+    let leaseTransferred = false;
+    try {
+      return await this.createInteractiveAdmitted(
+        provider,
+        cwd,
+        prompt,
+        selection,
+        transport,
+        executionId,
+        turnId,
+        signal,
+        workspace,
+        providerStatus,
+        continuation,
+        expectedContinuationEvidence,
+        beforeProviderThreadStart,
+        beforeProviderDispatch,
+        initialAttachmentIds,
+        outputSchema,
+        (done) => {
+          void done.finally(() => lease.release());
+          leaseTransferred = true;
+        },
+      );
+    } finally {
+      if (!leaseTransferred) lease.release();
+    }
+  }
+
+  private async createInteractiveAdmitted(
+    provider: ProviderId,
+    cwd: string,
+    prompt: string,
+    selection: CapabilitySelection,
+    transport: ProviderTransportV2,
+    executionId: string,
+    turnId: string,
+    signal: AbortSignal | undefined,
+    workspace: WorkspaceIdentity | undefined,
+    providerStatus: ProviderStatus | undefined,
+    continuation: SessionContinuationV2 | undefined,
+    expectedContinuationEvidence: Readonly<ProviderContinuationEvidence> | undefined,
+    beforeProviderThreadStart:
+      ((evidence: Readonly<ProviderContinuationEvidence> | undefined) => Promise<void>) | undefined,
+    beforeProviderDispatch: ((session: Readonly<AgentSession>) => void) | undefined,
+    initialAttachmentIds: string[] | undefined,
+    outputSchema: unknown,
+    onAdmitted: (done: Promise<void>) => void,
+  ): Promise<AgentSession> {
     const workspaceEpoch = workspace
       ? this.currentWorkspaceEpoch(workspace.workspaceId)
       : undefined;
@@ -298,6 +395,25 @@ export class SessionManager {
         }
       : { state: 'untrusted' };
     const id = randomUUID();
+    // Resolved and bound before any session record exists (issue #59): a failed reference --
+    // cross-session id, missing attachment, quota exceeded -- throws here and nothing is ever
+    // created. `referenceForDispatch` is atomic (validates every id before mutating any record).
+    let resolvedAttachments: ProviderAttachmentInput[] | undefined;
+    if (initialAttachmentIds && initialAttachmentIds.length > 0) {
+      if (!this.security.attachmentStore) {
+        throw new Error('no attachment store is configured for this daemon');
+      }
+      const records = await this.security.attachmentStore.referenceForDispatch(
+        initialAttachmentIds,
+        id,
+      );
+      resolvedAttachments = records.map((record) => ({
+        attachmentId: record.id,
+        path: record.path,
+        mimeType: record.mimeType,
+        byteLength: record.size,
+      }));
+    }
     const session = this.newSession(id, provider, cwd, prompt);
     this.store.create(session, 2);
     try {
@@ -339,6 +455,8 @@ export class SessionManager {
         ...(this.security.providerStateDirectory
           ? { providerStateDirectory: this.security.providerStateDirectory }
           : {}),
+        ...(resolvedAttachments ? { attachments: resolvedAttachments } : {}),
+        ...(outputSchema !== undefined ? { outputSchema } : {}),
         beforeWorkDelivery: async () => {
           if (controller.signal.aborted || this.shuttingDown) {
             throw new InteractiveSessionError('session_aborted', 'session start was cancelled');
@@ -393,6 +511,9 @@ export class SessionManager {
           ? { continuationEvidence: { ...handle.continuationEvidence } }
           : {}),
         ...(workspace ? { workspace } : {}),
+        ...(resolvedAttachments
+          ? { attachmentIds: resolvedAttachments.map((attachment) => attachment.attachmentId) }
+          : {}),
         done: Promise.resolve(),
       };
       this.runtime.set(id, runtime);
@@ -409,10 +530,16 @@ export class SessionManager {
         },
       );
       runtime.done = this.consumeInteractive(id, runtime);
+      onAdmitted(runtime.done);
       this.logCreated(session, false, 'interactive');
       return session;
     } catch (error) {
       this.store.delete(id);
+      if (resolvedAttachments) {
+        await this.security.attachmentStore
+          ?.deleteAttachments(resolvedAttachments.map((attachment) => attachment.attachmentId))
+          .catch(() => undefined);
+      }
       throw error;
     } finally {
       signal?.removeEventListener('abort', relayAbort);
@@ -453,16 +580,65 @@ export class SessionManager {
         sequence,
         timestamp: new Date().toISOString(),
       };
-      if (runtime.events.length < MAX_STORED_EVENTS_PER_SESSION) {
-        runtime.events.push(envelope);
-      } else {
-        this.logger.warn('session event history full; further events will not be replayable', {
+      const bytes = utf8ByteLength(JSON.stringify(envelope));
+      if (bytes > MAX_LEGACY_EVENT_ENVELOPE_BYTES) {
+        // Deliberately stricter than the interactive path's `recordInteractiveEvent`, which drops
+        // one oversized event and lets the session continue: v1 has no per-event delivery
+        // guarantee a dropped event could quietly violate, so issue #51 asks this path to fail
+        // the whole session instead of silently discarding provider-controlled content.
+        this.logger.warn('legacy session envelope exceeded the per-frame ceiling; failing the session', {
           sessionId: id,
+          eventType: event.type,
+          bytes,
         });
+        const failure: AgentEventEnvelope = {
+          type: 'session.failed',
+          message: 'a provider event exceeded the maximum frame size and could not be delivered',
+          sequence,
+          timestamp: new Date().toISOString(),
+        };
+        this.mutateSession(id, (session) => this.applyLegacyStatus(session, failure));
+        // Storage of this terminal frame is still subject to the same replay caps below: if the
+        // history was already full, a subscriber that reconnects later (rather than staying
+        // connected) will not see it on replay. That is the same pre-existing limitation the
+        // ordinary session.completed/failed/cancelled terminal event already has once history is
+        // full (see docs/protocol-v1.md); this path does not make it worse.
+        this.storeLegacyEnvelope(id, runtime, failure, utf8ByteLength(JSON.stringify(failure)));
+        this.notifyLegacyListeners(id, runtime, sequence, failure);
+        void runtime.handle.cancel().catch(() => {});
+        break;
       }
+      this.storeLegacyEnvelope(id, runtime, envelope, bytes);
       this.notifyLegacyListeners(id, runtime, sequence, envelope);
     }
     this.markCompleted(id);
+  }
+
+  /** Bounded by both event count and UTF-8 serialized bytes (the same two limits the interactive
+   * path's `recordInteractiveEvent` enforces, though that path evicts the oldest event to make
+   * room while this one does not): once full, a v1 session simply stops accepting further
+   * replayable history rather than dropping the oldest events, so `events[index] === sequence
+   * index` keeps holding for every index `subscribe()` still has to serve. */
+  private storeLegacyEnvelope(
+    id: string,
+    runtime: LegacyRuntimeState,
+    envelope: AgentEventEnvelope,
+    bytes: number,
+  ): void {
+    if (
+      runtime.events.length < MAX_STORED_EVENTS_PER_SESSION &&
+      runtime.replayBytes + bytes <= MAX_STORED_EVENT_BYTES_PER_SESSION
+    ) {
+      runtime.events.push(envelope);
+      runtime.replayBytes += bytes;
+      return;
+    }
+    if (!runtime.replayFull) {
+      runtime.replayFull = true;
+      this.logger.warn('session event history full; further events will not be replayable', {
+        sessionId: id,
+      });
+    }
   }
 
   private async consumeInteractive(id: string, runtime: InteractiveRuntimeState): Promise<void> {
@@ -476,6 +652,7 @@ export class SessionManager {
       const index = runtime.nextEventIndex;
       runtime.nextEventIndex += 1;
       this.recordInteractiveEvent(runtime, index, event);
+      if (event.type === 'subagent.status') this.applySubagentEvent(id, event);
       for (const listener of [...runtime.listeners]) {
         try {
           listener(index, event);
@@ -487,6 +664,19 @@ export class SessionManager {
       }
     }
     this.markCompleted(id);
+    if (runtime.attachmentIds && runtime.attachmentIds.length > 0) {
+      // Issue #59: recover attachment quota once the owning session reaches a terminal state
+      // (the event stream above always ends with one), rather than waiting for the 24h
+      // unreferenced-TTL sweep that never applies to attachments a session actually used.
+      await this.security.attachmentStore
+        ?.deleteAttachments(runtime.attachmentIds)
+        .catch((error: unknown) => {
+          this.logger.warn('failed to release attachments for a terminated session', {
+            sessionId: id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+    }
   }
 
   private async prepareInteractiveEvent(
@@ -565,6 +755,59 @@ export class SessionManager {
       if (pending?.state !== 'resolving') runtime.interactions.removeResolved(event.requestId);
     }
     return event;
+  }
+
+  /**
+   * Upserts one subagent.status event into the durable child-agent graph. `startedAt` and
+   * `workspace` are carried forward from any existing node rather than reset on every update --
+   * this event's `timestamp` is when this particular status was observed, not when the child was
+   * first spawned. A failure here (e.g. a malformed parent/child relationship a provider reported
+   * out of order) is logged and dropped, never allowed to crash the session's own event loop.
+   */
+  private applySubagentEvent(
+    id: string,
+    event: Extract<AgentEventV2, { type: 'subagent.status' }>,
+  ): void {
+    const store = this.security.subagentStore;
+    if (!store) return;
+    const session = this.store.get(id);
+    if (!session) return;
+    const existing = store.graph(id).nodes.find((node) => node.id === event.agentId);
+    const terminal =
+      event.status === 'completed' || event.status === 'failed' || event.status === 'cancelled';
+    const observedAt = new Date().toISOString();
+    try {
+      store.upsert({
+        id: event.agentId,
+        sessionId: id,
+        parentId: event.parentAgentId,
+        nativeChildId: event.nativeChildId,
+        provider: session.provider,
+        role: event.role,
+        name: event.name,
+        status: event.status,
+        model: event.model,
+        startedAt: existing?.startedAt ?? observedAt,
+        updatedAt: observedAt,
+        // The first terminal timestamp wins: a replayed or duplicate terminal event (the same
+        // child reported completed/failed/cancelled more than once) must not keep sliding
+        // completedAt forward on every repeat.
+        completedAt: existing?.completedAt ?? (terminal ? observedAt : undefined),
+        toolSummary: event.toolSummary,
+        permissionSummary: event.permissionSummary,
+        workspace: existing?.workspace ?? {
+          kind: 'unknown',
+          displayName: basename(session.cwd) || 'workspace',
+        },
+        controls: event.controls,
+      });
+    } catch (error) {
+      this.logger.warn('failed to upsert subagent graph node', {
+        sessionId: id,
+        agentId: event.agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   private async resolveAutomaticApproval(

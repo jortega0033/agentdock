@@ -38,6 +38,9 @@ async function main() {
       'artifacts-json': { type: 'string', default: '[]' },
       'documented-exceptions-json': { type: 'string', default: '[]' },
       'provider-matrix-evidence': { type: 'string' },
+      'sbom-path': { type: 'string' },
+      'sbom-format': { type: 'string', default: 'CycloneDX' },
+      'provenance-url': { type: 'string' },
       out: { type: 'string' },
     },
   });
@@ -54,6 +57,22 @@ async function main() {
   const providerMatrix = await importProviderMatrixEvidence(values['provider-matrix-evidence']);
   const providerPins = await loadProviderPins();
 
+  // Same real-file-hash discipline as artifacts above -- never trust a caller-supplied checksum,
+  // always recompute it from the actual file this run produced.
+  const sbomPath = values['sbom-path'];
+  const sbom = sbomPath
+    ? await computeArtifactEvidence('sbom', sbomPath).then(({ path, sha256 }) => ({
+        available: true,
+        format: values['sbom-format'],
+        path,
+        sha256,
+      }))
+    : { available: false };
+  const provenanceUrl = values['provenance-url'];
+  const provenance = provenanceUrl
+    ? { available: true, attestationUrl: provenanceUrl }
+    : { available: false };
+
   const manifest = buildManifest({
     commit: values.commit,
     dirty: values.dirty === 'true',
@@ -66,6 +85,8 @@ async function main() {
     signingStatus: 'unsigned',
     documentedExceptions: JSON.parse(values['documented-exceptions-json']),
     providerMatrix,
+    sbom,
+    provenance,
   });
 
   await writeFile(values.out, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');

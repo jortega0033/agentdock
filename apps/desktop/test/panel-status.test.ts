@@ -23,8 +23,10 @@ describe('componentPanelStatus', () => {
 });
 
 describe('childAgentPanelStatus', () => {
-  it('is scaffold-only once a session is selected, since no adapter populates the graph', () => {
-    expect(childAgentPanelStatus(true).state).toBe('scaffold_only');
+  it('is provider-dependent once a session is selected, since only Codex app-server populates the graph', () => {
+    const status = childAgentPanelStatus(true);
+    expect(status.state).toBe('provider_dependent');
+    expect(status.explanation).toContain('Codex app-server');
   });
 
   it('falls back to an unsupported placeholder when no session is selected', () => {
@@ -35,8 +37,12 @@ describe('childAgentPanelStatus', () => {
 });
 
 describe('workflowPanelStatus', () => {
-  it('is scaffold-only regardless of provider, since no adapter dispatches staged input today', () => {
-    expect(workflowPanelStatus().state).toBe('scaffold_only');
-    expect(workflowPanelStatus().explanation).toContain('not included in any run');
+  it('is scaffold-only for this specific panel, since it never wires staged files/schemas into session creation itself', () => {
+    const status = workflowPanelStatus();
+    expect(status.state).toBe('scaffold_only');
+    expect(status.explanation).toContain('never sent to a provider from this panel');
+    // The panel is scaffold-only even though the underlying daemon API is not (issue #59) -- the
+    // explanation should still say so accurately rather than claiming nothing is dispatched at all.
+    expect(status.explanation).toContain('Codex app-server can accept');
   });
 });

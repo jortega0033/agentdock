@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { CapabilitySelection, ProviderStatus, ProviderTransportV2 } from '@agent-dock/shared';
 import {
+  capabilityRequestForMultimodal,
   planLegacyProviderFallback,
   planPinnedLegacyDispatch,
   providerFallbackScopesEqual,
@@ -240,5 +241,52 @@ describe('provider v2 fallback planning', () => {
         continuation: { kind: 'resume', providerSessionId: 'native-thread-1' },
       }).deniedReason,
     ).toBe('fallback_resume_sandbox_unsupported');
+  });
+});
+
+describe('capabilityRequestForMultimodal (issue #59)', () => {
+  it('returns the original request unchanged when no attachments or schema were supplied', () => {
+    expect(capabilityRequestForMultimodal(undefined, false, false)).toBeUndefined();
+    const request = { required: [{ id: 'session.cancel' }], optional: [], allowExperimental: false };
+    expect(capabilityRequestForMultimodal(request, false, false)).toBe(request);
+  });
+
+  it('adds input.image and output.structured as required, dropping any optional entry for either', () => {
+    const request = {
+      required: [
+        { id: 'session.cancel' },
+        {
+          id: 'output.structured',
+          constraints: { kind: 'structured_output' as const, maxSchemaBytes: 1, maxSchemaDepth: 1, maxSchemaNodes: 1 },
+        },
+      ],
+      optional: [{ id: 'input.image' }],
+      allowExperimental: false,
+    };
+    const result = capabilityRequestForMultimodal(request, true, true);
+    expect(result?.required.map((entry) => entry.id).sort()).toEqual([
+      'input.image',
+      'output.structured',
+      'session.cancel',
+    ]);
+    expect(result?.optional).toEqual([]);
+    // A pre-existing *required* entry's constraints are preserved rather than clobbered with a
+    // bare id -- same pattern as capabilityRequestForContinuation() above.
+    const structured = result?.required.find((entry) => entry.id === 'output.structured');
+    expect(structured?.constraints).toEqual({
+      kind: 'structured_output',
+      maxSchemaBytes: 1,
+      maxSchemaDepth: 1,
+      maxSchemaNodes: 1,
+    });
+  });
+
+  it('adds only input.image when only attachments were supplied', () => {
+    // capabilityRequestForMultimodal(undefined, ...) builds on DEFAULT_CAPABILITY_REQUEST, the
+    // same base capabilityRequestForContinuation() falls back to -- it already requires
+    // session.cancel, so the assertion here is "input.image was added", not "nothing else exists".
+    const result = capabilityRequestForMultimodal(undefined, true, false);
+    expect(result?.required.map((entry) => entry.id)).toContain('input.image');
+    expect(result?.required.map((entry) => entry.id)).not.toContain('output.structured');
   });
 });

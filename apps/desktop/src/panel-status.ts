@@ -59,13 +59,18 @@ const COMPONENT_STATUS: PanelStatusDescriptor = descriptor(
 
 /**
  * Storage and routes for the child-agent graph (apps/daemon/src/subagent-graph-store.ts,
- * routes/v2-agents-worktrees.ts) are entirely provider-agnostic, and no adapter under
- * packages/agent-runtime/src/providers/* references this graph at all -- neither provider
- * currently populates it with a real subagent lifecycle event.
+ * routes/v2-agents-worktrees.ts) are provider-agnostic, but only the Codex app-server adapter
+ * (packages/agent-runtime/src/providers/codex/app-server/normalizer.ts) currently populates it,
+ * from real `subAgentActivity` items in the pinned app-server schema (issue #58). Codex's own
+ * schema has no explicit "completed" kind for that item, so a normally-finishing child is closed
+ * out when its parent turn ends with no further activity for it -- an inferred, not
+ * provider-confirmed, terminal signal. Neither Claude transport populates this graph at all: the
+ * only signal available (a `Task` tool-use) would require inferring a child from a tool name,
+ * which this repo's own evidence rules for this capability explicitly rule out.
  */
 const CHILD_AGENT_STATUS: PanelStatusDescriptor = descriptor(
-  'scaffold_only',
-  'Storage and routes exist, but no current production provider populates this graph with real events yet.',
+  'provider_dependent',
+  'Codex app-server populates this graph from real lifecycle events (a child agent\'s normal completion is inferred from its parent turn ending, not a confirmed provider signal). No other provider or transport populates it yet.',
 );
 const NO_SESSION_SELECTED_STATUS: PanelStatusDescriptor = descriptor(
   'unsupported',
@@ -73,13 +78,18 @@ const NO_SESSION_SELECTED_STATUS: PanelStatusDescriptor = descriptor(
 );
 
 /**
- * Attachment staging and structured-output validation both run entirely locally: neither is
- * dispatched to any provider session by any current adapter (see
- * apps/daemon/src/routes/v2-multimodal.ts). This does not vary by provider.
+ * This panel's own actions (staging a file, validating a pasted JSON payload) are local-only and
+ * never create or touch a session -- that stays true for every provider (see
+ * apps/desktop/src/components/WorkflowPanel.tsx, which never calls session creation with an
+ * attachment or schema). Separately, as of issue #59, the daemon's session-creation API itself
+ * *can* dispatch a staged PNG/JPEG and a JSON Schema to a real Codex app-server turn
+ * (`POST /v2/sessions` with `initialAttachmentIds`/`outputSchema`,
+ * apps/daemon/src/routes/v2-multimodal.ts + v2-sessions.ts) -- this reference panel just doesn't
+ * offer a way to start a session from what you stage here yet.
  */
 const WORKFLOW_STATUS: PanelStatusDescriptor = descriptor(
   'scaffold_only',
-  'Files you stage here are not included in any run. Structured-output validation checks a JSON payload you paste in -- it does not constrain what a provider actually generates.',
+  'Files you stage here and JSON you validate here are never sent to a provider from this panel -- it only exercises the daemon\'s local staging/validation API. Codex app-server can accept a staged image and a structured-output schema through session creation directly, but this panel does not offer that yet.',
 );
 
 export function mcpPanelStatus(): PanelStatusDescriptor {

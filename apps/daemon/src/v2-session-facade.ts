@@ -469,6 +469,8 @@ export class V2SessionFacade {
             expectedContinuationEvidence,
             beforeProviderThreadStart,
             reserve(selection, true, continuationScope),
+            input.initialAttachmentIds,
+            input.outputSchema,
           );
         } else if (context?.legacyIntent && context.providerStatus) {
           const legacyIntent = context.legacyIntent;

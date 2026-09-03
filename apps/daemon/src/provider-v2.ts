@@ -328,6 +328,35 @@ export function capabilityRequestForContinuation(
   };
 }
 
+/**
+ * Same pattern as `capabilityRequestForContinuation()`, for issue #59: a caller that supplied
+ * `initialAttachmentIds`/`outputSchema` gets `input.image`/`output.structured` added as *required*
+ * capabilities for this specific request, even if it never listed them explicitly -- so an
+ * unsupported provider/transport/model combination fails negotiation before any attachment
+ * resolution or provider dispatch, rather than silently ignoring the attachments/schema.
+ */
+export function capabilityRequestForMultimodal(
+  request: CapabilityRequest | undefined,
+  hasAttachments: boolean,
+  hasOutputSchema: boolean,
+): CapabilityRequest | undefined {
+  if (!hasAttachments && !hasOutputSchema) return request;
+  const capabilityIds: string[] = [
+    ...(hasAttachments ? ['input.image'] : []),
+    ...(hasOutputSchema ? ['output.structured'] : []),
+  ];
+  const base = request ?? DEFAULT_CAPABILITY_REQUEST;
+  const existingRequired = new Map(base.required.map((entry) => [entry.id, entry]));
+  return {
+    ...base,
+    required: [
+      ...base.required.filter(({ id }) => !capabilityIds.includes(id)),
+      ...capabilityIds.map((id) => existingRequired.get(id) ?? { id }),
+    ],
+    optional: base.optional.filter(({ id }) => !capabilityIds.includes(id)),
+  };
+}
+
 function preflightScopeReason(
   status: ProviderStatus,
   workspaceTrust: WorkspaceTrustEvidence,

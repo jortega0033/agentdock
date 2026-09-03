@@ -35,6 +35,7 @@ import {
 } from '@agent-dock/shared';
 import { buildServer } from '../src/server.js';
 import { SessionManager } from '../src/session-manager.js';
+import { SessionAdmissionController } from '../src/session-admission.js';
 import { resolveWorkspaceIdentity } from '../src/workspace-identity.js';
 import { WorkspaceTrustStore } from '../src/workspace-trust-store.js';
 import { FileExecutionGraphStore } from '../src/execution-graph-store.js';
@@ -244,6 +245,38 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(cwd, { recursive: true, force: true });
+});
+
+describe('POST /v2/sessions admission control (issue #52)', () => {
+  it('maps admission-controller rejection to 429 session_capacity_exceeded', async () => {
+    const registry = new ProviderRegistry();
+    const provider = new FakeProvider('claude', undefined, 'success', 'multi-input');
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, {
+      admission: new SessionAdmissionController({ maxActiveSessions: 1 }),
+    });
+    const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+
+    await createInteractiveSession(app, ['session.cancel']);
+
+    const second = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: {
+        provider: 'claude',
+        cwd,
+        prompt: 'second turn',
+        capabilities: {
+          required: [{ id: 'session.cancel' }],
+          optional: [],
+          allowExperimental: false,
+        },
+      },
+    });
+    expect(second.statusCode).toBe(429);
+    expect(second.json()).toMatchObject({ code: 'session_capacity_exceeded' });
+  });
 });
 
 describe('v2 discovery and authorization', () => {
@@ -630,15 +663,15 @@ describe('POST /v2/sessions capability negotiation', () => {
     await cancelAndWait(forkedSession.id);
   });
 
-  it('derives legacy resume identity from a terminal parent and rejects unsupported fork', async () => {
+  it('rejects unsupported Claude legacy resume and fork alike before any provider dispatch, using a real-shaped detection fixture with no durable account/model binding evidence (issue #54)', async () => {
     const status: ProviderStatus = {
       id: 'claude',
       name: 'Legacy continuation fixture',
       installed: true,
       authenticated: 'authenticated',
       authSource: 'chatgpt',
-      accountFingerprint: 'b'.repeat(64),
-      selectedModel: 'fixture-model',
+      // Deliberately no accountFingerprint/selectedModel: real detectClaude() never supplies
+      // them today, so this fixture matches what production detection actually produces.
       executablePath: 'C:\\fixtures\\claude.exe',
       version: CLAUDE_LEGACY_COMPATIBILITY.providerVersion,
       capabilities: { ...FAKE_PROVIDER_CAPABILITIES, resume: true },
@@ -657,6 +690,28 @@ describe('POST /v2/sessions capability negotiation', () => {
       token: TOKEN,
       logger: noopLogger,
     });
+
+    // A client that asks for session.resume up front, before targeting any parent, is rejected
+    // by capability negotiation itself -- the truthful record this ticket fixes -- never reaching
+    // provider dispatch.
+    const requestedResumable = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: {
+        provider: 'claude',
+        cwd,
+        prompt: 'wants to be resumable later',
+        capabilities: {
+          required: [{ id: 'session.resume' }],
+          optional: [],
+          allowExperimental: false,
+        },
+      },
+    });
+    expect(requestedResumable.statusCode, requestedResumable.body).toBe(422);
+    expect(requestedResumable.json()).toMatchObject({ code: 'required_capability_unavailable' });
+
     const payload = { provider: 'claude' as const, cwd, prompt: 'legacy fresh' };
     const fresh = await app.inject({
       method: 'POST',
@@ -666,44 +721,26 @@ describe('POST /v2/sessions capability negotiation', () => {
     });
     expect(fresh.statusCode, fresh.body).toBe(201);
     const freshSession = agentSessionV2Schema.parse(fresh.json());
-    let terminalParent = freshSession;
     await vi.waitFor(async () => {
       const snapshot = await app.inject({
         method: 'GET',
         url: '/v2/sessions/' + freshSession.id,
         headers: auth(),
       });
-      terminalParent = agentSessionV2Schema.parse(snapshot.json());
-      expect(terminalParent.status).toBe('completed');
-      expect(terminalParent.providerSessionId).toBe('fake-' + freshSession.id);
+      expect(agentSessionV2Schema.parse(snapshot.json()).status).toBe('completed');
     });
 
+    // Once terminal, resuming or forking it also fails closed: no durable continuation binding
+    // was ever established for a Claude session, since real detection can't supply the evidence
+    // needed to freeze one either.
     const resumed = await app.inject({
       method: 'POST',
       url: '/v2/sessions/' + freshSession.id + '/resume',
       headers: auth(),
       payload: { prompt: 'legacy resume' },
     });
-    expect(resumed.statusCode, resumed.body).toBe(201);
-    expect(provider.startedOptions[1]?.resumeProviderSessionId).toBe(
-      terminalParent.providerSessionId,
-    );
-    const resumedSession = agentSessionV2Schema.parse(resumed.json());
-    expect(resumedSession).toMatchObject({
-      rootExecutionId: freshSession.executionId,
-      parentSessionId: freshSession.id,
-      parentExecutionId: freshSession.executionId,
-      continuationKind: 'resume',
-    });
-    await vi.waitFor(async () => {
-      const snapshot = await app.inject({
-        method: 'GET',
-        url: '/v2/sessions/' + resumedSession.id,
-        headers: auth(),
-      });
-      const terminalResume = agentSessionV2Schema.parse(snapshot.json());
-      expect(terminalResume.status).toBe('completed');
-    });
+    expect(resumed.statusCode, resumed.body).toBe(404);
+    expect(resumed.json()).toMatchObject({ code: 'continuation_binding_not_found' });
 
     const forked = await app.inject({
       method: 'POST',
@@ -711,9 +748,12 @@ describe('POST /v2/sessions capability negotiation', () => {
       headers: auth(),
       payload: { prompt: 'legacy fork' },
     });
-    expect(forked.statusCode).toBe(422);
-    expect(forked.json()).toMatchObject({ code: 'required_capability_unavailable' });
-    expect(provider.startedOptions).toHaveLength(2);
+    expect(forked.statusCode).toBe(404);
+    expect(forked.json()).toMatchObject({ code: 'continuation_binding_not_found' });
+
+    // Only the one accepted fresh-session dispatch ever reached the provider: the resume-required
+    // request, the resume attempt, and the fork attempt were all rejected before provider launch.
+    expect(provider.startedOptions).toHaveLength(1);
   });
 
   it('fails a continuation deterministically when the terminal parent has no native id', async () => {
@@ -1362,6 +1402,50 @@ describe('POST /v2/sessions capability negotiation', () => {
     expect(response.json().details.unavailableRequired).toEqual([
       expect.objectContaining({ id: 'interaction.approval' }),
     ]);
+    expect(provider.startedOptions).toEqual([]);
+  });
+
+  it('returns 422 when attachments are requested but the provider does not support input.image (issue #59)', async () => {
+    const { app, provider } = setup();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: {
+        provider: 'claude',
+        cwd,
+        prompt: 'must not start',
+        initialAttachmentIds: ['123e4567-e89b-42d3-a456-426614174099'],
+      },
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(response.json().code).toBe('required_capability_unavailable');
+    expect(response.json().details.unavailableRequired).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'input.image' })]),
+    );
+    expect(provider.startedOptions).toEqual([]);
+  });
+
+  it('returns 422 when an output schema is requested but the provider does not support output.structured (issue #59)', async () => {
+    const { app, provider } = setup();
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: {
+        provider: 'claude',
+        cwd,
+        prompt: 'must not start',
+        outputSchema: { type: 'object', required: ['answer'] },
+      },
+    });
+
+    expect(response.statusCode).toBe(422);
+    expect(response.json().code).toBe('required_capability_unavailable');
+    expect(response.json().details.unavailableRequired).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'output.structured' })]),
+    );
     expect(provider.startedOptions).toEqual([]);
   });
 

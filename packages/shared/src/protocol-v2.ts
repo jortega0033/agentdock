@@ -13,6 +13,7 @@ import {
   type Effect,
 } from './capabilities-v2.js';
 import { approvalDecisionV2Schema, permissionActionV2Schema } from './policy-v2.js';
+import { ATTACHMENT_LIMITS_V2, attachmentIdV2Schema } from './multimodal-workflow-v2.js';
 
 const MAX_CONTENT_BYTES = 256 * 1024;
 const MAX_COMMAND_BYTES = 1024 * 1024;
@@ -28,6 +29,7 @@ export const requestIdSchema = z.string().uuid();
 export const contentBlockIdSchema = z.string().uuid();
 export const toolCallIdSchema = z.string().uuid();
 export const executionIdSchema = z.string().uuid();
+export const subagentIdSchema = z.string().uuid();
 
 export type SessionId = string;
 export type TurnId = string;
@@ -36,6 +38,7 @@ export type RequestId = string;
 export type ContentBlockId = string;
 export type ToolCallId = string;
 export type ExecutionId = string;
+export type SubagentId = string;
 
 const nonemptyWireStringSchema = z
   .string()
@@ -359,6 +362,18 @@ export interface CreateSessionV2Request {
   /** Explicit consent to add a read-only session to an already-shared dirty Git worktree. */
   allowDirtyWorkspaceShare?: boolean;
   /**
+   * Already-staged attachment IDs (see `POST /v2/attachments`) to bind to this session and, for
+   * the first supported provider/transport, deliver as real turn input. Resolution/binding is
+   * transactional with session creation: any invalid ID (cross-session, missing, unsupported MIME)
+   * fails the whole request before a session is created.
+   */
+  initialAttachmentIds?: string[];
+  /**
+   * A JSON Schema constraining the session's final structured output, for the first supported
+   * provider/transport. Bounded the same way `POST /v2/workflows/structured/validate` is.
+   */
+  outputSchema?: unknown;
+  /**
    * @deprecated Use the daemon-owned `POST /v2/sessions/:sessionId/resume` or `/fork` routes.
    * Kept parse-compatible until consumers have migrated; new callers must not supply native IDs.
    */
@@ -372,6 +387,12 @@ export const createSessionV2RequestSchema = z
     prompt: z.string().min(1, 'prompt is required').max(200_000, 'prompt is too long'),
     capabilities: capabilityRequestSchema.optional(),
     allowDirtyWorkspaceShare: z.boolean().optional(),
+    initialAttachmentIds: z
+      .array(attachmentIdV2Schema)
+      .min(1)
+      .max(ATTACHMENT_LIMITS_V2.maxSessionFiles)
+      .optional(),
+    outputSchema: boundedJsonSchema.optional(),
     continuation: sessionContinuationV2Schema.optional(),
   })
   .strict()
@@ -667,6 +688,28 @@ const toolCompletedEventSchema = z
     summary: z.string().max(4_096).optional(),
   })
   .strict();
+// Bounded, provider-neutral child-agent lifecycle event (issue #58). One event type carries every
+// phase -- spawn, progress update, blocked, and terminal -- distinguished by `status`, mirroring
+// SubagentNodeV2's own status enum rather than inventing four separate wire event types for what
+// is really one node's state transitions. `agentId` is a stable AgentDock id the emitting adapter
+// generates once per native child identity and reuses for every subsequent event about that same
+// child, the same idiom already used for `toolCallId` on tool.started/tool.completed.
+const subagentStatusEventSchema = z
+  .object({
+    ...turnEventShape,
+    type: z.literal('subagent.status'),
+    agentId: subagentIdSchema,
+    parentAgentId: subagentIdSchema.optional(),
+    nativeChildId: z.string().min(1).max(1_024).optional(),
+    name: z.string().min(1).max(256),
+    role: z.string().max(256).optional(),
+    model: z.string().max(256).optional(),
+    status: z.enum(['spawning', 'running', 'blocked', 'completed', 'failed', 'cancelled']),
+    toolSummary: z.string().max(1_024).optional(),
+    permissionSummary: z.string().max(1_024).optional(),
+    controls: z.object({ steer: z.boolean(), interrupt: z.boolean(), cancel: z.boolean() }).strict(),
+  })
+  .strict();
 const approvalRequestedEventSchema = z
   .object({
     ...turnEventShape,
@@ -789,6 +832,7 @@ const agentEventV2EnvelopeUnionSchema = z.union([
   contentCompletedEventSchema,
   toolStartedEventSchema,
   toolCompletedEventSchema,
+  subagentStatusEventSchema,
   approvalRequestedEventSchema,
   approvalResolvedEventSchema,
   questionRequestedEventSchema,
@@ -848,6 +892,7 @@ export const AGENT_EVENT_V2_TYPES = [
   'content.completed',
   'tool.started',
   'tool.completed',
+  'subagent.status',
   'approval.requested',
   'approval.resolved',
   'question.requested',

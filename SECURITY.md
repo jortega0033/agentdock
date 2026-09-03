@@ -191,6 +191,12 @@ correct for what this daemon actually needs to be reachable by.
   `/token|secret|password|authorization|api[-_]?key|credential/i`; legacy provider stderr is counted
   without being decoded, persisted, logged, or surfaced. A non-zero exit logs only bounded numeric
   metadata such as exit code, signal, and `stderrBytes`.
+- Log a provider-controlled string (e.g. an unrecognized native event type) verbatim. Both legacy
+  parsers (`packages/agent-runtime/src/providers/claude/parser.ts`,
+  `.../providers/codex/parser.ts`) bound and control-character-strip an unrecognized event type
+  through `safeDisplay()` (`packages/agent-runtime/src/providers/common/safe-display.ts`) before it
+  reaches a `logger.debug()` call, so a malicious or buggy provider process cannot inject multiline
+  or control content into structured logs (issue #67).
 - Leak the token back through any API response, even an error body. **Verified** by regression
   test (`apps/daemon/test/server.test.ts`).
 
@@ -316,6 +322,19 @@ The page's `Content-Security-Policy` is
 `unsafe-eval`, and `connect-src` is just same-origin now that the renderer makes no network calls
 of its own.
 
+## Supported versions
+
+Security fixes target the packaged Windows build described in
+[packaging.md's platform matrix](docs/packaging.md#platform-matrix): **Windows 10 21H2 or later,
+and Windows 11, x64 only** (issue #61). macOS and Linux packaging are not implemented (see that same
+matrix), so there is no packaged build on those platforms to carry a fix; running from source is
+unaffected by this policy and follows whatever Node/OS versions [architecture.md](docs/architecture.md)
+documents for development.
+
+There is currently one supported line: the latest released version. This project does not yet
+maintain parallel maintenance branches for older releases -- a reported vulnerability is fixed
+against `main` and shipped in the next release, not backported.
+
 ## Reporting a vulnerability
 
 This repository does not have a dedicated security contact address. Report vulnerabilities through
@@ -323,3 +342,16 @@ This repository does not have a dedicated security contact address. Report vulne
 rather than filing a public issue, pull request, or exploit writeup. Include reproduction steps,
 affected versions, impact, and any suggested mitigation. Avoid disclosing details publicly until a
 fix or coordinated disclosure is ready.
+
+**Response and triage expectations (issue #61):** this is a small, non-commercial OSS project
+without a dedicated security team, so treat these as good-faith targets, not a contractual SLA:
+
+- **Acknowledgment**: within 5 business days of a report through the advisory form above.
+- **Initial triage** (confirmed, needs more information, or not applicable): within 10 business
+  days of acknowledgment.
+- **Fix timeline**: depends on severity and complexity; a confirmed high-severity issue affecting
+  the supported platform above is prioritized over feature work. There is no fixed deadline, but the
+  reporter will get a status update at least every 30 days until resolution or coordinated
+  disclosure.
+- Coordinated disclosure is preferred: the reporter and maintainer agree on a disclosure date once a
+  fix is ready, rather than either side disclosing unilaterally.

@@ -23,7 +23,11 @@ import {
   workspaceLeaseMode,
   type WorkspaceExecutionLease,
 } from '../workspace-execution-lease.js';
-import { capabilityRequestForContinuation, resolveProviderV2Manifest } from '../provider-v2.js';
+import {
+  capabilityRequestForContinuation,
+  capabilityRequestForMultimodal,
+  resolveProviderV2Manifest,
+} from '../provider-v2.js';
 import { BoundedV2SseWriter } from '../v2-sse-writer.js';
 import {
   V2ProviderStartupError,
@@ -59,21 +63,24 @@ function sendPersistedSessionError(
   const status =
     code === 'storage_full'
       ? 507
-      : code === 'invalid_cursor'
-        ? 400
-        : code === 'session_not_found' ||
-            code === 'continuation_not_found' ||
-            code === 'continuation_binding_not_found'
-          ? 404
-          : code === 'continuation_in_use' ||
-              code === 'continuation_binding_collision' ||
-              code === 'continuation_parent_active' ||
-              code === 'active_lineage' ||
-              code === 'continuation_scope_mismatch'
-            ? 409
-            : code === 'continuation_capability_not_selected' || code === 'legacy_fork_unsupported'
-              ? 422
-              : undefined;
+      : code === 'session_capacity_exceeded'
+        ? 429
+        : code === 'invalid_cursor'
+          ? 400
+          : code === 'session_not_found' ||
+              code === 'continuation_not_found' ||
+              code === 'continuation_binding_not_found'
+            ? 404
+            : code === 'continuation_in_use' ||
+                code === 'continuation_binding_collision' ||
+                code === 'continuation_parent_active' ||
+                code === 'active_lineage' ||
+                code === 'continuation_scope_mismatch'
+              ? 409
+              : code === 'continuation_capability_not_selected' ||
+                  code === 'legacy_fork_unsupported'
+                ? 422
+                : undefined;
   if (status === undefined) return false;
   reply.code(status).send({
     error: error instanceof Error ? error.message : code,
@@ -279,9 +286,10 @@ export function registerV2SessionRoutes(
         });
         return;
       }
-      const capabilityRequest = capabilityRequestForContinuation(
-        parsed.data.capabilities,
-        parsed.data.continuation,
+      const capabilityRequest = capabilityRequestForMultimodal(
+        capabilityRequestForContinuation(parsed.data.capabilities, parsed.data.continuation),
+        (parsed.data.initialAttachmentIds?.length ?? 0) > 0,
+        parsed.data.outputSchema !== undefined,
       );
       const negotiation = negotiateCapabilities({
         request: capabilityRequest,

@@ -12,9 +12,10 @@ import {
 import { buildProviderRegistry } from './providers.js';
 import { buildServer } from './server.js';
 import { SessionManager } from './session-manager.js';
+import { SessionAdmissionController, resolveMaxActiveSessions } from './session-admission.js';
 import { FileSessionStore } from './session-store.js';
 import { FileExecutionGraphStore } from './execution-graph-store.js';
-import { stateDirectory } from './state-directory.js';
+import { ensureStateDirectory, stateDirectory } from './state-directory.js';
 import { SubagentGraphStore } from './subagent-graph-store.js';
 import { OwnedWorktreeManager } from './worktree-manager.js';
 import { AttachmentStore } from './attachment-store.js';
@@ -43,6 +44,12 @@ async function main() {
   assertNoLiveDaemon(appId);
   const registry = buildProviderRegistry(logger);
   const durableStateDirectory = stateDirectory({ appId });
+  // Every subdirectory below is created independently, some via ensureStateDirectory() (which
+  // now re-verifies an existing directory itself, see state-directory.ts), some via a store's own
+  // recursive mkdir -- but only ensureStateDirectory() actually re-checks ownership/mode against
+  // one it did not just create, so the durable-state root itself needs one direct call here rather
+  // than relying on a subdirectory's recursive mkdir to have implicitly hardened its ancestor.
+  await ensureStateDirectory(durableStateDirectory);
   const subagentStore = new SubagentGraphStore(join(durableStateDirectory, 'subagents-v1.json'));
   const trustStore = new WorkspaceTrustStore(
     join(durableStateDirectory, 'workspace-trust-v1.json'),
@@ -54,7 +61,13 @@ async function main() {
     trustStore,
   );
   await worktreeManager.load();
-  const attachmentStore = new AttachmentStore(join(durableStateDirectory, 'attachments-v1'), join(durableStateDirectory, 'attachments-v1.json'));
+  const attachmentStore = new AttachmentStore(
+    join(durableStateDirectory, 'attachments-v1'),
+    join(durableStateDirectory, 'attachments-v1.json'),
+    undefined,
+    undefined,
+    logger,
+  );
   await attachmentStore.load();
   const auditStore = new AuditStore(join(durableStateDirectory, 'audit-v1.jsonl'));
   const sessionStoreDirectory = join(durableStateDirectory, 'sessions-v1');
@@ -65,6 +78,16 @@ async function main() {
       additionalQuotaPaths: [sessionStoreDirectory],
       onLineageRemoving: (records) => {
         for (const record of records) sessionStore.delete(record.session.id);
+        // Whole-lineage attachment cleanup (issue #67): a session's attachments should not
+        // outlive the lineage they belong to, regardless of their own age cap. Fire-and-forget --
+        // this hook itself is synchronous -- with errors logged rather than left unhandled.
+        void attachmentStore
+          .releaseSessions(records.map((record) => record.session.id))
+          .catch((error: unknown) => {
+            logger.warn('failed to release attachments for a removed lineage', {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          });
       },
     },
   );
@@ -83,11 +106,20 @@ async function main() {
       interruptedExecutions: graphRecovery.interruptedSessionIds.length,
     });
   }
+  // Fails fast (throws, caught by main().catch() below) on an out-of-range or non-integer value
+  // rather than silently clamping, so a misconfigured deployment never launches with a capacity
+  // limit it never intended.
+  const admission = new SessionAdmissionController({
+    maxActiveSessions: resolveMaxActiveSessions(process.env.AGENT_DOCK_MAX_ACTIVE_SESSIONS),
+  });
   const sessionManager = new SessionManager(registry, logger, sessionStore, {
     auditStore,
     trustStore,
     providerStateDirectory: durableStateDirectory,
     executionGraphStore,
+    attachmentStore,
+    subagentStore,
+    admission,
   });
   const token = generateToken();
 

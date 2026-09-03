@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { AgentEventV2, Effect } from '@agent-dock/shared';
+import type { AgentEventV2, BoundedJson, Effect } from '@agent-dock/shared';
+import { validateStructuredOutput } from '../../../structured-output.js';
 import { CodexAppServerProtocolError, boundedUtf8, safeDisplay } from './errors.js';
 
 type JsonObject = Record<string, unknown>;
@@ -42,6 +43,8 @@ const KNOWN_NOTIFICATION_METHODS = new Set([
 ]);
 const MAX_TRACKED_TURNS = 10_000;
 const MAX_TRACKED_ITEMS = 10_000;
+const MAX_TRACKED_SUBAGENTS = 10_000;
+const SUBAGENT_ACTIVITY_KINDS = new Set(['started', 'interacted', 'interrupted']);
 const MAX_CONTENT_BLOCK_BYTES = 256 * 1024;
 const MAX_NATIVE_CORRELATION_ID_BYTES = 1_024;
 
@@ -164,6 +167,14 @@ export class CodexAppServerNormalizer {
   private readonly messageDeltas = new Map<string, DeltaDigest>();
   private readonly summarizedReasoning = new Set<string>();
   private readonly summarizedMessageDeltas = new Set<string>();
+  // Set once at session start (issue #59); applied to every turn's final agentMessage for the
+  // life of the session, since the schema is negotiated at session-creation time, not per turn.
+  private outputSchemaValue: unknown;
+  // agentThreadId -> stable AgentDock subagent id, the same reuse-once-generated idiom as
+  // itemIdentity()/bindTurn() above -- never the native Codex thread id itself on the wire.
+  private readonly subagentIds = new Map<string, string>();
+  private readonly subagentNames = new Map<string, string>();
+  private readonly openSubagents = new Set<string>();
 
   constructor(private readonly emit: (event: AgentEventV2) => void) {}
 
@@ -182,6 +193,7 @@ export class CodexAppServerNormalizer {
     providerThreadId: string,
     transportId: string,
     selection: Extract<AgentEventV2, { type: 'session.started' }>['selection'],
+    outputSchema?: unknown,
   ): void {
     if (this.sessionStarted) {
       throw new CodexAppServerProtocolError('state_invalid', 'Codex session started twice');
@@ -195,6 +207,7 @@ export class CodexAppServerNormalizer {
     }
     this.providerThreadIdValue = normalizedThreadId;
     this.sessionStarted = true;
+    this.outputSchemaValue = outputSchema;
     this.emit({ type: 'session.started', provider: 'codex', transport: transportId, selection });
   }
 
@@ -390,7 +403,69 @@ export class CodexAppServerNormalizer {
     } else {
       throw new CodexAppServerProtocolError('state_invalid', 'Invalid Codex turn status');
     }
+    this.closeOpenSubagents(turnId, turn.status);
     this.emit({ type: 'session.status', status: 'idle' });
+  }
+
+  /**
+   * Codex's own subAgentActivity schema has no explicit "completed"/"finished" kind -- only
+   * started, interacted, and interrupted (see the vendored app-server schema for issue #58's
+   * pinned version). There is therefore no provider-confirmed signal for a sub-agent finishing
+   * normally; closing out whatever is still open when its parent turn concludes, with no further
+   * activity for it, is an inferred terminal signal, not a provider-confirmed one. An explicit
+   * `interrupted` kind (handled in subAgentActivity() below) is real evidence and removes the
+   * entry from openSubagents immediately, so it is never re-closed here. The inferred status
+   * mirrors the parent turn's own outcome -- a child left open when its turn failed or was
+   * interrupted is marked accordingly, not silently reported as having succeeded.
+   */
+  private closeOpenSubagents(turnId: string, parentTurnStatus: string): void {
+    const status =
+      parentTurnStatus === 'failed' ? 'failed' : parentTurnStatus === 'interrupted' ? 'cancelled' : 'completed';
+    for (const nativeChildId of [...this.openSubagents]) {
+      const agentId = this.subagentIds.get(nativeChildId);
+      const name = this.subagentNames.get(nativeChildId);
+      this.openSubagents.delete(nativeChildId);
+      if (!agentId || !name) continue;
+      this.emit({
+        type: 'subagent.status',
+        turnId,
+        agentId,
+        nativeChildId,
+        name,
+        status,
+        controls: { steer: false, interrupt: false, cancel: false },
+      });
+    }
+  }
+
+  private subAgentActivity(item: JsonObject, turnId: string): void {
+    const nativeChildId = nativeCorrelationId(item.agentThreadId, 'sub-agent thread id');
+    const agentPath = requiredString(item.agentPath, 'sub-agent path');
+    if (typeof item.kind !== 'string' || !SUBAGENT_ACTIVITY_KINDS.has(item.kind)) {
+      throw new CodexAppServerProtocolError('frame_invalid', 'Invalid sub-agent activity kind');
+    }
+    let agentId = this.subagentIds.get(nativeChildId);
+    if (!agentId) {
+      if (this.subagentIds.size >= MAX_TRACKED_SUBAGENTS) {
+        throw new CodexAppServerProtocolError('state_invalid', 'Codex exceeded the sub-agent limit');
+      }
+      agentId = randomUUID();
+      this.subagentIds.set(nativeChildId, agentId);
+    }
+    const name = boundedUtf8(agentPath, 256);
+    this.subagentNames.set(nativeChildId, name);
+    const status = item.kind === 'interrupted' ? 'cancelled' : item.kind === 'started' ? 'spawning' : 'running';
+    if (status === 'cancelled') this.openSubagents.delete(nativeChildId);
+    else this.openSubagents.add(nativeChildId);
+    this.emit({
+      type: 'subagent.status',
+      turnId,
+      agentId,
+      nativeChildId,
+      name,
+      status,
+      controls: { steer: false, interrupt: false, cancel: false },
+    });
   }
 
   private planUpdated(params: JsonObject): void {
@@ -445,6 +520,11 @@ export class CodexAppServerNormalizer {
     const turnId = this.correlatedTurn(params);
     const item = object(params.item, 'started item');
     this.itemIdentity(nativeCorrelationId(item.id, 'native item id'));
+    // subAgentActivity is reported once per pulse via its own item/started + item/completed pair,
+    // both carrying the same `kind` -- unlike a tool call, there is nothing distinct to say at
+    // "started" that "completed" (handled below in itemCompleted) does not already say, so this
+    // emits nothing here to avoid a duplicate event per pulse.
+    if (item.type === 'subAgentActivity') return;
     const descriptor = toolDescriptor(item);
     if (!descriptor) return;
     this.startTool(item, turnId, descriptor);
@@ -454,6 +534,10 @@ export class CodexAppServerNormalizer {
     const turnId = this.correlatedTurn(params);
     const item = object(params.item, 'completed item');
     const nativeItemId = nativeCorrelationId(item.id, 'native item id');
+    if (item.type === 'subAgentActivity') {
+      this.subAgentActivity(item, turnId);
+      return;
+    }
     if (item.type === 'agentMessage') {
       const identity = this.itemIdentity(nativeItemId);
       if (identity.completed)
@@ -507,6 +591,7 @@ export class CodexAppServerNormalizer {
         turnId,
         block,
       });
+      this.emitStructuredOutputIfValid(turnId, text);
       return;
     }
     if (item.type === 'reasoning') {
@@ -684,6 +769,52 @@ export class CodexAppServerNormalizer {
       message: 'Codex app-server reported a turn error',
       recoverable: params.willRetry === true,
     });
+  }
+
+  /**
+   * Codex has no dedicated "structured output" item type (issue #59) -- the final assistant
+   * message always arrives as plain `agentMessage` text, already emitted above as a normal text
+   * content block regardless of what happens here. When a caller negotiated `output.structured`,
+   * this additionally tries to parse that same text as JSON and AJV-validate it against the
+   * session's schema; on success it emits one more content block carrying the parsed, validated
+   * data. On failure (not JSON, or JSON that fails the schema) nothing more is emitted -- the
+   * plain text block already emitted is the only representation, satisfying "invalid output
+   * remains inspectable but cannot be consumed as valid": no `structured_data` block ever exists
+   * for output that didn't actually validate.
+   */
+  private emitStructuredOutputIfValid(turnId: string, text: string): void {
+    if (this.outputSchemaValue === undefined) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return;
+    }
+    const result = validateStructuredOutput(this.outputSchemaValue, parsed);
+    if (!result.valid) return;
+    // Safe: JSON.parse() always returns a JSON-shaped value, and AJV just confirmed it matches
+    // the caller's own schema. The wire schema's own bounds (depth/size/node count) are still
+    // enforced downstream when this event is validated for the SSE/storage layer.
+    const block = { type: 'structured_data' as const, id: randomUUID(), data: parsed as BoundedJson };
+    const encoded = jsonBytes(block);
+    if (encoded.byteLength > MAX_CONTENT_BLOCK_BYTES) {
+      this.emit({
+        type: 'content.completed',
+        turnId,
+        block: {
+          type: 'provider_extension',
+          id: block.id,
+          extensionName: 'codex.structured_output',
+          representation: 'safe_summary',
+          safeSummary: 'Codex structured output exceeded the 256 KiB content-block limit',
+          reason: 'truncated',
+          originalBytes: encoded.byteLength,
+          sha256: createHash('sha256').update(encoded).digest('hex'),
+        },
+      });
+      return;
+    }
+    this.emit({ type: 'content.completed', turnId, block });
   }
 
   private startTool(

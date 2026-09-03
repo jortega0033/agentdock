@@ -53,12 +53,56 @@ textarea {
   padding: 32px;
 }
 
+/* Deliberately styled as a persistent, high-visual-weight bar rather than a transient
+ * .banner--info/.banner--error line -- it must never read as just another dismissible status
+ * message, since it is the only affordance for leaving demo mode. */
+.demo-banner {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  margin: -32px -32px 24px;
+  padding: 14px 32px;
+  border-bottom: 1px solid #d1a316;
+  background: linear-gradient(90deg, #f59e0b, #7c3aed);
+  color: #1f1300;
+  font-weight: 600;
+  font-size: 13px;
+  box-shadow: 0 6px 20px rgba(124, 58, 237, 0.22);
+}
+
+.demo-banner .button--primary {
+  flex: 0 0 auto;
+  background: #1f1300;
+  box-shadow: none;
+}
+
+:root[data-theme='dark'] .demo-banner {
+  border-bottom-color: #7c3aed;
+  color: #fffaf0;
+}
+
+:root[data-theme='dark'] .demo-banner .button--primary {
+  background: #fffaf0;
+  color: #1f1300;
+}
+
 .app-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 24px;
   margin-bottom: 24px;
+}
+
+.app-header__status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .brand {
@@ -381,6 +425,18 @@ select {
   color: #f8fafc;
 }
 
+input::placeholder,
+textarea::placeholder {
+  color: #64748b;
+  font-weight: 500;
+  opacity: 1;
+}
+
+:root[data-theme='dark'] input::placeholder,
+:root[data-theme='dark'] textarea::placeholder {
+  color: #94a3b8;
+}
+
 input:focus,
 textarea:focus,
 select:focus {
@@ -621,6 +677,10 @@ textarea {
 
 .provider-card__error {
   color: #b91c1c;
+}
+
+:root[data-theme='dark'] .provider-card__error {
+  color: #fca5a5;
 }
 
 .provider-card__sandbox {
@@ -999,6 +1059,74 @@ textarea {
   color: #94a3b8;
 }
 
+.status-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  text-transform: capitalize;
+}
+
+.status-pill--ok,
+.status-pill--completed {
+  background: #ecfdf5;
+  color: #15803d;
+}
+
+.status-pill--warn,
+.status-pill--spawning,
+.status-pill--blocked {
+  background: #fff7ed;
+  color: #c2410c;
+}
+
+.status-pill--muted,
+.status-pill--cancelled {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.status-pill--running {
+  background: #eef2ff;
+  color: #4f46e5;
+}
+
+.status-pill--failed {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+:root[data-theme='dark'] .status-pill--ok,
+:root[data-theme='dark'] .status-pill--completed {
+  background: rgba(34, 197, 94, 0.13);
+  color: #86efac;
+}
+
+:root[data-theme='dark'] .status-pill--warn,
+:root[data-theme='dark'] .status-pill--spawning,
+:root[data-theme='dark'] .status-pill--blocked {
+  background: rgba(249, 115, 22, 0.13);
+  color: #fdba74;
+}
+
+:root[data-theme='dark'] .status-pill--muted,
+:root[data-theme='dark'] .status-pill--cancelled {
+  background: #1e293b;
+  color: #94a3b8;
+}
+
+:root[data-theme='dark'] .status-pill--running {
+  background: rgba(91, 108, 255, 0.15);
+  color: #a5b4fc;
+}
+
+:root[data-theme='dark'] .status-pill--failed {
+  background: rgba(185, 28, 28, 0.18);
+  color: #fca5a5;
+}
+
 .row--spread {
   justify-content: space-between;
 }
@@ -1015,9 +1143,17 @@ textarea {
   padding: 0.75rem;
 }
 
+:root[data-theme='dark'] .mcp-server {
+  border-color: #273449;
+}
+
 .mcp-server__failure {
   color: #b91c1c;
   font-size: 0.82rem;
+}
+
+:root[data-theme='dark'] .mcp-server__failure {
+  color: #fca5a5;
 }
 
 .mcp-server__actions,
@@ -1036,6 +1172,11 @@ textarea {
   padding: 0.2rem 0.45rem;
 }
 
+:root[data-theme='dark'] .mcp-field-list span {
+  background: rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+}
+
 .mcp-catalog {
   margin: 0.75rem 0 0;
   padding-left: 1.25rem;
@@ -1049,6 +1190,10 @@ textarea {
 .mcp-config-form {
   border-top: 1px solid #d8e1ed;
   padding-top: 0.85rem;
+}
+
+:root[data-theme='dark'] .mcp-config-form {
+  border-color: #273449;
 }
 
 .component-list {

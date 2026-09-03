@@ -127,12 +127,12 @@ export function McpPanel({ provider, cwd }: McpPanelProps) {
             {server.configFields.length > 0 && <div className="mcp-field-list">{server.configFields.map((field) => <span key={field.key}>{field.key}: {field.classification}</span>)}</div>}
             {server.sessionIds.length > 0 && <div className="mcp-server__meta">Used by {server.sessionIds.length} session{server.sessionIds.length === 1 ? '' : 's'}</div>}
             <div className="mcp-server__actions">
-              <button type="button" disabled={busy} onClick={() => void loadCatalog(server.id)}>Catalog</button>
-              {server.capabilities.reload && <button type="button" disabled={busy} onClick={() => void mutate(() => window.agentDock.actionMcpServer({ provider, cwd: cwd.trim(), serverId: server.id, action: 'reload' }))}>Reload</button>}
-              {server.capabilities.configure && <button type="button" disabled={busy} onClick={() => void mutate(() => window.agentDock.configureMcpServer({ provider, cwd: cwd.trim(), serverId: server.id, action: server.enabled ? 'disable' : 'enable' }))}>{server.enabled ? 'Disable' : 'Enable'}</button>}
-              {server.capabilities.configure && server.transport !== 'legacy_sse_read_only' && <button type="button" disabled={busy} onClick={() => beginEdit(server)}>Edit</button>}
-              {server.capabilities.oauth && <button type="button" disabled={busy} onClick={() => void startOAuth(server.id)}>Sign in</button>}
-              {server.capabilities.configure && <button type="button" className="button--danger" disabled={busy} onClick={() => void mutate(() => window.agentDock.configureMcpServer({ provider, cwd: cwd.trim(), serverId: server.id, action: 'remove' }))}>Remove</button>}
+              <button type="button" disabled={busy} aria-label={`Catalog ${server.name}`} onClick={() => void loadCatalog(server.id)}>Catalog</button>
+              {server.capabilities.reload && <button type="button" disabled={busy} aria-label={`Reload ${server.name}`} onClick={() => void mutate(() => window.agentDock.actionMcpServer({ provider, cwd: cwd.trim(), serverId: server.id, action: 'reload' }))}>Reload</button>}
+              {server.capabilities.configure && <button type="button" disabled={busy} aria-label={`${server.enabled ? 'Disable' : 'Enable'} ${server.name}`} onClick={() => void mutate(() => window.agentDock.configureMcpServer({ provider, cwd: cwd.trim(), serverId: server.id, action: server.enabled ? 'disable' : 'enable' }))}>{server.enabled ? 'Disable' : 'Enable'}</button>}
+              {server.capabilities.configure && server.transport !== 'legacy_sse_read_only' && <button type="button" disabled={busy} aria-label={`Edit ${server.name}`} onClick={() => beginEdit(server)}>Edit</button>}
+              {server.capabilities.oauth && <button type="button" disabled={busy} aria-label={`Sign in to ${server.name}`} onClick={() => void startOAuth(server.id)}>Sign in</button>}
+              {server.capabilities.configure && <button type="button" className="button--danger" disabled={busy} aria-label={`Remove ${server.name}`} onClick={() => void mutate(() => window.agentDock.configureMcpServer({ provider, cwd: cwd.trim(), serverId: server.id, action: 'remove' }))}>Remove</button>}
             </div>
             {catalogs[server.id] && <ul className="mcp-catalog" aria-label={`${server.name} catalog`}>{catalogs[server.id]!.items.map((item) => <li key={`${item.kind}:${item.id}`}><strong>{item.name}</strong> <span>{item.kind}{item.kind === 'tool' && item.destructive ? ' · approval required' : ''}</span></li>)}</ul>}
           </article>
@@ -141,10 +141,10 @@ export function McpPanel({ provider, cwd }: McpPanelProps) {
       </div>
       <form className="mcp-config-form" onSubmit={(event) => void submitConfiguration(event)}>
         <h3>{editing ? 'Edit MCP server' : 'Add MCP server'}</h3>
-        <label>Name<input value={name} onChange={(event) => setName(event.target.value)} maxLength={256} required /></label>
+        <label>Name<input type="text" value={name} onChange={(event) => setName(event.target.value)} maxLength={256} required /></label>
         <label>Transport<select value={transport} onChange={(event) => setTransport(event.target.value as typeof transport)}><option value="stdio">stdio</option><option value="streamable_http">streamable HTTP</option></select></label>
-        <label>{transport === 'stdio' ? 'Executable' : 'HTTPS URL'}<input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} required placeholder={transport === 'stdio' ? 'npx' : 'https://mcp.example.com'} /></label>
-        {transport === 'stdio' && <label>Arguments<input value={args} onChange={(event) => setArgs(event.target.value)} placeholder="-y package-name" /></label>}
+        <label>{transport === 'stdio' ? 'Executable' : 'HTTPS URL'}<input type="text" value={endpoint} onChange={(event) => setEndpoint(event.target.value)} required placeholder={transport === 'stdio' ? 'npx' : 'https://mcp.example.com'} /></label>
+        {transport === 'stdio' && <label>Arguments<input type="text" value={args} onChange={(event) => setArgs(event.target.value)} placeholder="-y package-name" /></label>}
         <div className="row"><button className="button button--primary" type="submit" disabled={busy || !cwd.trim()}>{editing ? 'Save' : 'Add server'}</button>{editing && <button className="button button--secondary" type="button" onClick={() => setEditing(undefined)}>Cancel</button>}</div>
         <p className="form-hint">Credentials stay with the provider. AgentDock accepts only public command arguments or an HTTPS endpoint.</p>
       </form>

@@ -1,6 +1,6 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { App } from './App.js';
+import { AppRoot } from './AppRoot.js';
 import './styles.css';
 
 async function renderApp(): Promise<void> {
@@ -13,7 +13,7 @@ async function renderApp(): Promise<void> {
 
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
-      <App />
+      <AppRoot />
     </StrictMode>,
   );
 }

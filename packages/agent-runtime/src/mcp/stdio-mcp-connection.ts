@@ -1,5 +1,6 @@
 import type { McpCatalogItemV2, McpToolInvocationResultV2 } from '@agent-dock/shared';
 import { McpTransportError, StdioJsonRpcTransport } from './stdio-jsonrpc-transport.js';
+import { buildBaseProcessEnvironment } from '../process/provider-environment.js';
 
 export const MCP_PROTOCOL_VERSION = '2025-06-18';
 export const MCP_CONNECT_TIMEOUT_MS = 15_000;
@@ -70,9 +71,14 @@ export class StdioMcpConnection {
       listMs: timeouts.listMs ?? MCP_LIST_TIMEOUT_MS,
       invokeMs: timeouts.invokeMs ?? MCP_INVOKE_TIMEOUT_MS,
     };
+    // Sanitized, default-deny floor (issue #103) -- never the daemon's raw `process.env`, which
+    // would otherwise hand every MCP server child AgentDock discovery tokens, state paths, and any
+    // arbitrary AGENT_DOCK_* variable a downstream fork adds. The server's own declared `env`
+    // entries (already bounded/validated in mcp-control.ts) layer on top, same as the provider CLI
+    // path in packages/agent-runtime/src/process/provider-environment.ts.
     this.transport = new StdioJsonRpcTransport(spawnConfig.command, spawnConfig.args, {
       cwd,
-      env: spawnConfig.env ? { ...process.env, ...spawnConfig.env } : undefined,
+      env: { ...buildBaseProcessEnvironment(), ...(spawnConfig.env ?? {}) },
     });
   }
 

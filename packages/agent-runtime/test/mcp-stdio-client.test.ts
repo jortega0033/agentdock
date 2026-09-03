@@ -94,7 +94,7 @@ describe('StdioMcpConnection', () => {
       const items = await connection.listCatalog();
       const tools = items.filter((item) => item.kind === 'tool');
       expect(tools.map((tool) => tool.id).sort()).toEqual(
-        ['crash', 'delete_file', 'echo', 'fails', 'false_destructive_hint', 'hang', 'huge', 'no_hints'].sort(),
+        ['crash', 'delete_file', 'echo', 'env_probe', 'fails', 'false_destructive_hint', 'hang', 'huge', 'no_hints'].sort(),
       );
       const echo = tools.find((tool) => tool.id === 'echo')!;
       expect(echo).toMatchObject({ destructive: false, sideEffecting: false });
@@ -133,6 +133,42 @@ describe('StdioMcpConnection', () => {
     try {
       const result = await connection.callTool('echo', { hello: 'world' });
       expect(result).toEqual({ status: 'completed', output: { received: { hello: 'world' } } });
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it('does not leak the host process env to a spawned MCP server (issue #103)', async () => {
+    const cwd = await tempCwd();
+    const secretName = 'AGENT_DOCK_TEST_SECRET_PROBE';
+    process.env[secretName] = 'should-never-reach-the-child';
+    try {
+      const connection = new StdioMcpConnection(spawnFixture(), cwd, FAST);
+      try {
+        const leaked = await connection.callTool('env_probe', { name: secretName });
+        expect(leaked).toEqual({ status: 'completed', output: { value: null } });
+        // Sanity: the reviewed OS/runtime floor still reaches the child, so it isn't just a
+        // fully-empty environment that would also (trivially) hide the secret.
+        const path = await connection.callTool('env_probe', { name: 'PATH' });
+        expect((path.output as { value: unknown }).value).not.toBeNull();
+      } finally {
+        await connection.close();
+      }
+    } finally {
+      delete process.env[secretName];
+    }
+  });
+
+  it('still passes through a server config\'s own explicitly declared env entries', async () => {
+    const cwd = await tempCwd();
+    const connection = new StdioMcpConnection(
+      { command: process.execPath, args: [FIXTURE], env: { AGENTDOCK_MCP_TEST_VAR: 'declared-value' } },
+      cwd,
+      FAST,
+    );
+    try {
+      const result = await connection.callTool('env_probe', { name: 'AGENTDOCK_MCP_TEST_VAR' });
+      expect(result).toEqual({ status: 'completed', output: { value: 'declared-value' } });
     } finally {
       await connection.close();
     }

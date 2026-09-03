@@ -30,6 +30,7 @@ const TOOLS = [
   { name: 'huge', description: 'Returns an oversized result.' },
   { name: 'hang', description: 'Never responds.' },
   { name: 'crash', description: 'Exits the process immediately.' },
+  { name: 'env_probe', description: 'Reports one of this process\'s own env var values.', annotations: { readOnlyHint: true } },
 ];
 
 rl.on('line', (line) => {
@@ -86,6 +87,11 @@ rl.on('line', (line) => {
     }
     if (name === 'crash') {
       process.exit(1);
+    }
+    if (name === 'env_probe') {
+      const varName = params?.arguments?.name;
+      respond(id, { content: { value: typeof varName === 'string' ? (process.env[varName] ?? null) : null } });
+      return;
     }
     respondError(id, `unknown tool: ${String(name)}`);
     return;

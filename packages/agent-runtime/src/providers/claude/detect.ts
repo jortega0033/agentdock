@@ -1,4 +1,5 @@
 import type { AuthSource, AuthStatus, ProviderStatus } from '@agent-dock/shared';
+import { PROVIDER_DISPLAY_NAMES } from '@agent-dock/shared';
 import { execCapture } from '../../process/exec-capture.js';
 import { findExecutable } from '../../detect-executable.js';
 import type { Logger } from '../../logger.js';
@@ -66,7 +67,7 @@ export async function detectClaude(logger: Logger): Promise<ProviderStatus> {
     id: 'claude' as const,
     // Product-facing provider identity stays "Claude Agent" for both transports; this function
     // still probes only the separately installed local CLI compatibility path.
-    name: 'Claude Agent',
+    name: PROVIDER_DISPLAY_NAMES.claude,
     authSource: 'unknown' as const,
     capabilities: CLAUDE_CAPABILITIES,
   };

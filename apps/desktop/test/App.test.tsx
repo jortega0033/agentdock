@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   AgentEventV2Envelope,
   AgentSessionV2,
+  CapabilitySupportRecord,
   ProviderCapabilities,
   ProviderStatus,
   ProviderStatusV2,
@@ -109,20 +110,56 @@ function installBridge(overrides: Partial<AgentDockBridge> = {}): {
     listMcpServers: vi.fn().mockResolvedValue({ servers: [], revision: 'test-1' }),
     configureMcpServer: vi.fn().mockResolvedValue({ servers: [], revision: 'test-1' }),
     actionMcpServer: vi.fn().mockResolvedValue({ servers: [], revision: 'test-1' }),
-    getMcpCatalog: vi.fn().mockResolvedValue({ serverId: 'fixture', items: [], revision: 'test-1' }),
+    getMcpCatalog: vi
+      .fn()
+      .mockResolvedValue({ serverId: 'fixture', items: [], revision: 'test-1' }),
     startMcpOAuth: vi.fn().mockResolvedValue({ serverId: 'fixture', status: 'unsupported' }),
-    invokeMcpTool: vi.fn().mockResolvedValue({ serverId: 'fixture', toolId: 'tool', status: 'failed' }),
+    invokeMcpTool: vi
+      .fn()
+      .mockResolvedValue({ serverId: 'fixture', toolId: 'tool', status: 'failed' }),
     listProviderComponents: vi.fn().mockResolvedValue({ items: [], revision: 'test-1' }),
-    manageProviderComponent: vi.fn().mockResolvedValue({ componentId: 'project/skill/test', status: 'unsupported' }),
-    invokeProviderComponent: vi.fn().mockResolvedValue({ componentId: 'project/skill/test', status: 'unsupported' }),
+    manageProviderComponent: vi
+      .fn()
+      .mockResolvedValue({ componentId: 'project/skill/test', status: 'unsupported' }),
+    invokeProviderComponent: vi
+      .fn()
+      .mockResolvedValue({ componentId: 'project/skill/test', status: 'unsupported' }),
     getSubagentGraph: vi.fn().mockImplementation(async (sessionId) => ({ sessionId, nodes: [] })),
-    controlSubagent: vi.fn().mockResolvedValue({ sessionId: SESSION_ID, agentId: SESSION_ID, status: 'unsupported' }),
-    previewWorktree: vi.fn().mockResolvedValue({ workspaceId: 'a'.repeat(64), name: 'test', displayTarget: 'test', includeFiles: [], ignoredFiles: [], secretRisk: false, requiresConfirmation: true }),
-    createWorktree: vi.fn().mockResolvedValue({ id: SESSION_ID, workspaceId: 'a'.repeat(64), name: 'test', displayPath: 'test', status: 'ready', createdAt: '2026-01-01T00:00:00.000Z' }),
+    controlSubagent: vi
+      .fn()
+      .mockResolvedValue({ sessionId: SESSION_ID, agentId: SESSION_ID, status: 'unsupported' }),
+    previewWorktree: vi.fn().mockResolvedValue({
+      workspaceId: 'a'.repeat(64),
+      name: 'test',
+      displayTarget: 'test',
+      includeFiles: [],
+      ignoredFiles: [],
+      secretRisk: false,
+      requiresConfirmation: true,
+    }),
+    createWorktree: vi.fn().mockResolvedValue({
+      id: SESSION_ID,
+      workspaceId: 'a'.repeat(64),
+      name: 'test',
+      displayPath: 'test',
+      status: 'ready',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    }),
     listWorktrees: vi.fn().mockResolvedValue([]),
-    cleanupWorktree: vi.fn().mockResolvedValue({ id: SESSION_ID, workspaceId: 'a'.repeat(64), name: 'test', displayPath: 'test', status: 'missing', createdAt: '2026-01-01T00:00:00.000Z' }),
+    cleanupWorktree: vi.fn().mockResolvedValue({
+      id: SESSION_ID,
+      workspaceId: 'a'.repeat(64),
+      name: 'test',
+      displayPath: 'test',
+      status: 'missing',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    }),
     selectAndUploadAttachments: vi.fn().mockResolvedValue([]),
-    validateStructuredOutput: vi.fn().mockImplementation(async (input) => ({ valid: true, normalizedOutput: input.output, errors: [] })),
+    validateStructuredOutput: vi.fn().mockImplementation(async (input) => ({
+      valid: true,
+      normalizedOutput: input.output,
+      errors: [],
+    })),
     createSession: vi.fn(),
     cancelSession: vi.fn().mockResolvedValue(undefined),
     onSessionEvent: vi.fn().mockReturnValue(() => {}),
@@ -437,6 +474,120 @@ describe('App security flow', () => {
       /3\s*Archived/,
     );
     expect(bridge.reconnectInteractiveSession).not.toHaveBeenCalled();
+  });
+
+  function continuationRecord(
+    id: 'session.resume' | 'session.fork',
+    support: 'supported' | 'unsupported',
+  ): CapabilitySupportRecord {
+    return {
+      id,
+      kind: 'operation',
+      owner: 'provider',
+      support,
+      stability: 'stable',
+      evidence: [],
+      scope: {
+        provider: 'claude',
+        transport: 'legacy-one-shot',
+        platform: 'win32',
+        model: '*',
+        authMode: '*',
+        trustState: 'untrusted',
+        versions: {
+          adapterContract: '2',
+          transport: 'unknown',
+          runtime: process.version,
+          fixtureSet: 'test-fixture',
+        },
+      },
+      prerequisites: {
+        capabilities: [],
+        trustStates: ['untrusted'],
+        sessionStates: ['starting'],
+        services: [],
+      },
+      possibleEffects: [],
+      effectsComplete: true,
+      constraints: { kind: 'continuation', native: true },
+      ...(support === 'unsupported' ? { reason: 'test fixture' } : {}),
+    } as CapabilitySupportRecord;
+  }
+
+  it('disables Resume/Fork for a terminal session whose provider does not advertise them as supported (issue #54)', async () => {
+    const completedSession: AgentSessionV2 = {
+      ...SESSION,
+      status: 'completed',
+      completedAt: '2026-08-31T00:01:00.000Z',
+    };
+    window.localStorage.setItem(
+      'agent-dock.session-workspace.v1',
+      JSON.stringify({
+        selectedSessionId: SESSION_ID,
+        unreadBySession: {},
+        archivedSessionIds: [],
+      }),
+    );
+    // CLAUDE_INSTALLED's default `capabilities: []` already matches this (truthful, no record at
+    // all), but list both capabilities explicitly as unsupported to also prove the button reacts
+    // to an explicit 'unsupported' record, not just an absent one.
+    installBridge({
+      listProvidersV2: vi.fn().mockResolvedValue([
+        {
+          ...CLAUDE_INSTALLED,
+          capabilities: [
+            continuationRecord('session.resume', 'unsupported'),
+            continuationRecord('session.fork', 'unsupported'),
+          ],
+        },
+      ]),
+      listInteractiveSessions: vi.fn().mockResolvedValue({ sessions: [completedSession] }),
+    });
+
+    render(<App />);
+
+    const resumeButton = await screen.findByRole('button', { name: 'Resume' });
+    const forkButton = screen.getByRole('button', { name: 'Fork' });
+    expect(resumeButton).toBeDisabled();
+    expect(forkButton).toBeDisabled();
+  });
+
+  it('enables Resume/Fork for a terminal session whose provider does advertise them as supported', async () => {
+    const completedSession: AgentSessionV2 = {
+      ...SESSION,
+      status: 'completed',
+      completedAt: '2026-08-31T00:01:00.000Z',
+    };
+    window.localStorage.setItem(
+      'agent-dock.session-workspace.v1',
+      JSON.stringify({
+        selectedSessionId: SESSION_ID,
+        unreadBySession: {},
+        archivedSessionIds: [],
+      }),
+    );
+    installBridge({
+      listProvidersV2: vi.fn().mockResolvedValue([
+        {
+          ...CLAUDE_INSTALLED,
+          capabilities: [
+            continuationRecord('session.resume', 'supported'),
+            continuationRecord('session.fork', 'supported'),
+          ],
+        },
+      ]),
+      listInteractiveSessions: vi.fn().mockResolvedValue({ sessions: [completedSession] }),
+    });
+
+    render(<App />);
+
+    const resumeButton = await screen.findByRole('button', { name: 'Resume' });
+    const forkButton = screen.getByRole('button', { name: 'Fork' });
+    fireEvent.change(screen.getByPlaceholderText(/describe the task/i), {
+      target: { value: 'continue please' },
+    });
+    expect(resumeButton).toBeEnabled();
+    expect(forkButton).toBeEnabled();
   });
 
   it('sends dirty-worktree sharing consent only after explicit opt-in', async () => {

@@ -12,6 +12,7 @@ import {
 import { AGENT_DOCK_PROTOCOL_VERSION } from '@agent-dock/shared';
 import { buildServer } from '../src/server.js';
 import { SessionManager } from '../src/session-manager.js';
+import { SessionAdmissionController } from '../src/session-admission.js';
 
 const TOKEN = 'test-token-123';
 
@@ -245,6 +246,46 @@ describe('POST /sessions', () => {
     });
     expect(res.statusCode).toBe(201);
     expect(provider.startedOptions.at(-1)?.resumeProviderSessionId).toBe('prior-thread');
+  });
+
+  it('maps admission-controller rejection to 429 session_capacity_exceeded (issue #52)', async () => {
+    const registry = new ProviderRegistry();
+    registry.register(
+      new FakeProvider(
+        'claude',
+        {
+          id: 'claude',
+          name: 'Claude Code',
+          installed: true,
+          authenticated: 'authenticated',
+          capabilities: FAKE_PROVIDER_CAPABILITIES,
+        },
+        'hang-until-cancelled',
+      ),
+    );
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, {
+      admission: new SessionAdmissionController({ maxActiveSessions: 1 }),
+    });
+    const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+
+    const first = await app.inject({
+      method: 'POST',
+      url: '/sessions',
+      headers: { authorization: `Bearer ${TOKEN}` },
+      payload: { provider: 'claude', cwd, prompt: 'hi' },
+    });
+    expect(first.statusCode).toBe(201);
+
+    const second = await app.inject({
+      method: 'POST',
+      url: '/sessions',
+      headers: { authorization: `Bearer ${TOKEN}` },
+      payload: { provider: 'claude', cwd, prompt: 'hi' },
+    });
+    expect(second.statusCode).toBe(429);
+    expect(second.json()).toMatchObject({ code: 'session_capacity_exceeded' });
+
+    await sessionManager.cancelAll(2_000);
   });
 });
 

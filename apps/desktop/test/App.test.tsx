@@ -336,6 +336,9 @@ describe('App security flow', () => {
     );
   });
 
+  // Real work here is well under a second in isolation (issue #60); the explicit timeout below is
+  // headroom for CI's parallel-worker CPU contention, not a blanket global increase — a genuine
+  // hang still fails, just after longer.
   it('runs three concurrent sessions without mixing background events or cancellation targets', async () => {
     const secondSessionId = '223e4567-e89b-42d3-a456-426614174000';
     const secondExecutionId = '223e4567-e89b-42d3-a456-426614174001';
@@ -431,7 +434,7 @@ describe('App security flow', () => {
     await waitFor(() =>
       expect(bridge.cancelInteractiveSession).toHaveBeenLastCalledWith(SESSION_ID),
     );
-  });
+  }, 15_000);
 
   it('restores catalog selection, unread state, terminal history, and branch after restart', async () => {
     const restoredId = '423e4567-e89b-42d3-a456-426614174000';

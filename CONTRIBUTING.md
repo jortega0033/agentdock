@@ -92,7 +92,12 @@ and `build`, in that order, on every push to `main` and every pull request
 (`.github/workflows/ci.yml`). `pnpm audit` is currently a local contribution check, not a CI step.
 A separate Windows workflow (`.github/workflows/package-windows.yml`) runs provider conformance,
 `pnpm package:win`, focused process-ownership tests, and the packaged-daemon smoke test; it also
-fails if the NSIS installer was not produced. Neither workflow installs or authenticates a real
+fails if the NSIS installer was not produced. A third Windows workflow
+(`.github/workflows/windows-test.yml`) runs the complete `pnpm test` suite on both the minimum and
+newest supported Node versions, plus a repetition-stress job that re-runs the two test files
+previously observed to be timing-sensitive under Windows' real parallel-worker contention ten times
+each (issue #60) — Core CI's `test` step above only ever runs on `ubuntu-latest`, so this is
+otherwise unverified on Windows. None of the three workflows installs or authenticates a real
 Claude/Codex CLI. See [Testing requirements](#testing-requirements) above for why that's unnecessary.
 
 ### Provider contribution checklist

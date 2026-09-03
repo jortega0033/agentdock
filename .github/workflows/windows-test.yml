@@ -1,0 +1,91 @@
+name: Windows Test Suite
+
+# Proves the full test suite (not just the packaging-smoke subset in package-windows.yml) is
+# actually green on Windows, on both ends of the supported Node range — Core CI's build-and-test
+# job only runs on ubuntu-latest, so this was previously unverified in CI at all (issue #60).
+#
+# `stress-flaky-files` separately hammers the two files that were observed exceeding their timeout
+# under Windows' real parallel-worker CPU/IO contention (apps/daemon/test/subagent-worktree.test.ts,
+# apps/desktop/test/App.test.tsx), repeating them well past the "10 consecutive runs" bar cheaply,
+# without repeating the entire suite on every push.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-suite:
+    name: Full suite (Node ${{ matrix.node-version }})
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # package.json declares "engines": { "node": ">=20" } with no upper bound — 20 is the
+        # minimum, 22 is the newest Active LTS line, matching "minimum and newest supported."
+        node-version: [20, 22]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        run: pnpm test
+
+  stress-flaky-files:
+    name: Repetition stress (previously timing-sensitive files)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Repeat apps/daemon/test/subagent-worktree.test.ts 10x
+        shell: pwsh
+        run: |
+          for ($i = 1; $i -le 10; $i++) {
+            Write-Host "=== subagent-worktree.test.ts run $i/10 ==="
+            pnpm --filter @agent-dock/daemon exec vitest run test/subagent-worktree.test.ts
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "subagent-worktree.test.ts failed on run $i/10"
+              exit 1
+            }
+          }
+
+      - name: Repeat apps/desktop/test/App.test.tsx 10x
+        shell: pwsh
+        run: |
+          for ($i = 1; $i -le 10; $i++) {
+            Write-Host "=== App.test.tsx run $i/10 ==="
+            pnpm --filter @agent-dock/desktop exec vitest run test/App.test.tsx
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "App.test.tsx failed on run $i/10"
+              exit 1
+            }
+          }

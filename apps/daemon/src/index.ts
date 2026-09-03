@@ -1,4 +1,4 @@
-import { createConsoleLogger } from '@agent-dock/agent-runtime';
+import { closeAllMcpConnections, createConsoleLogger } from '@agent-dock/agent-runtime';
 import { join } from 'node:path';
 import { AuditStore } from './audit-store.js';
 import { generateToken } from './auth-token.js';
@@ -135,6 +135,9 @@ async function main() {
     logger.info('shutting down', { signal });
     sessionManager.beginShutdown();
     await sessionManager.cancelAll();
+    await closeAllMcpConnections().catch(() => {
+      logger.warn('MCP connection cleanup failed');
+    });
     const closing = app.close().catch(() => {
       logger.warn('daemon HTTP shutdown failed');
     });

@@ -3,11 +3,12 @@
 ## Claude transport mode is unavailable
 
 `AGENT_DOCK_CLAUDE_TRANSPORT` must be exactly `auto`, `sdk`, or `cli`; it defaults to `auto`.
-`cli` uses the unchanged legacy Claude CLI path. SDK mode requires Windows' packaged pinned SDK
-asset (SDK `0.3.251`, embedded Claude executable `2.1.251`), a trusted workspace, and exactly one
-eligible auth source: `ANTHROPIC_API_KEY`, Bedrock, Vertex, or Foundry. Claude.ai/subscription OAuth
-and `CLAUDE_CODE_OAUTH_TOKEN` are never eligible. In `auto`, an SDK eligibility miss selects the
-legacy CLI before any SDK work is accepted; there is no cross-auth fallback after acceptance.
+`cli` uses the unchanged Claude CLI compatibility path. SDK mode requires Windows' packaged pinned
+SDK asset (SDK `0.3.251`, embedded Claude executable `2.1.251`), a trusted workspace, and exactly
+one eligible auth source: `ANTHROPIC_API_KEY`, Bedrock, Vertex, or Foundry. Claude.ai/subscription
+OAuth and `CLAUDE_CODE_OAUTH_TOKEN` are never eligible. In `auto`, an SDK eligibility miss selects
+the Claude CLI compatibility transport before any SDK work is accepted; there is no cross-auth
+fallback after acceptance.
 
 SDK settings, MCP, hooks, plugins, skills, agents, and Bash are intentionally disabled. If SDK mode
 fails closed, use `auto` or `cli` after checking the auth source, trust state, and packaged asset.
@@ -17,7 +18,8 @@ fails closed, use `auto` or `cli` after checking the auth source, trust state, a
 `AGENT_DOCK_CODEX_TRANSPORT` must be exactly `auto`, `app-server`, or `exec`; it defaults to `auto`.
 The app-server path requires the exact validated Codex CLI version, authenticated status, and a
 trusted workspace. Forced `app-server` mode fails closed if a gate does not pass. In `auto`, a safe
-startup failure may fall back to the legacy exec bridge only before work is delivered; accepted or
+startup failure may fall back to the Codex exec compatibility transport only before work is
+delivered; accepted or
 ambiguous work is never replayed. See
 [providers.md#historical-v02-decision-and-current-v2-transport](providers.md#historical-v02-decision-and-current-v2-transport).
 

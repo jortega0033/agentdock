@@ -12,9 +12,9 @@ const AUTH_SOURCE_LABELS: Record<string, string> = {
 };
 
 function authLabel(status: ProviderStatusV2): string {
-  if (status.authenticated === 'unauthenticated') return 'no';
-  if (status.authenticated === 'unknown') return 'unknown';
-  return status.authSource ? AUTH_SOURCE_LABELS[status.authSource] ?? status.authSource : 'yes';
+  if (status.authenticated === 'unauthenticated') return 'No';
+  if (status.authenticated === 'unknown') return 'Unknown';
+  return status.authSource ? AUTH_SOURCE_LABELS[status.authSource] ?? status.authSource : 'Yes';
 }
 
 function sandboxLabel(status: ProviderStatusV2): string {
@@ -64,7 +64,9 @@ export function ProviderPanel({ providers }: { providers: ProviderStatusV2[] }) 
           </div>
           <div>Installed: {status.installed ? 'Yes' : 'No'}</div>
           <div>Authenticated: {authLabel(status)}</div>
-          <div className="provider-card__sandbox">{sandboxLabel(status)}</div>
+          <div className={`provider-card__sandbox provider-card__sandbox--${status.sandbox.badge}`}>
+            {sandboxLabel(status)}
+          </div>
           <div>OS isolation: {status.sandbox.os.state.replaceAll('_', ' ')}</div>
           {status.version && <div>Version: {status.version}</div>}
           {status.error && <div className="provider-card__error">{status.error}</div>}

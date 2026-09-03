@@ -34,12 +34,19 @@ webPreferences: {
 ```
 
 `webSecurity` is never overridden. `setWindowOpenHandler` denies every `window.open`/`target=_blank`
-popup and opens the URL in the OS browser instead. `will-navigate` (`isAllowedNavigationTarget()`
-in `main.ts`) allows only: in dev mode, the exact dev-server _origin_ (a real `new URL(...).origin`
-comparison, not a `startsWith` prefix match (the earlier prefix check would have let
-`http://localhost:5173.evil.example` through against an allowed `http://localhost:5173`); in
-packaged mode, the exact `file://` URL of the app's own `dist/index.html`, not any local file path.
-Anything else redirects to the OS browser instead. A `session.setPermissionRequestHandler` denies
+popup and, like every other external-launch path (blocked `will-navigate` targets, OAuth
+authorization URLs), routes the target through `parseAllowedExternalUrl()`
+(`electron/allowed-external-url.ts`) before it can reach `shell.openExternal`: only an absolute
+`https:` URL with a non-empty host and no embedded username/password is opened, in the OS browser.
+`file:`, `javascript:`, `data:`, `blob:`, `mailto:`, `tel:`, a custom/unregistered scheme, a bare
+UNC/filesystem path, and anything malformed are all rejected before any OS launch, and only a
+bounded scheme/host summary is ever logged, never the full URL. `will-navigate`
+(`isAllowedNavigationTarget()` in `main.ts`) allows only: in dev mode, the exact dev-server _origin_
+(a real `new URL(...).origin` comparison, not a `startsWith` prefix match (the earlier prefix check
+would have let `http://localhost:5173.evil.example` through against an allowed
+`http://localhost:5173`); in packaged mode, the exact `file://` URL of the app's own
+`dist/index.html`, not any local file path. Anything else is validated and redirected to the OS
+browser instead. A `session.setPermissionRequestHandler` denies
 every permission request by default (camera, mic, geolocation, notifications, ...). The current UI
 renders normalized provider/user content as inert React text, not raw HTML or remote pages, and
 requests no browser permissions. These settings remain defense in depth for that content and for a
@@ -73,6 +80,14 @@ remains active. A replay gap sends a validated `replay_reset` snapshot before re
 daemon's earliest sequence; a permanent stream failure sends a sanitized error notice and stops
 retrying. If you're adding a new capability the renderer needs, add a narrow, single-purpose
 function here; do not add a generic arbitrary-channel escape hatch.
+
+Every `ipcMain.handle` registration in `main.ts` routes through a local `handle()` wrapper
+(`isFromMainWindowFrame()`, `electron/ipc-sender-guard.ts`) instead of calling `ipcMain.handle`
+directly: the message must come from the current main window's own top-level frame. A destroyed
+window, a secondary `webContents` (e.g. a devtools window), or a non-main child frame of the right
+window are all rejected before the handler body runs, rather than relying on "there's only one
+window today" as an implicit assumption that silently stops holding the moment a fork adds a second
+window or renders untrusted content in an iframe.
 
 ## Daemon lifecycle from Electron's side
 

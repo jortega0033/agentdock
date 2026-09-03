@@ -31,9 +31,11 @@ import {
   type StartSessionOptions,
   type WorkspaceTrustEvidence,
 } from '@agent-dock/agent-runtime';
+import { basename } from 'node:path';
 import { MemorySessionStore, type SessionStore } from './session-store.js';
 import type { AuditStore } from './audit-store.js';
 import type { ExecutionGraphStore } from './execution-graph-store.js';
+import type { SubagentGraphStore } from './subagent-graph-store.js';
 import {
   InteractionState,
   type InteractionResolutionReason,
@@ -126,6 +128,7 @@ export interface SessionManagerSecurityOptions {
   interactionTimeoutMs?: number;
   providerStateDirectory?: string;
   executionGraphStore?: ExecutionGraphStore;
+  subagentStore?: SubagentGraphStore;
   /**
    * Daemon-owned cap on concurrent pending+running provider processes, shared by every session
    * creation path. Defaults to a generous but still-bounded ceiling when not supplied, so an
@@ -609,6 +612,7 @@ export class SessionManager {
       const index = runtime.nextEventIndex;
       runtime.nextEventIndex += 1;
       this.recordInteractiveEvent(runtime, index, event);
+      if (event.type === 'subagent.status') this.applySubagentEvent(id, event);
       for (const listener of [...runtime.listeners]) {
         try {
           listener(index, event);
@@ -698,6 +702,59 @@ export class SessionManager {
       if (pending?.state !== 'resolving') runtime.interactions.removeResolved(event.requestId);
     }
     return event;
+  }
+
+  /**
+   * Upserts one subagent.status event into the durable child-agent graph. `startedAt` and
+   * `workspace` are carried forward from any existing node rather than reset on every update --
+   * this event's `timestamp` is when this particular status was observed, not when the child was
+   * first spawned. A failure here (e.g. a malformed parent/child relationship a provider reported
+   * out of order) is logged and dropped, never allowed to crash the session's own event loop.
+   */
+  private applySubagentEvent(
+    id: string,
+    event: Extract<AgentEventV2, { type: 'subagent.status' }>,
+  ): void {
+    const store = this.security.subagentStore;
+    if (!store) return;
+    const session = this.store.get(id);
+    if (!session) return;
+    const existing = store.graph(id).nodes.find((node) => node.id === event.agentId);
+    const terminal =
+      event.status === 'completed' || event.status === 'failed' || event.status === 'cancelled';
+    const observedAt = new Date().toISOString();
+    try {
+      store.upsert({
+        id: event.agentId,
+        sessionId: id,
+        parentId: event.parentAgentId,
+        nativeChildId: event.nativeChildId,
+        provider: session.provider,
+        role: event.role,
+        name: event.name,
+        status: event.status,
+        model: event.model,
+        startedAt: existing?.startedAt ?? observedAt,
+        updatedAt: observedAt,
+        // The first terminal timestamp wins: a replayed or duplicate terminal event (the same
+        // child reported completed/failed/cancelled more than once) must not keep sliding
+        // completedAt forward on every repeat.
+        completedAt: existing?.completedAt ?? (terminal ? observedAt : undefined),
+        toolSummary: event.toolSummary,
+        permissionSummary: event.permissionSummary,
+        workspace: existing?.workspace ?? {
+          kind: 'unknown',
+          displayName: basename(session.cwd) || 'workspace',
+        },
+        controls: event.controls,
+      });
+    } catch (error) {
+      this.logger.warn('failed to upsert subagent graph node', {
+        sessionId: id,
+        agentId: event.agentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   private async resolveAutomaticApproval(

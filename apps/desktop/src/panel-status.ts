@@ -59,13 +59,18 @@ const COMPONENT_STATUS: PanelStatusDescriptor = descriptor(
 
 /**
  * Storage and routes for the child-agent graph (apps/daemon/src/subagent-graph-store.ts,
- * routes/v2-agents-worktrees.ts) are entirely provider-agnostic, and no adapter under
- * packages/agent-runtime/src/providers/* references this graph at all -- neither provider
- * currently populates it with a real subagent lifecycle event.
+ * routes/v2-agents-worktrees.ts) are provider-agnostic, but only the Codex app-server adapter
+ * (packages/agent-runtime/src/providers/codex/app-server/normalizer.ts) currently populates it,
+ * from real `subAgentActivity` items in the pinned app-server schema (issue #58). Codex's own
+ * schema has no explicit "completed" kind for that item, so a normally-finishing child is closed
+ * out when its parent turn ends with no further activity for it -- an inferred, not
+ * provider-confirmed, terminal signal. Neither Claude transport populates this graph at all: the
+ * only signal available (a `Task` tool-use) would require inferring a child from a tool name,
+ * which this repo's own evidence rules for this capability explicitly rule out.
  */
 const CHILD_AGENT_STATUS: PanelStatusDescriptor = descriptor(
-  'scaffold_only',
-  'Storage and routes exist, but no current production provider populates this graph with real events yet.',
+  'provider_dependent',
+  'Codex app-server populates this graph from real lifecycle events (a child agent\'s normal completion is inferred from its parent turn ending, not a confirmed provider signal). No other provider or transport populates it yet.',
 );
 const NO_SESSION_SELECTED_STATUS: PanelStatusDescriptor = descriptor(
   'unsupported',

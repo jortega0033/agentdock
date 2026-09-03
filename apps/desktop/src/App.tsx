@@ -16,6 +16,7 @@ import type {
   RendererQuestionResponse,
 } from '../electron/interaction-broker.js';
 import { ProviderPanel } from './components/ProviderPanel.js';
+import { DemoModeBanner } from './components/DemoModeBanner.js';
 import { McpPanel } from './components/McpPanel.js';
 import { ComponentPanel } from './components/ComponentPanel.js';
 import { AgentGraphPanel } from './components/AgentGraphPanel.js';
@@ -63,7 +64,18 @@ const INTERACTIVE_CAPABILITIES: CapabilityRequest = {
   allowExperimental: false,
 };
 
-export function App() {
+export interface AppProps {
+  demoMode?: boolean;
+  onEnterDemo?: () => void;
+  onExitDemo?: () => void;
+}
+
+// demoMode/onEnterDemo/onExitDemo default to inert values so every existing `render(<App />)`
+// call site (this file's own test suite included) keeps working unchanged -- AppRoot.tsx is the
+// only real caller, and it always passes all three explicitly.
+const NOOP = () => {};
+
+export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }: AppProps = {}) {
   const [daemonState, setDaemonState] = useState<DaemonState>('connecting');
   const [daemonError, setDaemonError] = useState<string>();
   const [providers, setProviders] = useState<ProviderStatusV2[]>();
@@ -121,6 +133,18 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    // A future refactor could set window.agentDock to the demo bridge without going through
+    // AppRoot's enterDemoMode (or vice versa) -- that would silently mislabel demo data as real
+    // (or vice versa), so surface it loudly instead of trusting the `demoMode` prop alone.
+    const bridgeIsDemo = Boolean(
+      (window.agentDock as unknown as { __agentDockDemo?: boolean }).__agentDockDemo,
+    );
+    if (bridgeIsDemo !== demoMode) {
+      console.error('AgentDock: demo-mode flag and active bridge disagree — refusing to trust labeling');
+    }
+  }, [demoMode]);
+
+  useEffect(() => {
     if (daemonState !== 'ready') return;
     let cancelled = false;
     void window.agentDock
@@ -131,7 +155,14 @@ export function App() {
       .catch((error: Error) => {
         if (!cancelled) setProvidersError(error.message);
       });
-    void restoreSessionCatalog();
+    // The demo bridge has no persisted catalog to restore (listInteractiveSessions always
+    // returns empty) and restoring would otherwise read the real user's saved workspace
+    // preferences from localStorage into a demo session -- skip straight to "loaded".
+    if (demoMode) {
+      setCatalogLoaded(true);
+    } else {
+      void restoreSessionCatalog();
+    }
     return () => {
       cancelled = true;
     };
@@ -165,10 +196,11 @@ export function App() {
         if (!cancelled) setCatalogLoaded(true);
       }
     }
-  }, [daemonState]);
+  }, [daemonState, demoMode]);
 
   useEffect(() => {
-    if (!catalogLoaded) return;
+    // A demo session's fake IDs must never land in the real user's saved workspace preferences.
+    if (!catalogLoaded || demoMode) return;
     try {
       window.localStorage.setItem(
         WORKSPACE_PREFERENCES_KEY,
@@ -177,7 +209,7 @@ export function App() {
     } catch {
       // Daemon state remains authoritative when best-effort UI preferences cannot be saved.
     }
-  }, [catalogLoaded, workspace]);
+  }, [catalogLoaded, workspace, demoMode]);
 
   useEffect(() => {
     const unsubscribeEvents = window.agentDock.onInteractiveSessionEvent((sessionId, event) => {
@@ -429,8 +461,39 @@ export function App() {
   const canResumeSelected = selectedTerminal && sessionSupports('session.resume');
   const canForkSelected = selectedTerminal && sessionSupports('session.fork');
 
+  const runDisabledReason = (): string | undefined => {
+    if (canRun) return undefined;
+    if (creating) return 'Run: a request is already in flight.';
+    if (daemonState !== 'ready') return 'Run: waiting for the local runtime to be ready.';
+    if (!selectedProviderStatus?.installed) {
+      return `Run: ${PROVIDER_DISPLAY_NAMES[provider]} is not installed.`;
+    }
+    if (cwd.trim().length === 0) return 'Run: enter a working directory.';
+    if (prompt.trim().length === 0) return 'Run: enter a prompt.';
+    return undefined;
+  };
+
+  const continuationDisabledReason = (
+    verb: 'Resume' | 'Fork',
+    capable: boolean,
+  ): string | undefined => {
+    if (capable && prompt.trim().length > 0 && !creating) return undefined;
+    if (creating) return `${verb}: a request is already in flight.`;
+    if (!selectedTerminal) return `${verb}: select a completed session first.`;
+    if (!capable) {
+      return `${verb}: this provider does not support ${verb === 'Resume' ? 'resuming' : 'forking'} a session yet.`;
+    }
+    return `${verb}: enter a prompt to continue.`;
+  };
+
+  const cancelDisabledReason = (): string | undefined =>
+    selectedEntry && projectedSessionStatus(selectedEntry.session.status) !== 'running'
+      ? 'Cancel: this session is not running.'
+      : undefined;
+
   return (
     <div className="app-shell">
+      {demoMode && <DemoModeBanner onExit={onExitDemo} />}
       <header className="app-header">
         <div className="brand">
           <div className="brand__mark" aria-hidden="true">
@@ -441,10 +504,17 @@ export function App() {
             <p className="subtitle">A secure local runtime for your own agent CLI or SDK credentials</p>
           </div>
         </div>
-        <div className={`runtime-state runtime-state--${daemonState}`}>
-          <span className="runtime-state__dot" aria-hidden="true" />
-          <span>Local runtime</span>
-          <strong>{daemonState}</strong>
+        <div className="app-header__status">
+          {!demoMode && (
+            <button className="button button--secondary" type="button" onClick={onEnterDemo}>
+              Try a demo
+            </button>
+          )}
+          <div className={`runtime-state runtime-state--${daemonState}`}>
+            <span className="runtime-state__dot" aria-hidden="true" />
+            <span>Local runtime</span>
+            <strong>{daemonState}</strong>
+          </div>
         </div>
       </header>
 
@@ -523,7 +593,12 @@ export function App() {
                 <span className="section-count">{providers?.length ?? '–'}</span>
               </div>
               {providersError && <div className="banner banner--error">{providersError}</div>}
-              {providers && <ProviderPanel providers={providers} />}
+              {providers && (
+                <ProviderPanel
+                  providers={providers}
+                  onTryDemo={demoMode ? undefined : onEnterDemo}
+                />
+              )}
             </section>
             <section className="card">
               <div className="section-heading">
@@ -644,6 +719,7 @@ export function App() {
                   type="button"
                   onClick={handleRun}
                   disabled={!canRun}
+                  title={runDisabledReason()}
                 >
                   Run
                 </button>
@@ -652,6 +728,7 @@ export function App() {
                   type="button"
                   onClick={() => void handleContinuation('resume')}
                   disabled={!canResumeSelected || !prompt.trim() || creating}
+                  title={continuationDisabledReason('Resume', canResumeSelected)}
                 >
                   Resume
                 </button>
@@ -660,6 +737,7 @@ export function App() {
                   type="button"
                   onClick={() => void handleContinuation('fork')}
                   disabled={!canForkSelected || !prompt.trim() || creating}
+                  title={continuationDisabledReason('Fork', canForkSelected)}
                 >
                   Fork
                 </button>
@@ -705,6 +783,7 @@ export function App() {
                   type="button"
                   onClick={() => void handleCancel(selectedEntry.session.id)}
                   disabled={projectedSessionStatus(selectedEntry.session.status) !== 'running'}
+                  title={cancelDisabledReason()}
                 >
                   Cancel
                 </button>

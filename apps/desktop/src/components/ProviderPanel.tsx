@@ -24,7 +24,13 @@ function sandboxLabel(status: ProviderStatusV2): string {
   return 'No sandbox verified';
 }
 
-export function ProviderPanel({ providers }: { providers: ProviderStatusV2[] }) {
+export function ProviderPanel({
+  providers,
+  onTryDemo,
+}: {
+  providers: ProviderStatusV2[];
+  onTryDemo?: () => void;
+}) {
   // Issue #73: the registry always reports every registered provider (each with its own real
   // `installed` flag from findExecutable()), so `providers.length === 0` essentially never
   // happens in practice -- the actual "nothing to work with" state is every entry reporting
@@ -46,6 +52,11 @@ export function ProviderPanel({ providers }: { providers: ProviderStatusV2[] }) 
           <button type="button" onClick={() => void window.agentDock.openProviderInstallDocs('codex')}>
             {PROVIDER_DISPLAY_NAMES.codex} install docs
           </button>
+          {onTryDemo && (
+            <button className="button button--secondary" type="button" onClick={onTryDemo}>
+              Try a demo instead
+            </button>
+          )}
         </div>
       </div>
     );

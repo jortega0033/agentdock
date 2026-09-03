@@ -24,6 +24,7 @@ export function ComponentPanel({ provider, cwd }: { provider: ProviderId; cwd: s
       </div>
       {error && <div className="banner banner--error" role="alert">{error}</div>}
       <div className="component-list">
+        {!error && items.length === 0 && <p className="form-hint">No {kind === 'all' ? 'components' : `${kind}s`} found for this workspace.</p>}
         {items.map((item) => <article className="component-item" key={`${item.provider}:${item.id}`}>
           <div className="row row--spread"><strong>{item.name}</strong><span className={`status-pill status-pill--${item.enabled ? 'ok' : 'muted'}`}>{item.enabled ? 'enabled' : 'disabled'}</span></div>
           <div className="mcp-server__meta">{item.provider} · {item.kind} · {item.scope} · {item.source} · {item.trusted ? 'trusted' : 'untrusted'}</div>

@@ -753,9 +753,11 @@ boundary; AgentDock needs versioned host evidence before reporting `enforced`. S
   credentials there and must treat inspection output as sensitive configuration. Editing sends
   typed fields back through the owning provider.
 
-The current v1 CLI path still inherits the daemon's full environment, as documented in
-[SECURITY.md](../SECURITY.md#environment-inheritance-a-deliberate-tradeoff-not-an-oversight).
-That compatibility behavior is not a v2 credential guarantee.
+The v1 CLI path spawns with a sanitized, default-deny environment (reviewed OS/runtime keys plus
+the target provider's own documented auth-key mode), never the daemon's full environment, as
+documented in
+[SECURITY.md](../SECURITY.md#provider-subprocess-environment-isolation). That is a floor shared
+with v2, not itself a v2 credential guarantee.
 
 ## Persistence, retention, and redaction
 

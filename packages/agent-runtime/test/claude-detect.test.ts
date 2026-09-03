@@ -148,6 +148,43 @@ describe('detectClaude — end-to-end failure paths (mocked exec, no real CLI)',
     });
   });
 
+  it('probes --version and auth status with a sanitized environment, never the daemon\'s full process.env (issue #53)', async () => {
+    process.env.AGENT_DOCK_ENV_ISOLATION_TEST_CANARY = 'CANARY-do-not-leak';
+    try {
+      vi.doMock('../src/detect-executable.js', () => ({
+        findExecutable: async () => '/usr/local/bin/claude',
+      }));
+      const capturedEnvs: Array<NodeJS.ProcessEnv | undefined> = [];
+      vi.doMock('../src/process/exec-capture.js', () => ({
+        execCapture: async (
+          _cmd: string,
+          args: string[],
+          opts: { env?: NodeJS.ProcessEnv },
+        ) => {
+          capturedEnvs.push(opts.env);
+          return args.includes('--version')
+            ? { code: 0, stdout: '2.1.228 (Claude Code)', stderr: '', timedOut: false }
+            : {
+                code: 0,
+                stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }),
+                stderr: '',
+                timedOut: false,
+              };
+        },
+      }));
+      const { detectClaude } = await import('../src/providers/claude/detect.js');
+      await detectClaude({ debug() {}, info() {}, warn() {}, error() {} });
+
+      expect(capturedEnvs).toHaveLength(2); // --version, then auth status
+      for (const env of capturedEnvs) {
+        expect(env).not.toHaveProperty('AGENT_DOCK_ENV_ISOLATION_TEST_CANARY');
+        expect(env?.PATH ?? (env as Record<string, string> | undefined)?.Path).toBeDefined();
+      }
+    } finally {
+      delete process.env.AGENT_DOCK_ENV_ISOLATION_TEST_CANARY;
+    }
+  });
+
   it('reports "unknown" with an error when the auth status output is unparseable garbage', async () => {
     vi.doMock('../src/detect-executable.js', () => ({
       findExecutable: async () => '/usr/local/bin/claude',

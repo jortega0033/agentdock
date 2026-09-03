@@ -31,9 +31,11 @@ export interface StartSessionOptions {
   prompt: string;
   /** Provider-native session/thread id to resume, if the provider supports it. */
   resumeProviderSessionId?: string;
-  /** Unset by every caller in this codebase today: the spawned process inherits the daemon's
-   * full `process.env` by default, deliberately, since the CLI needs its own PATH/HOME/etc. to
-   * find its config and credentials. See SECURITY.md#environment-inheritance-a-deliberate-tradeoff-not-an-oversight. */
+  /** Override seam for tests and forks only. Unset by every production caller: the spawned
+   * process gets a sanitized, default-deny environment built by
+   * `buildLegacyProviderEnvironment()` (reviewed OS/runtime keys plus the target provider's own
+   * documented auth-key mode), never the daemon's full `process.env`. See
+   * SECURITY.md#provider-subprocess-environment-isolation. */
   env?: NodeJS.ProcessEnv;
   /** Exact detector snapshot for launch pinning. Legacy callers may omit it and retain discovery. */
   providerStatus?: ProviderStatus;

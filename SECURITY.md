@@ -229,27 +229,38 @@ then `SIGKILL` after a short grace period, and verifies the group disappeared wi
 termination window. The Windows Job Object ownership/command-launch path is exercised in the
 Windows packaging workflow; focused unit tests cover both platform branches.
 
-## Environment inheritance (a deliberate tradeoff, not an oversight)
+## Provider subprocess environment isolation
 
-Provider CLIs are spawned with the daemon's **full environment** (`process.env`) unless a caller
-overrides `StartSessionOptions.env`, which nothing in this codebase currently does. This is a
-conscious choice, not an accident: `claude`/`codex` need `PATH`, `HOME`/`USERPROFILE`, and
-platform-specific variables to even locate their own config and credentials, and stripping the
-environment down to a hand-picked safe subset risks silently breaking legitimate CLI
-authentication, a worse failure mode for a boilerplate whose entire point is "use the CLI's own
-auth" than inheriting a somewhat broader environment than strictly necessary. The daemon itself
-never returns its environment (or the child's) through any API response or log line. If you fork
-this project into a context where the daemon's own process might carry secrets unrelated to the
-providers (e.g. it's started from a shell profile that also exports cloud credentials), that's a
-reason to start the daemon from a more minimal environment yourself, not something this codebase
-currently does for you.
+Every provider subprocess -- one-shot Claude/Codex, Codex app-server, version/auth probes, and
+provider CLI control operations (MCP list/configure/act/catalog) -- is spawned with a sanitized,
+default-deny environment, never the daemon's full `process.env`. A downstream fork that adds
+database or connector secrets to the daemon process cannot have those secrets silently reach a
+spawned provider CLI just because a call site forgot to pass an explicit environment: the *default*
+itself, at every low-level spawn point (`spawnProcess`/`execCapture` callers, the Codex app-server's
+own child spawn), is the sanitized environment, not raw inheritance.
 
-Environment handling is transport-specific. The Claude Agent SDK child receives an allowlisted
-environment for its reviewed auth source. Codex app-server and the CLI one-shot compatibility
-transport inherit
-the daemon's full environment today because no production caller supplies the optional per-session
-environment override. Public status still reports only a non-secret auth-source label. The exact
-credential and OAuth boundary is fixed in
+`packages/agent-runtime/src/process/provider-environment.ts` builds it:
+`buildLegacyProviderEnvironment(env, { provider })` starts from nothing and copies in only two
+groups of names, case-insensitively (rejecting an ambiguous duplicate -- e.g. both `PATH` and
+`Path` present -- outright rather than guessing which one is authoritative):
+
+| Group | Keys | Why |
+| --- | --- | --- |
+| Reviewed OS/runtime | `APPDATA`, `COMSPEC`, `HOME`, `HOMEDRIVE`, `HOMEPATH`, `LANG`, `LC_ALL`, `LC_CTYPE`, `LOCALAPPDATA`, `PATH`, `PATHEXT`, `SYSTEMROOT`, `TEMP`, `TMP`, `TMPDIR`, `TZ`, `USERPROFILE`, `WINDIR` | Identical to the Claude Agent SDK's own reviewed set (`sdk-auth.ts`) -- what any spawned native binary needs to start and locate its own config/credential store on disk |
+| Provider auth mode | `claude`: `ANTHROPIC_API_KEY`; `codex`: `OPENAI_API_KEY` | Each CLI's own documented environment-variable API-key auth mode. Empirically verified against the real installed `claude`/`codex` CLIs on Windows: `--version`, `auth status --json`, and `login status` all resolve correctly with only the reviewed OS/runtime keys present -- neither CLI needs the daemon to hand it a credential through the environment for its normal interactive-login auth mode |
+
+AgentDock discovery tokens, state paths, app secrets, and every arbitrary `AGENT_DOCK_*` variable
+are excluded by construction: they are not in either group, so they are never copied. A fork that
+needs one more trusted-host variable (a corporate proxy's CA bundle path, say) extends the matrix
+explicitly through `additionalAllowedKeys` at the call site -- never by widening the shared default.
+
+Environment handling remains transport-specific in one respect: the Claude Agent SDK child still
+uses its own richer `buildClaudeSdkEnvironment` (per-cloud-auth-source key sets for `bedrock`,
+`vertex`, `foundry` in addition to `api_key`, since the SDK negotiates those cloud auth paths
+directly), sharing only the case-insensitive lookup/copy primitives and the reviewed OS/runtime key
+list with the simpler legacy-CLI builder above -- one set of primitives, not two conflicting
+policies. Public status still reports only a non-secret auth-source label, never a credential value.
+The exact credential and OAuth boundary is fixed in
 [Credentials and OAuth](docs/capability-security-v2.md#credentials-and-oauth).
 
 ## Single daemon instance

@@ -13,6 +13,7 @@ import type {
   ProviderId,
 } from '@agent-dock/shared';
 import { execCapture, type ExecResult } from './process/exec-capture.js';
+import { buildLegacyProviderEnvironment } from './process/provider-environment.js';
 import type { WorkspaceTrustEvidence } from './types.js';
 import { StdioConnectionManager } from './mcp/stdio-connection-manager.js';
 import type { McpSpawnConfig } from './mcp/stdio-mcp-connection.js';
@@ -289,7 +290,16 @@ export class ProviderCliMcpControlPlane implements ProviderMcpControlPlane {
   private readonly stdioConnections: StdioConnectionManager;
 
   constructor(private readonly options: ProviderCliMcpControlPlaneOptions) {
-    this.run = options.run ?? ((command, args, runOptions) => execCapture(command, args, { cwd: runOptions.cwd, timeoutMs: 15_000 }));
+    // Sanitized by default (issue #53): a provider CLI control invocation never silently inherits
+    // the daemon's full process.env.
+    this.run =
+      options.run ??
+      ((command, args, runOptions) =>
+        execCapture(command, args, {
+          cwd: runOptions.cwd,
+          timeoutMs: 15_000,
+          env: buildLegacyProviderEnvironment(process.env, { provider: options.provider }),
+        }));
     this.stdioConnections = options.stdioConnections ?? sharedStdioConnections;
   }
 

@@ -84,6 +84,38 @@ describe('detectCodex — end-to-end failure paths (mocked exec, no real CLI)', 
     });
   });
 
+  it('probes --version and login status with a sanitized environment, never the daemon\'s full process.env (issue #53)', async () => {
+    process.env.AGENT_DOCK_ENV_ISOLATION_TEST_CANARY = 'CANARY-do-not-leak';
+    try {
+      vi.doMock('../src/detect-executable.js', () => ({
+        findExecutable: async () => '/usr/local/bin/codex',
+      }));
+      const capturedEnvs: Array<NodeJS.ProcessEnv | undefined> = [];
+      vi.doMock('../src/process/exec-capture.js', () => ({
+        execCapture: async (
+          _cmd: string,
+          args: string[],
+          opts: { env?: NodeJS.ProcessEnv },
+        ) => {
+          capturedEnvs.push(opts.env);
+          return args.includes('--version')
+            ? { code: 0, stdout: 'codex-cli 0.147.0', stderr: '', timedOut: false }
+            : { code: 0, stdout: 'Logged in using ChatGPT', stderr: '', timedOut: false };
+        },
+      }));
+      const { detectCodex } = await import('../src/providers/codex/detect.js');
+      await detectCodex({ debug() {}, info() {}, warn() {}, error() {} });
+
+      expect(capturedEnvs).toHaveLength(2); // --version, then login status
+      for (const env of capturedEnvs) {
+        expect(env).not.toHaveProperty('AGENT_DOCK_ENV_ISOLATION_TEST_CANARY');
+        expect(env?.PATH ?? (env as Record<string, string> | undefined)?.Path).toBeDefined();
+      }
+    } finally {
+      delete process.env.AGENT_DOCK_ENV_ISOLATION_TEST_CANARY;
+    }
+  });
+
   it('reports "unknown" when the login status check times out', async () => {
     vi.doMock('../src/detect-executable.js', () => ({
       findExecutable: async () => '/usr/local/bin/codex',

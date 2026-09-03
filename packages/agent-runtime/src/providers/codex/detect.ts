@@ -1,6 +1,7 @@
 import type { AuthSource, AuthStatus, ProviderStatus } from '@agent-dock/shared';
 import { PROVIDER_DISPLAY_NAMES } from '@agent-dock/shared';
 import { execCapture } from '../../process/exec-capture.js';
+import { buildLegacyProviderEnvironment } from '../../process/provider-environment.js';
 import { findExecutable } from '../../detect-executable.js';
 import type { Logger } from '../../logger.js';
 import type { ProviderDetectionOptions } from '../../types.js';
@@ -60,7 +61,8 @@ export async function detectCodex(
     return { ...base, installed: false, authenticated: 'unknown' };
   }
 
-  const versionResult = await execCapture(executablePath, ['--version'], { timeoutMs: 8_000 });
+  const env = buildLegacyProviderEnvironment(process.env, { provider: 'codex' });
+  const versionResult = await execCapture(executablePath, ['--version'], { timeoutMs: 8_000, env });
   if (versionResult.code !== 0) {
     logger.warn('codex: --version failed', { code: versionResult.code });
     return {
@@ -75,6 +77,7 @@ export async function detectCodex(
 
   const statusResult = await execCapture(executablePath, ['login', 'status'], {
     timeoutMs: 15_000,
+    env,
   });
   if (statusResult.timedOut) {
     return {
@@ -124,6 +127,7 @@ export async function detectCodex(
           cwd: options.cwd,
           providerStatus: status,
           signal: options.signal,
+          env,
         });
         if (evidence) return { ...status, ...evidence };
       } catch {

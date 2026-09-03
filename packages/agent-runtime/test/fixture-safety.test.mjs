@@ -198,6 +198,8 @@ describe('provider fixture safety', () => {
   });
 
   it('redacts and rejects raw native invocation prompt, stdin, session, and opaque operands', () => {
+    // Codex exec's prompt travels over stdin, not argv (issue #57): its argv position holds a
+    // fixed '-' literal, so a raw prompt for it is now only reachable via `stdin`.
     const rawArgvPrompt = 'DO_NOT_KEEP_ARGV_PROMPT';
     const rawStdinPrompt = 'DO_NOT_KEEP_STDIN_PROMPT';
     const rawSessionId = 'DO_NOT_KEEP_PROVIDER_SESSION_ID';
@@ -205,8 +207,8 @@ describe('provider fixture safety', () => {
     const raw = {
       nativeInput: [
         {
-          argv: ['exec', 'resume', rawSessionId, rawArgvPrompt, '--json', '--skip-git-repo-check'],
-          stdin: null,
+          argv: ['exec', 'resume', rawSessionId, '-', '--json', '--skip-git-repo-check'],
+          stdin: rawArgvPrompt,
         },
         {
           argv: [
@@ -227,7 +229,7 @@ describe('provider fixture safety', () => {
     const rawFindings = scanFixtureForSecrets(raw);
     expect(rawFindings).toEqual([
       { code: 'sensitive_value', path: '$.nativeInput[0].argv[2]' },
-      { code: 'sensitive_value', path: '$.nativeInput[0].argv[3]' },
+      { code: 'sensitive_value', path: '$.nativeInput[0].stdin' },
       { code: 'sensitive_value', path: '$.nativeInput[1].argv[7]' },
       { code: 'sensitive_value', path: '$.nativeInput[1].stdin' },
     ]);
@@ -241,11 +243,11 @@ describe('provider fixture safety', () => {
             'exec',
             'resume',
             { $fixturePlaceholder: 'free_text' },
-            { $fixturePlaceholder: 'prompt' },
+            '-',
             '--json',
             '--skip-git-repo-check',
           ],
-          stdin: null,
+          stdin: { $fixturePlaceholder: 'prompt' },
         },
         {
           argv: [
@@ -270,25 +272,38 @@ describe('provider fixture safety', () => {
   });
 
   it('treats structural-looking text as sensitive in native argv operand slots', () => {
+    // Codex exec's fresh-session grammar has no operand slot left (prompt travels over stdin, not
+    // argv — issue #57); its resume grammar still has one (provider_session_id), exercised below
+    // alongside Claude's own `--session-id` operand.
     const raw = {
       nativeInput: [
-        { argv: ['exec', 'text', '--json', '--skip-git-repo-check'], stdin: null },
         {
-          argv: ['exec', 'resume', 'text', 'resume', '--json', '--skip-git-repo-check'],
+          argv: ['exec', 'resume', 'text', '-', '--json', '--skip-git-repo-check'],
+          stdin: null,
+        },
+        {
+          argv: [
+            '-p',
+            '--input-format',
+            'text',
+            '--output-format',
+            'stream-json',
+            '--verbose',
+            '--session-id',
+            'resume',
+          ],
           stdin: null,
         },
       ],
     };
 
     expect(scanFixtureForSecrets(raw)).toEqual([
-      { code: 'sensitive_value', path: '$.nativeInput[0].argv[1]' },
-      { code: 'sensitive_value', path: '$.nativeInput[1].argv[2]' },
-      { code: 'sensitive_value', path: '$.nativeInput[1].argv[3]' },
+      { code: 'sensitive_value', path: '$.nativeInput[0].argv[2]' },
+      { code: 'sensitive_value', path: '$.nativeInput[1].argv[7]' },
     ]);
     const sanitized = sanitizeFixture(raw);
-    expect(sanitized.nativeInput[0].argv[1]).toEqual({ $fixturePlaceholder: 'prompt' });
-    expect(sanitized.nativeInput[1].argv[2]).toEqual({ $fixturePlaceholder: 'free_text' });
-    expect(sanitized.nativeInput[1].argv[3]).toEqual({ $fixturePlaceholder: 'prompt' });
+    expect(sanitized.nativeInput[0].argv[2]).toEqual({ $fixturePlaceholder: 'free_text' });
+    expect(sanitized.nativeInput[1].argv[7]).toEqual({ $fixturePlaceholder: 'free_text' });
     expect(scanFixtureForSecrets(sanitized)).toEqual([]);
   });
 

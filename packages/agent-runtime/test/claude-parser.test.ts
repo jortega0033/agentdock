@@ -112,6 +112,24 @@ describe('parseClaudeLine', () => {
     expect(result.events).toEqual([]);
   });
 
+  it('bounds and strips control characters from an unrecognized event type before logging it (issue #67)', () => {
+    const calls: Array<[string, Record<string, unknown> | undefined]> = [];
+    const spyLogger = {
+      debug: (message: string, meta?: Record<string, unknown>) => calls.push([message, meta]),
+      info: () => {},
+      warn: () => {},
+      error: () => {},
+    };
+    parseClaudeLine(
+      { type: `evil\ntype\rwith${String.fromCharCode(0)}control${String.fromCharCode(0x1b)}chars${'x'.repeat(200)}` },
+      spyLogger,
+    );
+    expect(calls).toHaveLength(1);
+    const eventType = calls[0]![1]!.eventType as string;
+    expect(Array.from(eventType).every((character) => character.codePointAt(0)! > 0x1f)).toBe(true);
+    expect(Buffer.byteLength(eventType, 'utf8')).toBeLessThanOrEqual(128);
+  });
+
   it('ignores malformed input without throwing', () => {
     expect(parseClaudeLine(null, noopLogger).events).toEqual([]);
     expect(parseClaudeLine('a string', noopLogger).events).toEqual([]);

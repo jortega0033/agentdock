@@ -42,6 +42,7 @@ import {
 import { evaluatePermissionPolicy, normalizeApprovalAction } from './permission-policy.js';
 import type { WorkspaceTrustStore } from './workspace-trust-store.js';
 import { revalidateWorkspaceIdentity, type WorkspaceIdentity } from './workspace-identity.js';
+import { SessionAdmissionController, UNCONFIGURED_ADMISSION_CEILING } from './session-admission.js';
 
 interface RuntimeStateBase {
   protocolVersion: 1 | 2;
@@ -125,6 +126,12 @@ export interface SessionManagerSecurityOptions {
   interactionTimeoutMs?: number;
   providerStateDirectory?: string;
   executionGraphStore?: ExecutionGraphStore;
+  /**
+   * Daemon-owned cap on concurrent pending+running provider processes, shared by every session
+   * creation path. Defaults to a generous but still-bounded ceiling when not supplied, so an
+   * embedder that never configures one still gets a structural limit rather than none.
+   */
+  admission?: SessionAdmissionController;
 }
 
 export class WorkspaceAccessError extends Error {
@@ -183,6 +190,7 @@ export class SessionManager {
   private readonly shutdownController = new AbortController();
   private readonly blockedWorkspaces = new Set<string>();
   private readonly workspaceRevocationEpochs = new Map<string, number>();
+  private readonly admission: SessionAdmissionController;
   private shuttingDown = false;
 
   constructor(
@@ -191,6 +199,9 @@ export class SessionManager {
     private readonly store: SessionStore = new MemorySessionStore(),
     private readonly security: SessionManagerSecurityOptions = {},
   ) {
+    this.admission =
+      security.admission ??
+      new SessionAdmissionController({ maxActiveSessions: UNCONFIGURED_ADMISSION_CEILING });
     const graph = security.executionGraphStore;
     if (graph) {
       for (const session of store.list()) {
@@ -225,46 +236,57 @@ export class SessionManager {
     const providerImpl = this.registry.get(provider);
     if (!providerImpl) throw new Error(`no provider registered for id: ${provider}`);
 
-    const id = randomUUID();
-    const session = this.newSession(id, provider, cwd, prompt);
-    this.store.create(session, protocolVersion);
+    // Counted before the provider process ever launches; released exactly once, either here on
+    // any failure before the runtime is handed off, or via runtime.done once the provider stream
+    // terminates and its supervisor has reaped the host (completion, cancellation, or failure).
+    const lease = this.admission.acquire();
+    let leaseTransferred = false;
     try {
-      beforeProviderDispatch?.(session);
-    } catch (error) {
-      this.store.delete(id);
-      throw error;
+      const id = randomUUID();
+      const session = this.newSession(id, provider, cwd, prompt);
+      this.store.create(session, protocolVersion);
+      try {
+        beforeProviderDispatch?.(session);
+      } catch (error) {
+        this.store.delete(id);
+        throw error;
+      }
+      let handle: ProviderSessionHandle;
+      try {
+        handle = providerImpl.startSession({
+          sessionId: id,
+          cwd,
+          prompt,
+          resumeProviderSessionId,
+          ...(providerStatus ? { providerStatus } : {}),
+          ...(sandbox ? { sandbox } : {}),
+          ...(model ? { model } : {}),
+        });
+      } catch (error) {
+        this.store.delete(id);
+        throw error;
+      }
+      const runtime: LegacyRuntimeState = {
+        kind: 'legacy',
+        handle,
+        protocolVersion,
+        events: [],
+        replayBytes: 0,
+        replayFull: false,
+        listeners: new Set(),
+        nextSequence: 0,
+        ...(workspace ? { workspace } : {}),
+        done: Promise.resolve(),
+      };
+      this.runtime.set(id, runtime);
+      runtime.done = this.consumeLegacy(id, runtime);
+      void runtime.done.finally(() => lease.release());
+      leaseTransferred = true;
+      this.logCreated(session, !!resumeProviderSessionId, 'legacy');
+      return session;
+    } finally {
+      if (!leaseTransferred) lease.release();
     }
-    let handle: ProviderSessionHandle;
-    try {
-      handle = providerImpl.startSession({
-        sessionId: id,
-        cwd,
-        prompt,
-        resumeProviderSessionId,
-        ...(providerStatus ? { providerStatus } : {}),
-        ...(sandbox ? { sandbox } : {}),
-        ...(model ? { model } : {}),
-      });
-    } catch (error) {
-      this.store.delete(id);
-      throw error;
-    }
-    const runtime: LegacyRuntimeState = {
-      kind: 'legacy',
-      handle,
-      protocolVersion,
-      events: [],
-      replayBytes: 0,
-      replayFull: false,
-      listeners: new Set(),
-      nextSequence: 0,
-      ...(workspace ? { workspace } : {}),
-      done: Promise.resolve(),
-    };
-    this.runtime.set(id, runtime);
-    runtime.done = this.consumeLegacy(id, runtime);
-    this.logCreated(session, !!resumeProviderSessionId, 'legacy');
-    return session;
   }
 
   /** Rich v2 path: one supervised provider host per AgentDock session. */
@@ -289,6 +311,55 @@ export class SessionManager {
     if (this.shuttingDown) {
       throw new InteractiveSessionError('session_terminal', 'session manager is shutting down');
     }
+    // Counted before the provider process ever launches; released exactly once, either here on
+    // any failure before the runtime is handed off, or via runtime.done once the provider stream
+    // terminates and its supervisor has reaped the host (completion, cancellation, or failure).
+    const lease = this.admission.acquire();
+    let leaseTransferred = false;
+    try {
+      return await this.createInteractiveAdmitted(
+        provider,
+        cwd,
+        prompt,
+        selection,
+        transport,
+        executionId,
+        turnId,
+        signal,
+        workspace,
+        providerStatus,
+        continuation,
+        expectedContinuationEvidence,
+        beforeProviderThreadStart,
+        beforeProviderDispatch,
+        (done) => {
+          void done.finally(() => lease.release());
+          leaseTransferred = true;
+        },
+      );
+    } finally {
+      if (!leaseTransferred) lease.release();
+    }
+  }
+
+  private async createInteractiveAdmitted(
+    provider: ProviderId,
+    cwd: string,
+    prompt: string,
+    selection: CapabilitySelection,
+    transport: ProviderTransportV2,
+    executionId: string,
+    turnId: string,
+    signal: AbortSignal | undefined,
+    workspace: WorkspaceIdentity | undefined,
+    providerStatus: ProviderStatus | undefined,
+    continuation: SessionContinuationV2 | undefined,
+    expectedContinuationEvidence: Readonly<ProviderContinuationEvidence> | undefined,
+    beforeProviderThreadStart:
+      ((evidence: Readonly<ProviderContinuationEvidence> | undefined) => Promise<void>) | undefined,
+    beforeProviderDispatch: ((session: Readonly<AgentSession>) => void) | undefined,
+    onAdmitted: (done: Promise<void>) => void,
+  ): Promise<AgentSession> {
     const workspaceEpoch = workspace
       ? this.currentWorkspaceEpoch(workspace.workspaceId)
       : undefined;
@@ -421,6 +492,7 @@ export class SessionManager {
         },
       );
       runtime.done = this.consumeInteractive(id, runtime);
+      onAdmitted(runtime.done);
       this.logCreated(session, false, 'interactive');
       return session;
     } catch (error) {

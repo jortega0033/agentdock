@@ -66,7 +66,8 @@ describe('legacy provider compatibility evidence', () => {
       expect(explicitUnsupported).toMatchObject({
         support: 'unsupported',
         evidence: [],
-        reason: 'legacy adapter reports this capability as unsupported',
+        reason:
+          'Provider session identity cannot yet be bound to a non-secret account and model scope',
       });
       expect(legacyRuntimeScope(providerStatus).versions).toEqual({
         adapterContract: '2',
@@ -87,5 +88,38 @@ describe('legacy provider compatibility evidence', () => {
       evidence: [],
       reason: 'no compatibility fixture matches this provider version and transport',
     });
+  });
+
+  it('never advertises Claude session.resume as supported, even with a matching fixture and capabilities.resume: true, because no Claude detection path supplies durable account/model binding evidence (issue #54)', () => {
+    const claudeResume = legacyCapabilityRecords(
+      status('claude', CLAUDE_LEGACY_COMPATIBILITY.providerVersion, {
+        cancellation: true,
+        resume: true,
+        tools: true,
+        usage: true,
+        thinking: true,
+      }),
+    ).find((record) => record.id === 'session.resume');
+
+    expect(claudeResume).toMatchObject({
+      support: 'unsupported',
+      reason:
+        'Provider session identity cannot yet be bound to a non-secret account and model scope',
+    });
+  });
+
+  it('leaves Codex session.resume support driven by capabilities.resume, unaffected by the Claude-only continuation-binding rule', () => {
+    const codexResume = legacyCapabilityRecords(
+      status('codex', CODEX_LEGACY_COMPATIBILITY.providerVersion, {
+        cancellation: true,
+        resume: true,
+        tools: true,
+        usage: true,
+        thinking: true,
+      }),
+    ).find((record) => record.id === 'session.resume');
+
+    expect(codexResume).toMatchObject({ support: 'supported' });
+    expect(codexResume).not.toHaveProperty('reason');
   });
 });

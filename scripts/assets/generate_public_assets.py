@@ -150,7 +150,7 @@ def make_readme_and_portfolio() -> None:
     draw.text((78, 210), "AgentDock", fill=PAPER, font=font(58, bold=True))
     draw.multiline_text(
         (78, 292),
-        "Forkable Electron boilerplate\nfor desktop products using\nClaude Code or Codex CLI.",
+        "Forkable Electron boilerplate\nfor desktop products using\nClaude Agent or Codex CLI.",
         fill="#CBD5E1",
         font=font(23),
         spacing=8,
@@ -202,7 +202,7 @@ def make_social(width: int, height: int, filename: str) -> None:
     )
     draw.text(
         (pad, height - pad - 30),
-        "Fork it · Claude Code · Codex CLI",
+        "Fork it · Claude Agent · Codex CLI",
         fill="#94A3B8",
         font=font(round(height * 0.027)),
     )

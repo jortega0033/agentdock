@@ -158,6 +158,10 @@ interface CompatibilityResult {
 }
 
 const PROTOCOL_V2 = 2;
+/** Mirrors the daemon's per-envelope ceiling (session-manager.ts's `MAX_LEGACY_EVENT_ENVELOPE_BYTES`);
+ * a v1 session that emits an oversized envelope fails itself server-side rather than ever putting
+ * one on the wire, so this is defense in depth against a daemon that doesn't. */
+const MAX_V1_SSE_FRAME_BYTES = 1024 * 1024;
 const MAX_V2_SSE_FRAME_BYTES = 1024 * 1024;
 const RESPONDER_LEASE_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 const CLIENT_SUPPORTED_PROTOCOL_VERSIONS: readonly number[] =
@@ -493,6 +497,7 @@ export class AgentDockClient {
       schema: agentEventEnvelopeSchema,
       label: 'AgentEvent v1',
       signal: options.signal,
+      maxFrameBytes: MAX_V1_SSE_FRAME_BYTES,
     });
   }
 

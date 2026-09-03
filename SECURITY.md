@@ -287,8 +287,13 @@ navigation away from the app's own content (`setWindowOpenHandler` returning `{ 
 a `will-navigate` handler that compares real origins in dev mode (not a `startsWith` prefix
 check, which a URL like `http://localhost:5173.evil.example` would have passed against an allowed
 `http://localhost:5173`) and in packaged mode allows only the exact `file://` URL of the app's own
-`dist/index.html`, not any local file path); anything else opens in the OS's default browser
-instead via `shell.openExternal`. A `session.setPermissionRequestHandler` denies every permission
+`dist/index.html`, not any local file path); anything else, along with every `window.open` target
+and OAuth authorization URL, is validated against one allowlisted shape (`parseAllowedExternalUrl`,
+`electron/allowed-external-url.ts`: an absolute `https:` URL with a non-empty host and no embedded
+credentials; `file:`, `javascript:`, `data:`, `blob:`, `mailto:`, `tel:`, a custom scheme, a bare
+UNC/filesystem path, and malformed input are all rejected) before it can reach
+`shell.openExternal`, and only a bounded scheme/host summary is ever logged. A
+`session.setPermissionRequestHandler` denies every permission
 request (camera, microphone, geolocation, notifications, etc.) by default, since nothing in this UI
 asks for any of them. The current UI renders normalized provider/user content as inert React text,
 not raw HTML or remote pages, and requests no browser permissions. These controls remain defense in
@@ -302,6 +307,10 @@ which remain subject to main/daemon validation and policy. The two daemon-status
 reconstruct a clean status object from the IPC payload, so accidental extra fields cannot ride
 along. Client network-error messages can still contain the daemon base URL as noted above. There is
 no `remote` module or `eval`, and no generic direct shell, filesystem, or daemon-route passthrough.
+Every privileged `ipcMain.handle` registration also verifies its sender before running: a local
+`handle()` wrapper (`isFromMainWindowFrame`, `electron/ipc-sender-guard.ts`) rejects any message
+that did not come from the current main window's own top-level frame, rather than relying on the
+current single-window topology holding forever.
 The page's `Content-Security-Policy` is
 `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'`: no
 `unsafe-eval`, and `connect-src` is just same-origin now that the renderer makes no network calls

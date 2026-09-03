@@ -103,6 +103,40 @@ describe('Codex app-server compatibility selection', () => {
     expect(approvals?.possibleEffects).toContain('network');
   });
 
+  it('advertises input.image/output.structured with real, session-scoped constraints (issue #59)', () => {
+    const support = resolveCodexV2Support(status('0.147.0'), 'app-server');
+    const image = support!.capabilities.find((record) => record.id === 'input.image');
+    const structured = support!.capabilities.find((record) => record.id === 'output.structured');
+    expect(image).toMatchObject({
+      support: 'supported',
+      constraints: { kind: 'attachment', mimeTypes: ['image/png', 'image/jpeg'], maxBytes: 25 * 1024 * 1024 },
+      prerequisites: expect.objectContaining({ sessionStates: ['starting'] }),
+    });
+    expect(structured).toMatchObject({
+      support: 'supported',
+      constraints: { kind: 'structured_output', maxSchemaBytes: 64 * 1024, maxSchemaDepth: 16, maxSchemaNodes: 1_024 },
+      prerequisites: expect.objectContaining({ sessionStates: ['starting'] }),
+    });
+  });
+
+  it('advertises subagent observation with no steer/interrupt/cancel and real fixture evidence', () => {
+    const support = resolveCodexV2Support(status('0.147.0'), 'app-server');
+    const ids = support!.capabilities.map((record) => record.id);
+    expect(ids).toContain('agents.subagents.observe');
+    // Codex's own schema has no per-subagent-thread control method (see issue #58), so this slice
+    // only ever claims observation -- never a control it cannot actually dispatch.
+    expect(ids).not.toContain('agents.subagents.steer');
+    expect(ids).not.toContain('agents.subagents.interrupt');
+    expect(ids).not.toContain('agents.subagents.cancel');
+    const observe = support!.capabilities.find((record) => record.id === 'agents.subagents.observe');
+    expect(observe).toMatchObject({ kind: 'observation', owner: 'provider', support: 'supported' });
+    expect(
+      observe?.evidence.some(
+        (evidence) => evidence.kind === 'fixture' && evidence.reference === CODEX_APP_SERVER_FIXTURE_SET,
+      ),
+    ).toBe(true);
+  });
+
   it('does not advertise native continuation for API-key authentication', () => {
     const support = resolveCodexV2Support(
       { ...status('0.147.0'), authSource: 'api_key' },

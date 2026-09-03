@@ -134,7 +134,19 @@ through the `electron-builder` devDependency; this project's `files` list and bu
 not copy that tool chain into the installed application. This is a narrow, visible exception, not a
 blanket audit waiver: compare future output, treat any new production/runtime path as a blocker, and
 rerun the full packaging checks when upgrading `electron-builder`. `pnpm audit --prod` currently
-reports no known vulnerabilities.
+reports no known vulnerabilities -- and, as of issue #61, is a required CI gate on every push and PR
+(`.github/workflows/ci.yml`), so a new production-reachable advisory fails the build rather than
+depending on someone remembering to check.
+
+**Exception ownership and re-review (issue #61):** this exception is not open-ended. Re-verify it
+(rerun `pnpm audit`, confirm the same two advisories on the same dev-tool-only paths, and that
+`pnpm audit --prod` is still clean) at every `electron-builder` upgrade and at least once per
+quarter regardless, whichever comes first; treat a stale re-review (no check recorded in the last
+90 days) as a release blocker for the next release candidate. Whoever dispatches
+`release-candidate.yml` for a given release is this exception's reviewer of record for that
+release -- the workflow's own generated manifest already records `documentedExceptions` verbatim,
+so a stale or newly-inapplicable exception string shows up in that release's own evidence bundle,
+not just in this doc.
 
 ## Start Menu and single-instance behavior
 
@@ -171,6 +183,22 @@ shipped packaging/native assets are deliberately Windows x64-specific today: NSI
 host, and the pinned Claude SDK executable. Only Windows has been installed and exercised end to
 end. Adding `mac`/`linux` targets and native assets (`dmg`/`zip`, `AppImage`/`deb`) was not attempted;
 macOS/Linux packaging, signing, and notarization remain out of scope.
+
+### Supported Windows versions (issue #61)
+
+The packaged installer and app are only built, tested, and supported on **Windows 10 21H2 or
+later, and Windows 11, x64 only**. This is the actual scope of what's verified above, not an
+aspiration:
+
+- **x64 only.** There is no `arm64` electron-builder target configured, and the pinned Claude
+  Agent SDK executable and Job Object host are both x64 binaries. Running the x64 installer under
+  Windows on Arm's x64 emulation is unverified, not something this project tests against.
+- **Windows 10 21H2+ or Windows 11.** Earlier Windows 10 feature updates are not tested and may be
+  missing OS APIs electron-builder's NSIS output or Electron itself now expect. There's no code
+  path that specifically detects or blocks an older build; it's simply outside what's verified.
+- A release described anywhere as "supported" or "verified" means this exact matrix -- see
+  [SECURITY.md's Supported versions](../SECURITY.md#supported-versions) for how this maps to
+  vulnerability-reporting scope.
 
 ## Verifying a packaging-sensitive change
 

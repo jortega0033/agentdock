@@ -23,6 +23,11 @@ on:
 
 permissions:
   contents: read
+  # Only for the build-provenance attestation step below (issue #61) -- this workflow is
+  # workflow_dispatch-only, never triggered by a pull_request, so a fork can never reach a run
+  # that holds these.
+  id-token: write
+  attestations: write
 
 concurrency:
   group: release-candidate-${{ github.workflow }}
@@ -132,6 +137,31 @@ jobs:
         continue-on-error: true
         run: node apps/desktop/scripts/installer-lifecycle-win.mjs
 
+      # Issue #61. anchore/sbom-action wraps the real syft binary (not a Docker action, so it runs
+      # fine on this Windows runner) and is pnpm-workspace-aware: scanning the repo root picks up
+      # every workspace package's real, resolved dependency tree from the committed lockfile.
+      - name: Generate SBOM (CycloneDX)
+        id: sbom
+        continue-on-error: true
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          path: .
+          format: cyclonedx-json
+          output-file: sbom.cdx.json
+          upload-artifact: false
+
+      # Real SLSA-style build provenance, tied to this exact workflow run and commit, for the
+      # actual installer bytes this run produced -- verifiable later with `gh attestation verify`.
+      # Only reachable from a workflow_dispatch run (see the `permissions:` comment above), never
+      # from a fork's pull_request.
+      - name: Attest build provenance
+        id: provenance
+        if: steps.installer-present.outcome == 'success'
+        continue-on-error: true
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist-packages/AgentDock-Setup-*.exe
+
       - name: Generate release-candidate manifest
         id: manifest
         shell: pwsh
@@ -148,7 +178,9 @@ jobs:
             @{ name = 'installer-present'; passed = '${{ steps.installer-present.outcome }}' -eq 'success' },
             @{ name = 'packaged-daemon-smoke'; passed = '${{ steps.packaged-daemon-smoke.outcome }}' -eq 'success' },
             @{ name = 'packaged-app-smoke'; passed = '${{ steps.packaged-app-smoke.outcome }}' -eq 'success'; detail = 'Real AgentDock.exe launch, bundled-daemon discovery/health, graceful shutdown' },
-            @{ name = 'installer-lifecycle'; passed = '${{ steps.installer-lifecycle.outcome }}' -eq 'success'; detail = 'Silent NSIS install/uninstall in an isolated directory' }
+            @{ name = 'installer-lifecycle'; passed = '${{ steps.installer-lifecycle.outcome }}' -eq 'success'; detail = 'Silent NSIS install/uninstall in an isolated directory' },
+            @{ name = 'sbom'; passed = '${{ steps.sbom.outcome }}' -eq 'success'; detail = 'CycloneDX SBOM via anchore/sbom-action (real syft scan of the pnpm workspace)' },
+            @{ name = 'provenance'; passed = '${{ steps.provenance.outcome }}' -eq 'success'; detail = 'SLSA-style build provenance attestation for the installer artifact' }
           )
           $gatesJson = ($gates | ConvertTo-Json -Compress -AsArray)
 
@@ -166,6 +198,12 @@ jobs:
           $evidencePath = '${{ github.event.inputs.provider_matrix_evidence_path }}'
           $evidenceArg = if ($evidencePath) { @('--provider-matrix-evidence', $evidencePath) } else { @() }
 
+          $sbomArg = if ('${{ steps.sbom.outcome }}' -eq 'success' -and (Test-Path 'sbom.cdx.json')) {
+            @('--sbom-path', 'sbom.cdx.json')
+          } else { @() }
+          $provenanceUrl = '${{ steps.provenance.outputs.attestation-url }}'
+          $provenanceArg = if ($provenanceUrl) { @('--provenance-url', $provenanceUrl) } else { @() }
+
           node scripts/release-candidate/generate.mjs `
             --commit '${{ steps.git-state.outputs.commit }}' `
             --dirty '${{ steps.git-state.outputs.dirty }}' `
@@ -176,7 +214,9 @@ jobs:
             --artifacts-json "$artifactsJson" `
             --documented-exceptions-json "$exceptionsJson" `
             --out 'release-candidate-manifest.json' `
-            @evidenceArg
+            @evidenceArg `
+            @sbomArg `
+            @provenanceArg
 
       - name: Fail the job if the manifest is not ready
         if: always() && steps.manifest.outcome == 'success'
@@ -197,5 +237,6 @@ jobs:
           path: |
             release-candidate-manifest.json
             dist-packages/AgentDock-Setup-*.exe
+            sbom.cdx.json
           if-no-files-found: warn
           retention-days: 90

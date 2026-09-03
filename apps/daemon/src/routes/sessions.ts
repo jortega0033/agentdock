@@ -5,6 +5,10 @@ import type { ProviderRegistry } from '@agent-dock/agent-runtime';
 import type { SessionManager } from '../session-manager.js';
 import type { WorkspaceTrustStore } from '../workspace-trust-store.js';
 import { resolveWorkspaceIdentity, revalidateWorkspaceIdentity } from '../workspace-identity.js';
+import { SessionCapacityError } from '../session-admission.js';
+import { BoundedV1SseWriter } from '../v1-sse-writer.js';
+
+const TERMINAL_SESSION_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 export function registerSessionRoutes(
   app: FastifyInstance,
@@ -12,61 +16,75 @@ export function registerSessionRoutes(
   registry: ProviderRegistry,
   trustStore?: WorkspaceTrustStore,
 ): void {
-  app.post('/sessions', async (req, reply) => {
-    const parsed = createSessionRequestSchema.safeParse(req.body);
-    if (!parsed.success) {
-      reply.code(400).send({ error: 'invalid request body', details: parsed.error.flatten() });
-      return;
-    }
-    const { provider, cwd, prompt, resumeProviderSessionId } = parsed.data;
-
-    const providerImpl = registry.get(provider);
-    if (!providerImpl) {
-      reply.code(400).send({ error: `unsupported provider: ${provider}` });
-      return;
-    }
-    const workspace = trustStore
-      ? await resolveWorkspaceIdentity(cwd).catch(() => undefined)
-      : undefined;
-    if (trustStore) {
-      if (!workspace) {
-        reply.code(400).send({ error: 'workspace could not be resolved' });
+  app.post(
+    '/sessions',
+    // Parity with protocol v2's start-rate limiter (AD-52): a secondary burst control alongside
+    // the shared active-session admission cap below.
+    { config: { rateLimit: { max: 30, timeWindow: '1 minute' } } },
+    async (req, reply) => {
+      const parsed = createSessionRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        reply.code(400).send({ error: 'invalid request body', details: parsed.error.flatten() });
         return;
       }
-      if ((await trustStore.inspect(workspace)).state !== 'trusted') {
-        reply.code(409).send({ error: 'workspace is not trusted', code: 'workspace_untrusted' });
+      const { provider, cwd, prompt, resumeProviderSessionId } = parsed.data;
+
+      const providerImpl = registry.get(provider);
+      if (!providerImpl) {
+        reply.code(400).send({ error: `unsupported provider: ${provider}` });
         return;
       }
-    }
-    if (resumeProviderSessionId && !(await providerImpl.detect()).capabilities.resume) {
-      reply.code(400).send({ error: `provider does not support resume: ${provider}` });
-      return;
-    }
-    if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
-      reply.code(400).send({ error: `working directory does not exist: ${cwd}` });
-      return;
-    }
+      const workspace = trustStore
+        ? await resolveWorkspaceIdentity(cwd).catch(() => undefined)
+        : undefined;
+      if (trustStore) {
+        if (!workspace) {
+          reply.code(400).send({ error: 'workspace could not be resolved' });
+          return;
+        }
+        if ((await trustStore.inspect(workspace)).state !== 'trusted') {
+          reply.code(409).send({ error: 'workspace is not trusted', code: 'workspace_untrusted' });
+          return;
+        }
+      }
+      if (resumeProviderSessionId && !(await providerImpl.detect()).capabilities.resume) {
+        reply.code(400).send({ error: `provider does not support resume: ${provider}` });
+        return;
+      }
+      if (!existsSync(cwd) || !statSync(cwd).isDirectory()) {
+        reply.code(400).send({ error: `working directory does not exist: ${cwd}` });
+        return;
+      }
 
-    if (
-      trustStore &&
-      workspace &&
-      (!(await revalidateWorkspaceIdentity(workspace)) ||
-        (await trustStore.inspect(workspace)).state !== 'trusted')
-    ) {
-      reply.code(409).send({ error: 'workspace trust changed', code: 'workspace_untrusted' });
-      return;
-    }
+      if (
+        trustStore &&
+        workspace &&
+        (!(await revalidateWorkspaceIdentity(workspace)) ||
+          (await trustStore.inspect(workspace)).state !== 'trusted')
+      ) {
+        reply.code(409).send({ error: 'workspace trust changed', code: 'workspace_untrusted' });
+        return;
+      }
 
-    const session = sessionManager.create(
-      provider,
-      workspace?.canonicalPath ?? cwd,
-      prompt,
-      resumeProviderSessionId,
-      1,
-      workspace,
-    );
-    reply.code(201).send(session);
-  });
+      try {
+        const session = sessionManager.create(
+          provider,
+          workspace?.canonicalPath ?? cwd,
+          prompt,
+          resumeProviderSessionId,
+          1,
+          workspace,
+        );
+        reply.code(201).send(session);
+      } catch (error) {
+        if (error instanceof SessionCapacityError) {
+          reply.code(429).send({ error: error.message, code: error.code });
+          return;
+        }
+        throw error;
+      }
+    },
+  );
 
   app.get('/sessions/:sessionId', async (req, reply) => {
     const params = sessionIdParamSchema.safeParse(req.params);
@@ -99,34 +117,34 @@ export function registerSessionRoutes(
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
     });
-    reply.raw.write(':ok\n\n');
 
     const lastEventIdHeader = req.headers['last-event-id'];
     const lastEventId = Array.isArray(lastEventIdHeader) ? lastEventIdHeader[0] : lastEventIdHeader;
     const sinceIndex = lastEventId ? Number(lastEventId) + 1 : 0;
 
-    let ended = false;
-    // Declared separately (not `const unsubscribe = subscribe(...)`) because the listener below
-    // can run *synchronously inside* this call (replaying already-stored events); referencing
-    // `unsubscribe` from inside it before a combined declaration+assignment finished initializing
-    // would throw. `let` here is deliberate, not a lint slip.
     let unsubscribe: (() => void) | undefined;
-    // eslint-disable-next-line prefer-const
+    let cleanupRequested = false;
+    const cleanup = (): void => {
+      if (!unsubscribe) {
+        cleanupRequested = true;
+        return;
+      }
+      const release = unsubscribe;
+      unsubscribe = undefined;
+      release();
+    };
+    // Bounded, backpressure-aware writer (see v1-sse-writer.ts): enqueues synchronously, honors
+    // `reply.raw.write`'s drain signal, and disconnects only this one slow subscriber -- never the
+    // provider session -- on overflow.
+    const writer = new BoundedV1SseWriter(reply.raw, cleanup);
+    reply.raw.once('close', () => writer.close());
+    writer.start();
+
+    // Replay can synchronously close the writer before subscribe returns its disposer.
     unsubscribe = sessionManager.subscribe(
       params.data.sessionId,
       Number.isFinite(sinceIndex) ? sinceIndex : 0,
-      (index, event) => {
-        reply.raw.write(`id: ${index}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
-        if (
-          event.type === 'session.completed' ||
-          event.type === 'session.failed' ||
-          event.type === 'session.cancelled'
-        ) {
-          ended = true;
-          unsubscribe?.();
-          reply.raw.end();
-        }
-      },
+      (_index, event) => writer.write(event),
       1,
     );
 
@@ -135,14 +153,18 @@ export function registerSessionRoutes(
       // subscribe(): the session's runtime state is already gone. Without this, the already-200
       // response would stay open forever with no data and no close (the exact race the daemon
       // audit flagged for this route).
-      reply.raw.end();
+      writer.close();
       return;
     }
-
-    // If the session was already terminal, the listener above fired synchronously during
-    // subscribe() (before `unsubscribe` was assigned); clean it up now instead.
-    if (ended) unsubscribe();
-    else req.raw.on('close', () => unsubscribe?.());
+    if (cleanupRequested) {
+      cleanup();
+      return;
+    }
+    // A client reconnecting with Last-Event-ID past the terminal event (already has it) replays
+    // nothing, so the writer never sees a terminal frame to close on; without this the connection
+    // would stay open forever once the runtime has no more events left to ever emit.
+    const current = sessionManager.get(params.data.sessionId, 1);
+    if (!current || TERMINAL_SESSION_STATUSES.has(current.status)) writer.finishReplay();
   });
 
   app.post('/sessions/:sessionId/cancel', async (req, reply) => {

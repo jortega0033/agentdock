@@ -1,6 +1,7 @@
 import type { AuthSource, AuthStatus, ProviderStatus } from '@agent-dock/shared';
 import { PROVIDER_DISPLAY_NAMES } from '@agent-dock/shared';
 import { execCapture } from '../../process/exec-capture.js';
+import { buildLegacyProviderEnvironment } from '../../process/provider-environment.js';
 import { findExecutable } from '../../detect-executable.js';
 import type { Logger } from '../../logger.js';
 import { CLAUDE_CAPABILITIES } from './capabilities.js';
@@ -77,7 +78,8 @@ export async function detectClaude(logger: Logger): Promise<ProviderStatus> {
     return { ...base, installed: false, authenticated: 'unknown' };
   }
 
-  const versionResult = await execCapture(executablePath, ['--version'], { timeoutMs: 8_000 });
+  const env = buildLegacyProviderEnvironment(process.env, { provider: 'claude' });
+  const versionResult = await execCapture(executablePath, ['--version'], { timeoutMs: 8_000, env });
   if (versionResult.code !== 0) {
     logger.warn('claude: --version failed', { code: versionResult.code });
     return {
@@ -92,6 +94,7 @@ export async function detectClaude(logger: Logger): Promise<ProviderStatus> {
 
   const authResult = await execCapture(executablePath, ['auth', 'status', '--json'], {
     timeoutMs: 15_000,
+    env,
   });
   if (authResult.timedOut) {
     return {

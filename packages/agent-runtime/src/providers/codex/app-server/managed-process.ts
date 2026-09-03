@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import type { ChildProcessByStdio } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import { terminateProcessTree, type ProcessExitResult } from '../../../process/spawn-process.js';
+import { buildLegacyProviderEnvironment } from '../../../process/provider-environment.js';
 import {
   encodeWindowsJobHostArguments,
   resolveWindowsJobHostPath,
@@ -92,7 +93,8 @@ export class ManagedAppServerProcess {
       : providerArgs;
     this.child = spawn(command, args, {
       cwd: options.cwd,
-      env: options.env ?? process.env,
+      // Sanitized by default (issue #53): never silently inherit the daemon's full process.env.
+      env: options.env ?? buildLegacyProviderEnvironment(process.env, { provider: 'codex' }),
       shell: false,
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,

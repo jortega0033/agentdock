@@ -1,4 +1,5 @@
 import { spawnProcess } from './spawn-process.js';
+import { buildBaseProcessEnvironment } from './provider-environment.js';
 
 const TERMINATION_WAIT_MS = 5_000;
 
@@ -33,9 +34,12 @@ export async function execCapture(
   args: string[],
   opts: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {},
 ): Promise<ExecResult> {
+  // Sanitized by default (issue #53): a caller that needs a provider's own auth-key mode passes an
+  // explicit env built by buildLegacyProviderEnvironment(); one that doesn't (a bare `which`
+  // lookup, for instance) still never inherits the daemon's full process.env.
   const { child, exit, kill } = spawnProcess(command, args, {
     cwd: opts.cwd ?? process.cwd(),
-    env: opts.env,
+    env: opts.env ?? buildBaseProcessEnvironment(),
   });
 
   let stdout = '';

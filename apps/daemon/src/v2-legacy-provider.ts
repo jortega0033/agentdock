@@ -91,6 +91,8 @@ interface LegacyRecordInput<I extends CoreCapabilityId> {
   possibleEffects?: Effect[];
   effectsComplete?: boolean;
   sessionStates: CapabilitySupportRecord['prerequisites']['sessionStates'];
+  /** Overrides the generic unsupported reason below it, e.g. issue #54's continuation-binding rule. */
+  unsupportedReason?: string;
 }
 
 function legacyRecord<I extends CoreCapabilityId>(
@@ -121,16 +123,31 @@ function legacyRecord<I extends CoreCapabilityId>(
     effectsComplete: input.effectsComplete ?? true,
     constraints: input.constraints,
     ...(support === 'unsupported'
-      ? { reason: 'legacy adapter reports this capability as unsupported' }
+      ? {
+          reason:
+            input.unsupportedReason ?? 'legacy adapter reports this capability as unsupported',
+        }
       : support === 'unknown'
         ? { reason: 'no compatibility fixture matches this provider version and transport' }
         : {}),
   } as CoreCapabilitySupportRecord;
 }
 
+// Claude's v2 durable continuation requires non-secret account/model binding evidence that no
+// current Claude detection path supplies. The Agent SDK transport already declares
+// session.resume/session.fork explicitly unsupported for exactly this reason (see
+// EXPLICITLY_UNSUPPORTED_CAPABILITIES in providers/claude/sdk-support.ts); the legacy/CLI bridge
+// must apply the identical rule rather than trusting the v1 `capabilities.resume` flag, which only
+// reflects that `claude --resume <id>` accepts an already-known native id (a real, working, but
+// daemon-unverified v1 mechanism — see docs/protocol-v1.md), not that AgentDock can durably bind
+// and verify one for v2. issue #54.
+const CLAUDE_CONTINUATION_UNBINDABLE_REASON =
+  'Provider session identity cannot yet be bound to a non-secret account and model scope';
+
 export function legacyCapabilityRecords(status: ProviderStatus): CapabilitySupportRecord[] {
   const capabilities = status.capabilities;
   const compatibility = compatibilityFor(status);
+  const claudeContinuationUnbindable = status.id === 'claude';
   return [
     legacyRecord(
       {
@@ -146,9 +163,12 @@ export function legacyCapabilityRecords(status: ProviderStatus): CapabilitySuppo
       {
         status,
         id: 'session.resume',
-        supported: capabilities.resume === true,
+        supported: !claudeContinuationUnbindable && capabilities.resume === true,
         constraints: { kind: 'continuation', native: true },
         sessionStates: ['starting'],
+        ...(claudeContinuationUnbindable
+          ? { unsupportedReason: CLAUDE_CONTINUATION_UNBINDABLE_REASON }
+          : {}),
       },
       compatibility,
     ),

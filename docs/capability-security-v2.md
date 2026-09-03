@@ -500,6 +500,19 @@ interactive conformance scenarios.
 | `usage`        |             Tested |             Tested | `content.usage.tokens`; cost needs separate v2 evidence    |
 | `thinking`     |             Tested |             Tested | `content.thinking`, only when the CLI emits public content |
 
+`resume`'s "Tested" column means only that the v1 CLI flag itself works when the caller already
+holds a real provider-native id (`claude --resume <id>` / `codex exec resume <id>`) — a renderer-
+supplied, daemon-unverified value the daemon has never bound to any lineage, matching v1's
+long-standing "no daemon-side verification" contract (see [Protocol v1](protocol-v1.md)). It does
+**not** mean the `legacy-one-shot` bridge advertises `session.resume` as `'supported'` at v2: that
+bridge additionally requires durable, non-secret account/model binding evidence before a v2 client
+can ever negotiate continuation, which no current Claude detection path supplies (issue #54) — so
+Claude's `session.resume`/`session.fork` v2 records are always `'unsupported'`, with the same
+"cannot yet be bound to a non-secret account and model scope" reason the Claude Agent SDK transport
+already gives (`providers/claude/sdk-support.ts`), regardless of this `resume: Tested` v1 row.
+Codex's v1 `resume` flag being genuinely testable is unaffected and continues to drive its own v2
+`session.resume` record the same as before.
+
 The shared provider contract and compatibility fixtures verify normalization and lifecycle. A
 generic Codex `mcp_tool_call` becoming `tool.started` does not prove MCP discovery, management,
 OAuth, elicitation, or approval capabilities.

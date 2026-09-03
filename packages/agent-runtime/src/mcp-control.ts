@@ -14,6 +14,28 @@ import type {
 } from '@agent-dock/shared';
 import { execCapture, type ExecResult } from './process/exec-capture.js';
 import type { WorkspaceTrustEvidence } from './types.js';
+import { StdioConnectionManager } from './mcp/stdio-connection-manager.js';
+import type { McpSpawnConfig } from './mcp/stdio-mcp-connection.js';
+
+export { StdioConnectionManager } from './mcp/stdio-connection-manager.js';
+export type { McpSpawnConfig } from './mcp/stdio-mcp-connection.js';
+export { McpTransportError } from './mcp/stdio-jsonrpc-transport.js';
+
+/**
+ * One shared pool for the daemon's whole process lifetime, reused by every
+ * `ProviderCliMcpControlPlane` instance that doesn't get its own injected for testing (see
+ * `ProviderCliMcpControlPlaneOptions.stdioConnections`). A module-level singleton, not a
+ * constructor parameter threaded through `ClaudeProvider`/`CodexProvider`, because both adapters
+ * are constructed with only a logger today and every real MCP server connection this pool ever
+ * owns must still be reachable from one place for daemon shutdown (`closeAllMcpConnections`)
+ * regardless of which adapter's plane happened to open it.
+ */
+const sharedStdioConnections = new StdioConnectionManager();
+
+/** Reaps every live MCP server process this daemon process ever opened. Call on daemon shutdown. */
+export function closeAllMcpConnections(): Promise<void> {
+  return sharedStdioConnections.closeAll();
+}
 
 export interface McpControlContext {
   cwd: string;
@@ -41,6 +63,8 @@ export interface ProviderCliMcpControlPlaneOptions {
   provider: ProviderId;
   executableName: string;
   run?: (command: string, args: string[], options: { cwd: string }) => Promise<ExecResult>;
+  /** Injectable for tests; defaults to the module-level `sharedStdioConnections` pool. */
+  stdioConnections?: StdioConnectionManager;
 }
 
 type UnknownRecord = Record<string, unknown>;
@@ -80,9 +104,11 @@ function baseDescriptor(
       reload: true,
       configure: transport !== 'legacy_sse_read_only',
       oauth: provider === 'codex' && transport === 'streamable_http',
-      tools: false,
-      resources: false,
-      prompts: false,
+      // Only an enabled stdio server actually connects and lists a real catalog today (issue
+      // #56); HTTP/SSE transports remain explicitly unadvertised here regardless of `enabled`.
+      tools: transport === 'stdio' && enabled,
+      resources: transport === 'stdio' && enabled,
+      prompts: transport === 'stdio' && enabled,
     },
     configFields: fields,
     sessionIds: [],
@@ -167,6 +193,86 @@ function parseCodexList(stdout: string): McpServerDescriptorV2[] {
   });
 }
 
+const MAX_ENV_VARS = 64;
+const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+
+/**
+ * Extracts a real, spawnable `{command, args, env}` from a raw (unredacted) config record --
+ * never from `normalizedConfig()`'s output, which deliberately drops `env` values entirely (see
+ * `mcpConfigFieldV2Schema`'s superRefine: only `command`/`args` may ever carry a public value).
+ * This function is the one place this repo reads an MCP server's real environment variables, and
+ * it never returns them to a caller outside this module.
+ */
+function rawStdioSpawnConfig(raw: UnknownRecord): McpSpawnConfig | undefined {
+  const transportRecord = record(raw.transport);
+  const command = text(transportRecord?.command) ?? text(raw.command);
+  if (!command) return undefined;
+  const args = texts(transportRecord?.args) ?? texts(raw.args) ?? [];
+  const envRecord = record(transportRecord?.env) ?? record(raw.env);
+  const env: Record<string, string> = {};
+  if (envRecord) {
+    for (const [key, value] of Object.entries(envRecord)) {
+      if (Object.keys(env).length >= MAX_ENV_VARS) break;
+      if (!ENV_KEY_PATTERN.test(key) || typeof value !== 'string' || value.length > 8_192) continue;
+      env[key] = value;
+    }
+  }
+  return { command, args, env };
+}
+
+/** Re-reads Claude's own config file for one exact `scope:name` server id -- the same files
+ * `inspectClaudeProjectConfig` reads, but returning the real spawn config instead of a redacted
+ * descriptor. */
+async function resolveClaudeStdioSpawnConfig(
+  serverId: string,
+  cwd: string,
+): Promise<McpSpawnConfig | undefined> {
+  const [scope, ...nameParts] = serverId.split(':');
+  const name = nameParts.join(':');
+  if (!name) return undefined;
+  const path =
+    scope === 'project'
+      ? join(cwd, '.mcp.json')
+      : join(homedir(), '.claude.json');
+  let parsed: unknown;
+  try {
+    const contents = await readFile(path, 'utf8');
+    if (Buffer.byteLength(contents, 'utf8') > 1_000_000) return undefined;
+    parsed = JSON.parse(contents);
+  } catch {
+    return undefined;
+  }
+  const root = record(parsed);
+  const project = scope === 'local' ? record(record(root?.projects)?.[cwd]) : undefined;
+  const servers = record((project ?? root)?.mcpServers);
+  const entry = record(servers?.[name]);
+  return entry ? rawStdioSpawnConfig(entry) : undefined;
+}
+
+/** Reads one Codex MCP server's real spawn config via `codex mcp get <name> --json` --
+ * `codex mcp list --json` (used by `parseCodexList`) never includes `env`. */
+async function resolveCodexStdioSpawnConfig(
+  serverId: string,
+  run: NonNullable<ProviderCliMcpControlPlaneOptions['run']>,
+  executable: string,
+  cwd: string,
+): Promise<McpSpawnConfig | undefined> {
+  const [, ...nameParts] = serverId.split(':');
+  const name = nameParts.join(':');
+  if (!name) return undefined;
+  const result = await run(executable, ['mcp', 'get', name, '--json'], { cwd });
+  if (result.timedOut || result.code !== 0) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch {
+    return undefined;
+  }
+  const root = record(parsed);
+  if (!root) return undefined;
+  return rawStdioSpawnConfig(root);
+}
+
 function revisionOf(servers: readonly McpServerDescriptorV2[]): string {
   let hash = 2_166_136_261;
   const source = JSON.stringify(servers);
@@ -180,9 +286,31 @@ function revisionOf(servers: readonly McpServerDescriptorV2[]): string {
 /** Provider-owned CLI/config adapter. It never reads credential stores or accepts secret values. */
 export class ProviderCliMcpControlPlane implements ProviderMcpControlPlane {
   private readonly run: NonNullable<ProviderCliMcpControlPlaneOptions['run']>;
+  private readonly stdioConnections: StdioConnectionManager;
 
   constructor(private readonly options: ProviderCliMcpControlPlaneOptions) {
     this.run = options.run ?? ((command, args, runOptions) => execCapture(command, args, { cwd: runOptions.cwd, timeoutMs: 15_000 }));
+    this.stdioConnections = options.stdioConnections ?? sharedStdioConnections;
+  }
+
+  /** Only enabled `stdio` servers are actually connectable in this slice (issue #56); HTTP and a
+   * disabled entry keep returning the pre-existing empty/unsupported behavior below. */
+  private connectableStdioServer(
+    servers: readonly McpServerDescriptorV2[],
+    serverId: string,
+  ): McpServerDescriptorV2 | undefined {
+    const server = servers.find((candidate) => candidate.id === serverId);
+    if (!server) throw new ProviderControlError('mcp_server_not_found', 'MCP server was not found');
+    return server.transport === 'stdio' && server.enabled ? server : undefined;
+  }
+
+  private async resolveSpawnConfig(
+    serverId: string,
+    context: McpControlContext,
+  ): Promise<McpSpawnConfig | undefined> {
+    return this.options.provider === 'claude'
+      ? resolveClaudeStdioSpawnConfig(serverId, context.cwd)
+      : resolveCodexStdioSpawnConfig(serverId, this.run, this.executable(context), context.cwd);
   }
 
   private executable(context: McpControlContext): string {
@@ -234,22 +362,60 @@ export class ProviderCliMcpControlPlane implements ProviderMcpControlPlane {
   }
 
   async act(input: McpServerActionRequestV2, context: McpControlContext): Promise<McpServerListV2> {
+    if (input.action === 'disconnect') {
+      await this.stdioConnections.closeFor(this.options.provider, input.serverId, context.cwd);
+      return this.list(context);
+    }
     if (input.action !== 'reload') throw new ProviderControlError('operation_unsupported', `${input.action} is not supported by this provider CLI`);
+    // A reload can only mean "the config on disk changed" -- an already-open connection to the
+    // old command/args/env must never silently keep serving stale state (issue #56: "Reap MCP
+    // process trees on ... reload").
+    await this.stdioConnections.closeFor(this.options.provider, input.serverId, context.cwd);
     return this.list(context);
   }
 
   async catalog(serverId: string, context: McpControlContext): Promise<McpCatalogV2> {
+    if (context.workspaceTrust.state !== 'trusted') {
+      throw new ProviderControlError('workspace_untrusted', 'MCP catalog access requires a trusted workspace');
+    }
     const list = await this.list(context);
-    if (!list.servers.some((server) => server.id === serverId)) throw new ProviderControlError('mcp_server_not_found', 'MCP server was not found');
-    return { serverId, items: [], revision: list.revision };
+    const revision = revisionOf(list.servers);
+    const server = this.connectableStdioServer(list.servers, serverId);
+    if (!server) return { serverId, items: [], revision };
+    const spawnConfig = await this.resolveSpawnConfig(serverId, context);
+    if (!spawnConfig) return { serverId, items: [], revision };
+    const items = await this.stdioConnections.getCatalog(this.options.provider, serverId, context.cwd, spawnConfig);
+    return { serverId, items, revision };
   }
 
   async startOAuth(serverId: string): Promise<McpOAuthStatusV2> {
     return { serverId, status: 'unsupported', safeSummary: this.options.provider === 'claude' ? 'Claude Agent SDK MCP OAuth requires a host token and is not supported' : 'Provider-owned browser OAuth is unavailable through this transport' };
   }
 
-  async invoke(input: McpToolInvocationRequestV2): Promise<McpToolInvocationResultV2> {
-    return { serverId: input.serverId, toolId: input.toolId, status: 'failed', safeSummary: 'Direct MCP tool invocation is not supported by this provider transport' };
+  async invoke(input: McpToolInvocationRequestV2, context: McpControlContext): Promise<McpToolInvocationResultV2> {
+    const unsupported: McpToolInvocationResultV2 = {
+      serverId: input.serverId,
+      toolId: input.toolId,
+      status: 'failed',
+      safeSummary: 'Direct MCP tool invocation is not supported by this provider transport',
+    };
+    if (context.workspaceTrust.state !== 'trusted') {
+      throw new ProviderControlError('workspace_untrusted', 'MCP tool invocation requires a trusted workspace');
+    }
+    const list = await this.list(context);
+    const server = this.connectableStdioServer(list.servers, input.serverId);
+    if (!server) return unsupported;
+    const spawnConfig = await this.resolveSpawnConfig(input.serverId, context);
+    if (!spawnConfig) return unsupported;
+    const result = await this.stdioConnections.invoke(
+      this.options.provider,
+      input.serverId,
+      context.cwd,
+      spawnConfig,
+      input.toolId,
+      input.arguments,
+    );
+    return { serverId: input.serverId, toolId: input.toolId, ...result };
   }
 }
 

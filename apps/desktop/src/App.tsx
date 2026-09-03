@@ -21,6 +21,13 @@ import { ComponentPanel } from './components/ComponentPanel.js';
 import { AgentGraphPanel } from './components/AgentGraphPanel.js';
 import { WorktreePanel } from './components/WorktreePanel.js';
 import { WorkflowPanel } from './components/WorkflowPanel.js';
+import { PanelStatusBadge } from './components/PanelStatusBadge.js';
+import {
+  childAgentPanelStatus,
+  componentPanelStatus,
+  mcpPanelStatus,
+  workflowPanelStatus,
+} from './panel-status.js';
 import { ActivityTimeline } from './components/activity/ActivityTimeline.js';
 import { RendererInteractionTimelineProjector } from './components/activity/interaction-timeline.js';
 import { AgentDockMark } from './components/AgentDockMark.js';
@@ -422,7 +429,7 @@ export function App() {
           </div>
           <div>
             <h1>AgentDock</h1>
-            <p className="subtitle">A secure local runtime for CLI-authenticated AI agents</p>
+            <p className="subtitle">A secure local runtime for your own agent CLI or SDK credentials</p>
           </div>
         </div>
         <div className={`runtime-state runtime-state--${daemonState}`}>
@@ -516,15 +523,28 @@ export function App() {
                   <h2>MCP servers</h2>
                 </div>
               </div>
+              <PanelStatusBadge status={mcpPanelStatus()} id="mcp-panel-status" />
               <McpPanel provider={provider} cwd={cwd} />
             </section>
             <section className="card">
               <div className="section-heading"><div><span className="eyebrow">Trust inventory</span><h2>Skills, plugins & hooks</h2></div></div>
+              <PanelStatusBadge status={componentPanelStatus()} id="component-panel-status" />
               <ComponentPanel provider={provider} cwd={cwd} />
             </section>
             <section className="card"><div className="section-heading"><div><span className="eyebrow">Isolation</span><h2>Owned worktrees</h2></div></div><WorktreePanel cwd={cwd} /></section>
-            <section className="card"><div className="section-heading"><div><span className="eyebrow">Execution tree</span><h2>Child agents</h2></div></div><AgentGraphPanel sessionId={selectedEntry?.session.id} /></section>
-            <section className="card"><div className="section-heading"><div><span className="eyebrow">Inputs & outputs</span><h2>Multimodal workflow</h2></div></div><WorkflowPanel sessionId={selectedEntry?.session.id} /></section>
+            <section className="card">
+              <div className="section-heading"><div><span className="eyebrow">Execution tree</span><h2>Child agents</h2></div></div>
+              <PanelStatusBadge
+                status={childAgentPanelStatus(!!selectedEntry)}
+                id="child-agent-panel-status"
+              />
+              <AgentGraphPanel sessionId={selectedEntry?.session.id} />
+            </section>
+            <section className="card">
+              <div className="section-heading"><div><span className="eyebrow">Staging only, not dispatched</span><h2>File staging & structured output</h2></div></div>
+              <PanelStatusBadge status={workflowPanelStatus()} id="workflow-panel-status" />
+              <WorkflowPanel sessionId={selectedEntry?.session.id} />
+            </section>
             <section className="card">
               <div className="section-heading">
                 <div>

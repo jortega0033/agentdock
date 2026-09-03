@@ -152,6 +152,90 @@ describe('private attachment staging', () => {
     // Deleting an already-gone or unknown id is not an error -- release calls are idempotent.
     await expect(store.deleteAttachments([attachment.id])).resolves.toBeUndefined();
   });
+
+  it('expires a referenced attachment once it exceeds maxReferencedAgeMs, not just unreferenced ones (issue #67)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-dock-attachments-referenced-age-'));
+    let clock = new Date('2026-01-01T00:00:00.000Z');
+    const store = new AttachmentStore(
+      join(root, 'staged'),
+      join(root, 'manifest.json'),
+      () => clock,
+    );
+    await store.load();
+    const attachment = await store.stage({
+      fileName: 'file.txt',
+      declaredSize: 1,
+      stream: chunks(Buffer.from('x')),
+    });
+    const sessionId = '123e4567-e89b-42d3-a456-426614174010';
+    await store.reference([attachment.id], sessionId);
+    expect(store.list()).toHaveLength(1);
+
+    // Still well within the referenced-age cap: an unreferenced-only sweep would already have
+    // expired this by now if it were still on the (much shorter) unreferencedTtlMs clock.
+    clock = new Date(clock.getTime() + ATTACHMENT_LIMITS_V2.unreferencedTtlMs + 1);
+    await store.cleanupExpired();
+    expect(store.list()).toHaveLength(1);
+
+    clock = new Date(clock.getTime() + ATTACHMENT_LIMITS_V2.maxReferencedAgeMs + 1);
+    await store.cleanupExpired();
+    expect(store.list()).toHaveLength(0);
+  });
+
+  it('releaseSessions removes every attachment bound to the given session ids, regardless of age', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-dock-attachments-lineage-'));
+    const store = new AttachmentStore(join(root, 'staged'), join(root, 'manifest.json'));
+    await store.load();
+    const sessionId = '123e4567-e89b-42d3-a456-426614174011';
+    const otherSessionId = '123e4567-e89b-42d3-a456-426614174012';
+    const attachment = await store.stage({
+      fileName: 'a.txt',
+      declaredSize: 1,
+      stream: chunks(Buffer.from('x')),
+    });
+    const otherAttachment = await store.stage({
+      fileName: 'b.txt',
+      declaredSize: 1,
+      stream: chunks(Buffer.from('y')),
+    });
+    await store.reference([attachment.id], sessionId);
+    await store.reference([otherAttachment.id], otherSessionId);
+    expect(store.list()).toHaveLength(2);
+
+    await store.releaseSessions([sessionId]);
+    expect(store.list().map((item) => item.id)).toEqual([otherAttachment.id]);
+
+    // A no-op call (unknown/empty session ids) never touches anything else.
+    await store.releaseSessions([]);
+    await store.releaseSessions(['00000000-0000-4000-8000-000000000000']);
+    expect(store.list()).toHaveLength(1);
+  });
+
+  it('reconciles an orphaned .bin file left by a crash between the durable write and the manifest persist (issue #67)', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-dock-attachments-orphan-'));
+    const staged = join(root, 'staged');
+    const warnings: Array<[string, Record<string, unknown> | undefined]> = [];
+    const spyLogger = {
+      debug: () => {},
+      info: () => {},
+      warn: (message: string, meta?: Record<string, unknown>) => warnings.push([message, meta]),
+      error: () => {},
+    };
+
+    // Simulate the crash window directly: a real .bin file on disk with no manifest entry, and a
+    // leftover temp file from an interrupted upload.
+    const store = new AttachmentStore(staged, join(root, 'manifest.json'), undefined, undefined, spyLogger);
+    await store.load();
+    await writeFile(join(staged, '11111111-1111-4111-8111-111111111111.bin'), 'orphaned');
+    await writeFile(join(staged, '.22222222-2222-4222-8222-222222222222.tmp'), 'leftover');
+
+    const recovered = new AttachmentStore(staged, join(root, 'manifest.json'), undefined, undefined, spyLogger);
+    await recovered.load();
+
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]![1]).toEqual({ count: 2 });
+    expect(recovered.list()).toHaveLength(0);
+  });
 });
 
 describe('structured output validation', () => {

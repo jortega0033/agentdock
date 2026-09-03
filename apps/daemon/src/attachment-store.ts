@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import {
   ATTACHMENT_LIMITS_V2,
   attachmentMetadataV2Schema,
   type AttachmentMetadataV2,
 } from '@agent-dock/shared';
+import { noopLogger, type Logger } from '@agent-dock/agent-runtime';
 
 export interface StoredAttachment extends AttachmentMetadataV2 {
   path: string;
@@ -72,23 +73,57 @@ export class AttachmentStore {
     private readonly manifestPath: string,
     private readonly now: () => Date = () => new Date(),
     private readonly limits: AttachmentLimits = ATTACHMENT_LIMITS_V2,
+    private readonly logger: Logger = noopLogger,
   ) {}
 
   async load(): Promise<void> {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
     try {
       const parsed = JSON.parse(await readFile(this.manifestPath, 'utf8')) as Partial<Manifest>;
-      if (parsed.version !== 1 || !Array.isArray(parsed.attachments)) return;
-      for (const raw of parsed.attachments.slice(0, this.limits.maxGlobalFiles)) {
-        const { path, ...metadata } = raw as StoredAttachment;
-        const valid = attachmentMetadataV2Schema.safeParse(metadata);
-        if (valid.success && typeof path === 'string' && dirname(path) === this.root)
-          this.#records.set(valid.data.id, { ...valid.data, path });
+      if (parsed.version === 1 && Array.isArray(parsed.attachments)) {
+        for (const raw of parsed.attachments.slice(0, this.limits.maxGlobalFiles)) {
+          const { path, ...metadata } = raw as StoredAttachment;
+          const valid = attachmentMetadataV2Schema.safeParse(metadata);
+          if (valid.success && typeof path === 'string' && dirname(path) === this.root)
+            this.#records.set(valid.data.id, { ...valid.data, path });
+        }
       }
     } catch {
       /* empty fail-closed store */
     }
+    await this.reconcileOrphanedFiles();
     await this.cleanupExpired();
+  }
+
+  /**
+   * A crash between `stage()`'s durable file write (`rename(temporary, destination)`) and its
+   * manifest `persist()` -- or between opening a `.tmp` file and ever completing it -- leaves a
+   * real file on disk with nothing in the manifest referencing it: a pure quota leak with no
+   * other cleanup path, since every other method here only ever iterates `#records` (issue #67).
+   * Reconciles the two by listing what's actually in `root` and removing anything the manifest
+   * doesn't know about. Never touches a file the manifest does reference, however old.
+   */
+  private async reconcileOrphanedFiles(): Promise<void> {
+    let entries: string[];
+    try {
+      entries = await readdir(this.root);
+    } catch {
+      return;
+    }
+    const known = new Set([...this.#records.values()].map((record) => basename(record.path)));
+    let orphaned = 0;
+    for (const entry of entries) {
+      const isTemp = entry.startsWith('.') && entry.endsWith('.tmp');
+      const isOrphanedBlob = entry.endsWith('.bin') && !known.has(entry);
+      if (!isTemp && !isOrphanedBlob) continue;
+      await unlink(join(this.root, entry)).catch(() => undefined);
+      orphaned += 1;
+    }
+    if (orphaned > 0) {
+      this.logger.warn('removed orphaned attachment files with no surviving manifest entry', {
+        count: orphaned,
+      });
+    }
   }
 
   async stage(input: {
@@ -241,14 +276,45 @@ export class AttachmentStore {
   }
 
   private async cleanupExpiredUnlocked(): Promise<void> {
-    const cutoff = this.now().getTime() - this.limits.unreferencedTtlMs;
+    const now = this.now().getTime();
+    const unreferencedCutoff = now - this.limits.unreferencedTtlMs;
+    const referencedCutoff = now - this.limits.maxReferencedAgeMs;
     let changed = false;
-    for (const [id, record] of this.#records)
-      if (!record.referenced && Date.parse(record.createdAt) < cutoff) {
-        await unlink(record.path).catch(() => undefined);
-        this.#records.delete(id);
-        changed = true;
-      }
+    for (const [id, record] of this.#records) {
+      const createdAt = Date.parse(record.createdAt);
+      const expired = record.referenced
+        ? createdAt < referencedCutoff
+        : createdAt < unreferencedCutoff;
+      if (!expired) continue;
+      await unlink(record.path).catch(() => undefined);
+      this.#records.delete(id);
+      changed = true;
+    }
+    if (changed) await this.persist();
+  }
+
+  /**
+   * Whole-lineage cleanup (issue #67): releases every attachment referenced by any of the given
+   * session ids, regardless of age. Meant to be called from the durable execution graph's
+   * lineage-removal hook (`onLineageRemoving` in apps/daemon/src/index.ts) so an attachment does
+   * not outlive the session it was bound to just because it hasn't hit its age cap yet. Never
+   * touches an attachment whose sessionId isn't in the given set, and never touches a user's
+   * original source file (this store only ever unlinks its own staged copy).
+   */
+  async releaseSessions(sessionIds: readonly string[]): Promise<void> {
+    return this.serializeMutation(() => this.releaseSessionsUnlocked(sessionIds));
+  }
+
+  private async releaseSessionsUnlocked(sessionIds: readonly string[]): Promise<void> {
+    if (sessionIds.length === 0) return;
+    const ids = new Set(sessionIds);
+    let changed = false;
+    for (const [id, record] of this.#records) {
+      if (!record.sessionId || !ids.has(record.sessionId)) continue;
+      await unlink(record.path).catch(() => undefined);
+      this.#records.delete(id);
+      changed = true;
+    }
     if (changed) await this.persist();
   }
 

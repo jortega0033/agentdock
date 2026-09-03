@@ -210,6 +210,12 @@ retention tracking too.
 (see the routes table above), so a stale UI action against a long-finished session gets `404`, not
 a misleading `202`.
 
+This section covers only `SessionManager`'s in-memory runtime bound. The daemon's other durable
+state -- the state directory's own POSIX permissions, the approval audit log's size/age rotation,
+and staged attachments' quota/lineage/age cleanup -- is documented in
+[capability-security-v2.md's retention table](capability-security-v2.md#persistence-retention-and-redaction),
+which is the one place that table is kept, to avoid two docs drifting out of sync with each other.
+
 ## Cancellation and process-tree kill
 
 `POST /sessions/:id/cancel` calls the session's runtime handle's `cancel()`, which kills the

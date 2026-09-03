@@ -104,6 +104,7 @@ export const mcpCatalogItemV2Schema = z.discriminatedUnion('kind', [
   catalogBase.extend({ kind: z.literal('resource'), uri: z.string().max(4_096) }).strict(),
   catalogBase.extend({ kind: z.literal('prompt'), argumentNames: z.array(boundedNameSchema).max(128) }).strict(),
 ]);
+export type McpCatalogItemV2 = z.infer<typeof mcpCatalogItemV2Schema>;
 export const mcpCatalogV2Schema = z.object({ serverId: boundedIdSchema, items: z.array(mcpCatalogItemV2Schema).max(10_000), revision: z.string().min(1).max(128) }).strict();
 export type McpCatalogV2 = z.infer<typeof mcpCatalogV2Schema>;
 export const mcpCatalogRequestV2Schema = z.object({ provider: providerIdSchema, cwd: z.string().min(1).max(32_768), serverId: boundedIdSchema }).strict();

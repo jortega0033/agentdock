@@ -1,0 +1,124 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/jortega0033/agentdock/scripts/release-candidate/manifest.schema.json",
+  "title": "AgentDock release-candidate evidence manifest",
+  "description": "Schema for the manifest produced by .github/workflows/release-candidate.yml (issue #66). See docs/release-checklist.md for what a 'ready' manifest does and does not prove.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "commit",
+    "dirty",
+    "osImage",
+    "toolchain",
+    "providerPins",
+    "gates",
+    "ready",
+    "failedGates",
+    "artifacts",
+    "signingStatus",
+    "published",
+    "documentedExceptions",
+    "providerMatrix"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "commit": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+    "dirty": {
+      "type": "boolean",
+      "description": "True if the checkout that produced this manifest had uncommitted changes -- a dirty manifest must never be read as describing a specific, reproducible commit."
+    },
+    "osImage": { "type": "string" },
+    "toolchain": {
+      "type": "object",
+      "required": ["node", "pnpm"],
+      "additionalProperties": false,
+      "properties": {
+        "node": { "type": "string" },
+        "pnpm": { "type": "string" }
+      }
+    },
+    "providerPins": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "gates": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["name", "passed"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "passed": { "type": "boolean" },
+          "detail": { "type": "string" }
+        }
+      }
+    },
+    "ready": {
+      "type": "boolean",
+      "description": "True only when every entry in `gates` passed. Never set directly -- always the strict AND of `gates[].passed`, computed by aggregateGateResults() in manifest.mjs."
+    },
+    "failedGates": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "path", "sha256", "sizeBytes"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "path": { "type": "string" },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "sizeBytes": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "signingStatus": { "const": "unsigned" },
+    "published": {
+      "const": false,
+      "description": "This workflow never publishes a release. Always false; there is no code path that can flip it."
+    },
+    "documentedExceptions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Known, already-documented exceptions this candidate carries (e.g. the electron-builder dev-tool audit advisories in docs/packaging.md#current-dependency-audit-exception), so a reviewer doesn't have to rediscover them."
+    },
+    "providerMatrix": {
+      "type": "object",
+      "required": ["available", "rows"],
+      "additionalProperties": false,
+      "properties": {
+        "available": {
+          "type": "boolean",
+          "description": "False when issue #65's live-provider-smoke evidence file wasn't found for this run -- a missing matrix must read as 'not verified', never as an implicit pass."
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["provider", "transport", "resultCode", "verified", "timestamp"],
+            "additionalProperties": false,
+            "properties": {
+              "provider": { "type": "string" },
+              "transport": { "type": "string" },
+              "providerVersion": { "type": ["string", "null"] },
+              "resultCode": { "type": "string" },
+              "verified": {
+                "type": "boolean",
+                "description": "True only when resultCode is exactly 'success'. A skip or a failure is never 'verified', even though the row is still present."
+              },
+              "timestamp": { "type": "string", "format": "date-time" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

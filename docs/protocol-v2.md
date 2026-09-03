@@ -88,6 +88,13 @@ presence/classification. The current adapter returns configured stdio `command` 
 verbatim as public fields without scanning embedded secrets. Do not put credentials in those
 fields, and treat the inspection response as sensitive configuration data.
 
+`/v2/worktrees/preview`, `/v2/worktrees`, and `/v2/worktrees/cleanup` require the source
+repository's exact current workspace incarnation to be trusted, the same `workspace.worktrees`
+contract documented in [capability-security-v2.md](capability-security-v2.md#workspace-trust): an
+untrusted, revoked, or replaced source returns `409 workspace_untrusted` before any Git command
+runs, trust is re-derived from disk immediately before the lease, the mutating Git command, and the
+include-copy phase, and a newly created worktree begins untrusted itself.
+
 Protocol v2 has no `cancel-all` route. The unversioned v1 endpoint remains a narrow desktop-shutdown
 mechanism. Command dispatch is available only when the frozen selection includes the command's
 capability and the selected provider transport exposes an interactive session. A legacy one-shot

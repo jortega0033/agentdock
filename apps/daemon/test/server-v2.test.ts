@@ -35,6 +35,7 @@ import {
 } from '@agent-dock/shared';
 import { buildServer } from '../src/server.js';
 import { SessionManager } from '../src/session-manager.js';
+import { SessionAdmissionController } from '../src/session-admission.js';
 import { resolveWorkspaceIdentity } from '../src/workspace-identity.js';
 import { WorkspaceTrustStore } from '../src/workspace-trust-store.js';
 import { FileExecutionGraphStore } from '../src/execution-graph-store.js';
@@ -244,6 +245,38 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(cwd, { recursive: true, force: true });
+});
+
+describe('POST /v2/sessions admission control (issue #52)', () => {
+  it('maps admission-controller rejection to 429 session_capacity_exceeded', async () => {
+    const registry = new ProviderRegistry();
+    const provider = new FakeProvider('claude', undefined, 'success', 'multi-input');
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, {
+      admission: new SessionAdmissionController({ maxActiveSessions: 1 }),
+    });
+    const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+
+    await createInteractiveSession(app, ['session.cancel']);
+
+    const second = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: {
+        provider: 'claude',
+        cwd,
+        prompt: 'second turn',
+        capabilities: {
+          required: [{ id: 'session.cancel' }],
+          optional: [],
+          allowExperimental: false,
+        },
+      },
+    });
+    expect(second.statusCode).toBe(429);
+    expect(second.json()).toMatchObject({ code: 'session_capacity_exceeded' });
+  });
 });
 
 describe('v2 discovery and authorization', () => {

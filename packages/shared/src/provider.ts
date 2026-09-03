@@ -4,6 +4,21 @@ export const PROVIDER_IDS = ['claude', 'codex'] as const;
 export type ProviderId = (typeof PROVIDER_IDS)[number];
 
 /**
+ * The single source of truth for release-visible provider names. Every UI surface, status
+ * payload, and screenshot fixture must render these values rather than a local string literal, so
+ * a branding-policy change only needs to happen once.
+ *
+ * Anthropic's Agent SDK distribution terms permit product UI to say "Claude Agent" (or "Claude"
+ * inside an Agents menu), but not "Claude Code" or "Claude Code Agent" — those names stay reserved
+ * for accurate technical references to the separately installed, upstream Claude CLI executable
+ * (docs, error messages naming the binary, etc.), never for the product-facing provider identity.
+ */
+export const PROVIDER_DISPLAY_NAMES: Record<ProviderId, string> = {
+  claude: 'Claude Agent',
+  codex: 'Codex',
+};
+
+/**
  * Deliberately a pure string union with no boolean member (AD-13): the previous
  * `boolean | 'unknown'` shape let a lazy `if (status.authenticated)` silently treat "couldn't
  * determine" as "authenticated", which is exactly backwards for a security-relevant signal.

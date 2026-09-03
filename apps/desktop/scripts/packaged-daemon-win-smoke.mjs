@@ -56,7 +56,11 @@ const shimDir = join(tempRoot, 'npm codex bin with spaces');
 const shimPath = join(shimDir, 'codex.cmd');
 const shimExecutablePath = join(shimDir, 'codex-shim.exe');
 const shimSourcePath = join(shimDir, 'codex-shim.cs');
-const invocationLog = join(tempRoot, 'codex-invocations.txt');
+// Written by the shim to a path fixed relative to its own executable (AppContext.BaseDirectory),
+// never communicated via an environment variable: issue #53 sanitizes every env var the daemon
+// forwards to a spawned provider process down to a reviewed allowlist, so a daemon-set,
+// test-only variable like AGENT_DOCK_SMOKE_CODEX_LOG would never reach the real Codex child.
+const invocationLog = join(shimDir, 'codex-invocations.txt');
 const stateDir = join(tempRoot, 'state');
 const discoveryPath = join(tmpdir(), 'agent-dock', `${appId}.json`);
 
@@ -96,7 +100,6 @@ try {
       ...daemonEnv,
       AGENT_DOCK_APP_ID: appId,
       AGENT_DOCK_STATE_DIR: stateDir,
-      AGENT_DOCK_SMOKE_CODEX_LOG: invocationLog,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
@@ -315,7 +318,7 @@ async function verifyPackagedJobHost(jobHostPath, executablePath, cwd, invocatio
   );
   const child = spawn(jobHostPath, args, {
     cwd,
-    env: { ...process.env, AGENT_DOCK_SMOKE_CODEX_LOG: invocationLogPath },
+    env: process.env,
     stdio: ['pipe', 'pipe', 'pipe'],
     windowsHide: true,
   });
@@ -375,9 +378,11 @@ public static class Program
 {
     public static int Main(string[] args)
     {
-        var logPath = Environment.GetEnvironmentVariable("AGENT_DOCK_SMOKE_CODEX_LOG");
-        if (!String.IsNullOrEmpty(logPath))
-            File.AppendAllText(logPath, String.Join(" ", args) + Environment.NewLine);
+        // Fixed relative to this executable's own directory, never an environment variable: the
+        // daemon now forwards only a reviewed allowlist of env vars to a spawned provider process
+        // (issue #53), so a daemon-set, test-only variable would never reach a real Codex child.
+        var logPath = Path.Combine(AppContext.BaseDirectory, "codex-invocations.txt");
+        File.AppendAllText(logPath, String.Join(" ", args) + Environment.NewLine);
 
         if (args.Length == 1 && args[0] == "--version")
         {

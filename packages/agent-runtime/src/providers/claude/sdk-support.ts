@@ -49,6 +49,15 @@ const TRUSTED_CAPABILITIES = [
 
 type ClaudeCapabilityId = (typeof TRUSTED_CAPABILITIES)[number];
 
+// session.resume/session.fork's explicit-seam for a future implementation (issue #54): durable v2
+// continuation needs a `ProviderContinuationEvidence` (non-secret accountFingerprint + selectedModel,
+// see types.ts) that no current Claude Agent SDK or CLI call supplies. When one does, follow Codex
+// app-server's pattern in providers/codex/app-server/scope-evidence.ts: fingerprint a genuinely
+// non-secret account identifier the vendor API returns (there, the authenticated account email),
+// never an API key, session token, or any other credential material -- hashing a secret does not
+// launder it into a safe "account identity," it just obscures a value that still shouldn't be
+// derived from. Any such probe also needs its own compatibility fixture set, the same as every
+// other adapter-tested claim in this file (CLAUDE_AGENT_SDK_FIXTURE_SET).
 const EXPLICITLY_UNSUPPORTED_CAPABILITIES = [
   'session.resume',
   'session.fork',

@@ -6,6 +6,9 @@ import type { SessionManager } from '../session-manager.js';
 import type { WorkspaceTrustStore } from '../workspace-trust-store.js';
 import { resolveWorkspaceIdentity, revalidateWorkspaceIdentity } from '../workspace-identity.js';
 import { SessionCapacityError } from '../session-admission.js';
+import { BoundedV1SseWriter } from '../v1-sse-writer.js';
+
+const TERMINAL_SESSION_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
 export function registerSessionRoutes(
   app: FastifyInstance,
@@ -114,34 +117,34 @@ export function registerSessionRoutes(
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
     });
-    reply.raw.write(':ok\n\n');
 
     const lastEventIdHeader = req.headers['last-event-id'];
     const lastEventId = Array.isArray(lastEventIdHeader) ? lastEventIdHeader[0] : lastEventIdHeader;
     const sinceIndex = lastEventId ? Number(lastEventId) + 1 : 0;
 
-    let ended = false;
-    // Declared separately (not `const unsubscribe = subscribe(...)`) because the listener below
-    // can run *synchronously inside* this call (replaying already-stored events); referencing
-    // `unsubscribe` from inside it before a combined declaration+assignment finished initializing
-    // would throw. `let` here is deliberate, not a lint slip.
     let unsubscribe: (() => void) | undefined;
-    // eslint-disable-next-line prefer-const
+    let cleanupRequested = false;
+    const cleanup = (): void => {
+      if (!unsubscribe) {
+        cleanupRequested = true;
+        return;
+      }
+      const release = unsubscribe;
+      unsubscribe = undefined;
+      release();
+    };
+    // Bounded, backpressure-aware writer (see v1-sse-writer.ts): enqueues synchronously, honors
+    // `reply.raw.write`'s drain signal, and disconnects only this one slow subscriber -- never the
+    // provider session -- on overflow.
+    const writer = new BoundedV1SseWriter(reply.raw, cleanup);
+    reply.raw.once('close', () => writer.close());
+    writer.start();
+
+    // Replay can synchronously close the writer before subscribe returns its disposer.
     unsubscribe = sessionManager.subscribe(
       params.data.sessionId,
       Number.isFinite(sinceIndex) ? sinceIndex : 0,
-      (index, event) => {
-        reply.raw.write(`id: ${index}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
-        if (
-          event.type === 'session.completed' ||
-          event.type === 'session.failed' ||
-          event.type === 'session.cancelled'
-        ) {
-          ended = true;
-          unsubscribe?.();
-          reply.raw.end();
-        }
-      },
+      (_index, event) => writer.write(event),
       1,
     );
 
@@ -150,14 +153,18 @@ export function registerSessionRoutes(
       // subscribe(): the session's runtime state is already gone. Without this, the already-200
       // response would stay open forever with no data and no close (the exact race the daemon
       // audit flagged for this route).
-      reply.raw.end();
+      writer.close();
       return;
     }
-
-    // If the session was already terminal, the listener above fired synchronously during
-    // subscribe() (before `unsubscribe` was assigned); clean it up now instead.
-    if (ended) unsubscribe();
-    else req.raw.on('close', () => unsubscribe?.());
+    if (cleanupRequested) {
+      cleanup();
+      return;
+    }
+    // A client reconnecting with Last-Event-ID past the terminal event (already has it) replays
+    // nothing, so the writer never sees a terminal frame to close on; without this the connection
+    // would stay open forever once the runtime has no more events left to ever emit.
+    const current = sessionManager.get(params.data.sessionId, 1);
+    if (!current || TERMINAL_SESSION_STATUSES.has(current.status)) writer.finishReplay();
   });
 
   app.post('/sessions/:sessionId/cancel', async (req, reply) => {

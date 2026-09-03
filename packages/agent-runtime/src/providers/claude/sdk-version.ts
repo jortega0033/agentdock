@@ -1,3 +1,5 @@
+import { PROVIDER_DISPLAY_NAMES } from '@agent-dock/shared';
+
 /**
  * The Agent SDK is deliberately pinned: its stream/control protocol is fixture-backed rather
  * than treated as a semver-stable CLI implementation detail.  Update these constants, package
@@ -14,8 +16,8 @@ export const CLAUDE_AGENT_SDK_WINDOWS_X64_BINARY_PACKAGE =
   '@anthropic-ai/claude-agent-sdk-win32-x64';
 export const CLAUDE_AGENT_SDK_WINDOWS_X64_BINARY_VERSION = CLAUDE_AGENT_SDK_VERSION;
 
-/** A release-visible name, not the existing local-CLI provider display name. */
+/** Mirrors the centralized `PROVIDER_DISPLAY_NAMES.claude` policy for this SDK-backed transport. */
 export const CLAUDE_AGENT_SDK_BRANDING = {
-  approvedDisplayName: 'Claude Agent',
+  approvedDisplayName: PROVIDER_DISPLAY_NAMES.claude,
   prohibitedDisplayNames: ['Claude Code', 'Claude Code Agent'],
 } as const;

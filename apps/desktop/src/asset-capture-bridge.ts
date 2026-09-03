@@ -6,23 +6,38 @@ import type {
   ProviderStatusV2,
   WorkspaceTrustViewV2,
 } from '@agent-dock/shared';
+import { PROVIDER_DISPLAY_NAMES } from '@agent-dock/shared';
 import type { AgentDockBridge } from './window.js';
+
+/** Documentation screenshots must never present fictitious data as real. This renderer-side
+ * fixture cannot import `@agent-dock/agent-runtime` (that package is daemon/Node-only and
+ * crossing that boundary into the Electron renderer bundle is exactly the separation this repo's
+ * security model depends on), so the versions below are plain literals kept in manual sync with
+ * the daemon's pinned/verified values -- `CLAUDE_AGENT_SDK_CLAUDE_CODE_VERSION` in
+ * `packages/agent-runtime/src/providers/claude/sdk-version.ts` and
+ * `CODEX_LEGACY_COMPATIBILITY.providerVersion` in
+ * `packages/agent-runtime/src/providers/compatibility-manifest.ts`. Update both together, and
+ * keep every version suffixed "(demo)" so a reader can never mistake this fixture-driven capture
+ * for a live provider read. */
+const CLAUDE_DEMO_VERSION = '2.1.251 (demo)';
+const CODEX_DEMO_VERSION = '0.147.0 (demo)';
+const DEMO_TRANSPORT_ID = 'demo-interactive';
 
 const providers: ProviderStatus[] = [
   {
     id: 'claude',
-    name: 'Claude Code',
+    name: PROVIDER_DISPLAY_NAMES.claude,
     installed: true,
     authenticated: 'authenticated',
-    version: '2.4.1',
+    version: CLAUDE_DEMO_VERSION,
     capabilities: { resume: true, cancellation: true, tools: true, usage: true, thinking: true },
   },
   {
     id: 'codex',
-    name: 'Codex',
+    name: PROVIDER_DISPLAY_NAMES.codex,
     installed: true,
     authenticated: 'authenticated',
-    version: '1.9.0',
+    version: CODEX_DEMO_VERSION,
     capabilities: { resume: true, cancellation: true, tools: true, usage: true },
   },
 ];
@@ -34,7 +49,7 @@ const providersV2: ProviderStatusV2[] = providers.map((provider) => ({
   authenticated: provider.authenticated,
   transports: [
     {
-      id: 'asset-capture-interactive',
+      id: DEMO_TRANSPORT_ID,
       priority: 0,
       stability: 'stable',
       possibleEffects: ['read', 'filesystem_write', 'command'],
@@ -162,7 +177,7 @@ export function installAssetCaptureBridge(): void {
     },
     createInteractiveSession: async (input) => {
       const selection = {
-        transport: 'asset-capture-interactive',
+        transport: DEMO_TRANSPORT_ID,
         enabled: [],
         unavailableOptional: [],
         possibleEffects: [],

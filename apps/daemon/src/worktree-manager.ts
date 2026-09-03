@@ -9,6 +9,9 @@ import type {
   WorktreePreviewV2,
 } from '@agent-dock/shared';
 import { resolveWorkspaceIdentity } from './workspace-identity.js';
+import type { WorkspaceIdentity } from './workspace-identity.js';
+import type { WorkspaceTrustStore } from './workspace-trust-store.js';
+import { isWorkspaceTrusted, revalidateWorkspaceTrusted } from './workspace-trust-guard.js';
 
 interface StoredWorktrees {
   version: 1;
@@ -33,7 +36,8 @@ export class WorktreeManagerError extends Error {
       | 'worktree_dirty'
       | 'worktree_locked'
       | 'worktree_not_found'
-      | 'worktree_external',
+      | 'worktree_external'
+      | 'workspace_untrusted',
     message: string,
   ) {
     super(message);
@@ -93,8 +97,40 @@ export class OwnedWorktreeManager {
     private readonly root: string,
     private readonly stateFile: string,
     runGit: WorktreeGitRunner = defaultGit,
+    private readonly trustStore?: WorkspaceTrustStore,
   ) {
     this.#runGit = runGit;
+  }
+
+  /** Gate: the very first check on a freshly resolved identity, before any manager Git command. */
+  private async assertTrusted(identity: WorkspaceIdentity): Promise<void> {
+    if (!this.trustStore) return;
+    if (!(await isWorkspaceTrusted(this.trustStore, identity))) {
+      throw new WorktreeManagerError('workspace_untrusted', 'Workspace is not trusted');
+    }
+  }
+
+  /** TOCTOU seam: re-derives identity from disk immediately before a Git mutation or include-copy
+   * phase, so a revocation or directory replacement after admission still aborts before it runs. */
+  private async revalidateTrusted(identity: WorkspaceIdentity): Promise<void> {
+    if (!this.trustStore) return;
+    if (!(await revalidateWorkspaceTrusted(this.trustStore, identity))) {
+      throw new WorktreeManagerError('workspace_untrusted', 'Workspace trust changed');
+    }
+  }
+
+  /** Background status refresh (`load`/`list`/post-`create`) walks every stored record, not just
+   * one a caller is actively gating: without this, a revoked or replaced source would still get
+   * `git worktree list`/`git status` run against it -- and either can execute arbitrary code via
+   * repo-local hooks/filters/fsmonitor config -- on every daemon startup or list call. Resolving
+   * identity here still runs `git rev-parse`, the same bounded plumbing probe every trust check in
+   * this file already performs before knowing whether to trust the result; it never invokes a
+   * working-tree command. */
+  private async isSourceTrusted(sourcePath: string): Promise<boolean> {
+    if (!this.trustStore) return true;
+    const identity = await resolveWorkspaceIdentity(sourcePath).catch(() => undefined);
+    if (!identity) return false;
+    return isWorkspaceTrusted(this.trustStore, identity);
   }
 
   async load(): Promise<void> {
@@ -120,6 +156,7 @@ export class OwnedWorktreeManager {
 
   async preview(input: WorktreePreviewRequestV2): Promise<WorktreePreviewV2> {
     const identity = await resolveWorkspaceIdentity(input.cwd);
+    await this.assertTrusted(identity);
     if (!identity.gitCommonDirectory)
       throw new WorktreeManagerError('invalid_repository', 'Worktrees require a Git repository');
     const includeFiles = await this.includeFiles(identity.canonicalPath);
@@ -152,6 +189,7 @@ export class OwnedWorktreeManager {
 
   async create(input: WorktreeCreateRequestV2): Promise<OwnedWorktreeV2> {
     const identity = await resolveWorkspaceIdentity(input.cwd);
+    await this.assertTrusted(identity);
     if (!identity.gitCommonDirectory)
       throw new WorktreeManagerError('invalid_repository', 'Worktrees require a Git repository');
     const root = await realpath(this.root);
@@ -174,6 +212,7 @@ export class OwnedWorktreeManager {
       );
     this.#leases.add(identity.workspaceId);
     try {
+      await this.revalidateTrusted(identity); // checkpoint: after acquiring the repository lease
       const preview = await this.preview(input);
       const includeDigests: Record<string, string> = {};
       let includeBytes = 0;
@@ -217,9 +256,11 @@ export class OwnedWorktreeManager {
       };
       this.#records.set(id, record);
       await this.persist();
+      await this.revalidateTrusted(identity); // checkpoint: immediately before the Git mutation
       await this.#runGit(['worktree', 'add', '--detach', target, commit], identity.canonicalPath);
       record.status = 'ready';
       await this.persist();
+      await this.revalidateTrusted(identity); // checkpoint: immediately before the include-copy phase
       for (const [path, expectedDigest] of Object.entries(includeDigests)) {
         const source = resolve(identity.canonicalPath, path);
         const destination = resolve(target, path);
@@ -253,6 +294,15 @@ export class OwnedWorktreeManager {
     const record = this.#records.get(id);
     if (!record)
       throw new WorktreeManagerError('worktree_not_found', 'Owned worktree was not found');
+    // Trust is bound to the source repository the worktree was cut from (AD-non-goal: it is never
+    // propagated to the owned checkout itself), so cleanup re-derives that identity fresh here
+    // rather than trusting anything cached on the record.
+    const sourceIdentity = await resolveWorkspaceIdentity(record.sourcePath).catch(
+      () => undefined,
+    );
+    if (!sourceIdentity)
+      throw new WorktreeManagerError('workspace_untrusted', 'Source workspace could not be resolved');
+    await this.assertTrusted(sourceIdentity);
     const root = await realpath(this.root);
     const canonicalTarget = await realpath(record.targetPath).catch(() => undefined);
     if (!canonicalTarget) {
@@ -269,6 +319,7 @@ export class OwnedWorktreeManager {
       throw new WorktreeManagerError('worktree_busy', 'Worktree is currently leased');
     this.#leases.add(record.workspaceId);
     try {
+      await this.revalidateTrusted(sourceIdentity); // checkpoint: after acquiring the repository lease
       const porcelain = await this.#runGit(['worktree', 'list', '--porcelain'], record.sourcePath);
       const lines = porcelain.split(/\r?\n/);
       const start = lines.findIndex(
@@ -310,6 +361,7 @@ export class OwnedWorktreeManager {
           'Dirty worktrees are never removed automatically',
         );
       }
+      await this.revalidateTrusted(sourceIdentity); // checkpoint: immediately before the Git mutation
       await this.#runGit(['worktree', 'remove', record.targetPath], record.sourcePath);
       record.status = 'missing';
       await this.persist();
@@ -351,6 +403,9 @@ export class OwnedWorktreeManager {
         record.status = 'missing';
       } else if (!inside(root, canonicalTarget) || !samePath(canonicalTarget, record.targetPath)) {
         record.status = 'orphaned';
+      } else if (!(await this.isSourceTrusted(record.sourcePath))) {
+        // Never run Git against a source that isn't currently trusted; leave the last-known
+        // status as-is rather than guessing at one from a probe we didn't make.
       } else {
         try {
           const porcelain = await this.#runGit(

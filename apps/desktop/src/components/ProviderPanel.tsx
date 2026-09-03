@@ -25,7 +25,12 @@ function sandboxLabel(status: ProviderStatusV2): string {
 }
 
 export function ProviderPanel({ providers }: { providers: ProviderStatusV2[] }) {
-  if (providers.length === 0) {
+  // Issue #73: the registry always reports every registered provider (each with its own real
+  // `installed` flag from findExecutable()), so `providers.length === 0` essentially never
+  // happens in practice -- the actual "nothing to work with" state is every entry reporting
+  // `installed: false`. Only surfaced when *both* are missing; a user with one working provider
+  // shouldn't be nagged about the other.
+  if (providers.length === 0 || providers.every((status) => !status.installed)) {
     return (
       <div className="provider-panel provider-panel--empty">
         <img className="provider-panel__empty-illustration" src={noProvidersIllustration} alt="" />
@@ -34,6 +39,14 @@ export function ProviderPanel({ providers }: { providers: ProviderStatusV2[] }) 
           Install {PROVIDER_DISPLAY_NAMES.claude} or {PROVIDER_DISPLAY_NAMES.codex}, then restart
           AgentDock.
         </span>
+        <div className="provider-panel__install-links">
+          <button type="button" onClick={() => void window.agentDock.openProviderInstallDocs('claude')}>
+            {PROVIDER_DISPLAY_NAMES.claude} install docs
+          </button>
+          <button type="button" onClick={() => void window.agentDock.openProviderInstallDocs('codex')}>
+            {PROVIDER_DISPLAY_NAMES.codex} install docs
+          </button>
+        </div>
       </div>
     );
   }

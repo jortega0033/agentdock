@@ -118,6 +118,7 @@ export function installAssetCaptureBridge(): void {
     onDaemonStatus: () => () => {},
     listProviders: async () => providers,
     listProvidersV2: async () => providersV2,
+    openProviderInstallDocs: async () => {},
     listMcpServers: async () => ({ servers: [], revision: 'asset-capture-1' }),
     configureMcpServer: async () => ({ servers: [], revision: 'asset-capture-1' }),
     actionMcpServer: async () => ({ servers: [], revision: 'asset-capture-1' }),

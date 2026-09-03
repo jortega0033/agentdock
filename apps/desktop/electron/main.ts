@@ -29,9 +29,11 @@ import {
   worktreeCreateRequestV2Schema,
   worktreePreviewRequestV2Schema,
   structuredWorkflowRequestV2Schema,
+  providerIdSchema,
   type AgentCommandV2,
   type AgentEventV2Envelope,
   type AgentSessionV2,
+  type ProviderId,
   type WorkspaceTrustUpdateRequestV2,
 } from '@agent-dock/shared';
 import { AgentDockClient, DaemonError } from '@agent-dock/client';
@@ -47,6 +49,7 @@ import {
   externalUrlLogSummary,
   handleWillNavigate,
   handleWindowOpen,
+  openAllowedExternalUrl,
   resolveOAuthLaunch,
 } from './allowed-external-url.js';
 import { isFromMainWindowFrame } from './ipc-sender-guard.js';
@@ -873,6 +876,20 @@ handle('daemon:set-workspace-trust', async (_event, input: unknown) => {
 handle('daemon:read-audit', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.audit.list(parseAuditReadInput(input));
+});
+
+// Fixed, main-process-owned constants (issue #73) -- the renderer only ever names which provider
+// via a closed enum, never supplies a URL, so this never touches the OAuth-style validated-but-
+// dynamic launch path above. Still routed through the same `openAllowedExternalUrl` gate as
+// defense in depth against a future edit accidentally making either value request-controlled.
+const PROVIDER_INSTALL_DOCS_URL: Record<ProviderId, string> = {
+  claude: 'https://code.claude.com/docs/en/setup',
+  codex: 'https://github.com/openai/codex',
+};
+
+handle('shell:open-provider-install-docs', async (_event, input: unknown) => {
+  const provider = providerIdSchema.parse(input);
+  openAllowedExternalUrl(PROVIDER_INSTALL_DOCS_URL[provider], (target) => shell.openExternal(target));
 });
 
 handle('dialog:select-directory', async () => {

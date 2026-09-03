@@ -647,6 +647,13 @@ textarea {
   font-size: 14px;
 }
 
+.provider-panel__install-links {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
 .provider-panel__empty-illustration,
 .activity-timeline__empty-illustration {
   display: block;

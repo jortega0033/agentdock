@@ -86,6 +86,7 @@ export interface AgentDockBridge {
   onDaemonStatus(callback: (status: DaemonStatus) => void): () => void;
   listProviders(): Promise<ProviderStatus[]>;
   listProvidersV2(): Promise<ProviderStatusV2[]>;
+  openProviderInstallDocs(provider: ProviderId): Promise<void>;
   listMcpServers(provider: ProviderId, cwd: string): Promise<McpServerListV2>;
   configureMcpServer(input: McpConfigureRequestV2): Promise<McpServerListV2>;
   actionMcpServer(input: McpServerActionRequestV2): Promise<McpServerListV2>;

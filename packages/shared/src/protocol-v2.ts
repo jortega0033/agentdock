@@ -28,6 +28,7 @@ export const requestIdSchema = z.string().uuid();
 export const contentBlockIdSchema = z.string().uuid();
 export const toolCallIdSchema = z.string().uuid();
 export const executionIdSchema = z.string().uuid();
+export const subagentIdSchema = z.string().uuid();
 
 export type SessionId = string;
 export type TurnId = string;
@@ -36,6 +37,7 @@ export type RequestId = string;
 export type ContentBlockId = string;
 export type ToolCallId = string;
 export type ExecutionId = string;
+export type SubagentId = string;
 
 const nonemptyWireStringSchema = z
   .string()
@@ -667,6 +669,28 @@ const toolCompletedEventSchema = z
     summary: z.string().max(4_096).optional(),
   })
   .strict();
+// Bounded, provider-neutral child-agent lifecycle event (issue #58). One event type carries every
+// phase -- spawn, progress update, blocked, and terminal -- distinguished by `status`, mirroring
+// SubagentNodeV2's own status enum rather than inventing four separate wire event types for what
+// is really one node's state transitions. `agentId` is a stable AgentDock id the emitting adapter
+// generates once per native child identity and reuses for every subsequent event about that same
+// child, the same idiom already used for `toolCallId` on tool.started/tool.completed.
+const subagentStatusEventSchema = z
+  .object({
+    ...turnEventShape,
+    type: z.literal('subagent.status'),
+    agentId: subagentIdSchema,
+    parentAgentId: subagentIdSchema.optional(),
+    nativeChildId: z.string().min(1).max(1_024).optional(),
+    name: z.string().min(1).max(256),
+    role: z.string().max(256).optional(),
+    model: z.string().max(256).optional(),
+    status: z.enum(['spawning', 'running', 'blocked', 'completed', 'failed', 'cancelled']),
+    toolSummary: z.string().max(1_024).optional(),
+    permissionSummary: z.string().max(1_024).optional(),
+    controls: z.object({ steer: z.boolean(), interrupt: z.boolean(), cancel: z.boolean() }).strict(),
+  })
+  .strict();
 const approvalRequestedEventSchema = z
   .object({
     ...turnEventShape,
@@ -789,6 +813,7 @@ const agentEventV2EnvelopeUnionSchema = z.union([
   contentCompletedEventSchema,
   toolStartedEventSchema,
   toolCompletedEventSchema,
+  subagentStatusEventSchema,
   approvalRequestedEventSchema,
   approvalResolvedEventSchema,
   questionRequestedEventSchema,
@@ -848,6 +873,7 @@ export const AGENT_EVENT_V2_TYPES = [
   'content.completed',
   'tool.started',
   'tool.completed',
+  'subagent.status',
   'approval.requested',
   'approval.resolved',
   'question.requested',

@@ -17,9 +17,15 @@ concurrency:
 
 jobs:
   build-and-test:
-    name: Lint, typecheck, test, build
+    name: Lint, typecheck, test, build (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # package.json's "engines" field declares 20.x-22.x as the actually-tested range (issue
+        # #64) — exercise both edges, not just the minimum.
+        node-version: [20, 22]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -30,7 +36,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: ${{ matrix.node-version }}
           cache: pnpm
 
       - name: Install dependencies
@@ -74,3 +80,24 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+  # This repository's branch ruleset names its required status check literally "Lint, typecheck,
+  # test, build" (no per-matrix-leg suffix). GitHub Actions appends the matrix combination to a
+  # job's check name automatically once a job has `strategy.matrix`, so build-and-test's own check
+  # never matches that literal string again -- discovered the hard way: a PR with a green matrix
+  # still couldn't merge ("2 of 2 required status checks are expected"), because the required
+  # check name no longer existed. This gate job carries the exact required name and only succeeds
+  # once every matrix leg has, so "all Node versions passed" is still what actually gates merge.
+  build-and-test-gate:
+    name: Lint, typecheck, test, build
+    needs: build-and-test
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every Node version to have passed
+        run: |
+          if [ "${{ needs.build-and-test.result }}" != "success" ]; then
+            echo "::error::build-and-test matrix did not fully succeed (result: ${{ needs.build-and-test.result }})"
+            exit 1
+          fi

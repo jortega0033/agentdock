@@ -319,6 +319,102 @@ describe('SessionManager — past the history cap (AD-01)', () => {
   }, 15_000);
 });
 
+describe('SessionManager — v1 replay byte ceiling (issue #51)', () => {
+  it('stops growing history once 16 MiB of replay would be exceeded, well before the 5,000-event cap', async () => {
+    const { provider, sessionManager } = setup();
+    const session = sessionManager.create('claude', '/tmp', 'hi');
+    const testSession = provider.sessions.get(session.id)!;
+    const collected = collectUntilTerminal(sessionManager, session.id);
+
+    // Each 'é' is 2 UTF-8 bytes, so 256K repetitions serialize to just over 512 KiB per event --
+    // safely under the 1 MiB per-envelope ceiling, but 40 of them exceed the 16 MiB session
+    // ceiling (~20 MiB) long before the 5,000-event count cap could ever be reached. Multi-byte so
+    // byte accounting (not character count) is what's actually being exercised.
+    const bigText = 'é'.repeat(256 * 1024);
+    const eventCount = 40;
+    for (let i = 0; i < eventCount; i++) {
+      testSession.push({ type: 'assistant.message', text: bigText });
+    }
+    testSession.push({ type: 'session.completed' });
+    testSession.finish();
+
+    const delivered = await collected; // every event still arrives live regardless of replay storage
+    expect(delivered.length).toBe(eventCount + 1);
+
+    // A fresh subscriber can only replay whatever fit under the byte ceiling, not everything sent.
+    const replayed: AgentEventEnvelope[] = [];
+    const unsubscribe = sessionManager.subscribe(session.id, 0, (_i, event) =>
+      replayed.push(event),
+    );
+    unsubscribe?.();
+    expect(replayed.length).toBeGreaterThan(0);
+    expect(replayed.length).toBeLessThan(eventCount + 1);
+  }, 15_000);
+
+  it('logs the "history full" warning exactly once per session, not once per subsequent event', async () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const provider = new TestProvider();
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, logger);
+    const session = sessionManager.create('claude', '/tmp', 'hi');
+    const testSession = provider.sessions.get(session.id)!;
+    const collected = collectUntilTerminal(sessionManager, session.id);
+
+    const bigText = 'x'.repeat(512 * 1024);
+    for (let i = 0; i < 40; i++) testSession.push({ type: 'assistant.message', text: bigText });
+    testSession.push({ type: 'session.completed' });
+    testSession.finish();
+    await collected;
+
+    const fullWarnings = logger.warn.mock.calls.filter(
+      ([message]) => message === 'session event history full; further events will not be replayable',
+    );
+    expect(fullWarnings.length).toBe(1);
+  }, 15_000);
+});
+
+describe('SessionManager — v1 oversized-envelope safety (issue #51)', () => {
+  it('fails the session with exactly one terminal event and reaps the provider when one envelope exceeds the 1 MiB frame ceiling', async () => {
+    const { provider, sessionManager } = setup();
+    const session = sessionManager.create('claude', '/tmp', 'hi');
+    const testSession = provider.sessions.get(session.id)!;
+    const collected = collectUntilTerminal(sessionManager, session.id);
+
+    testSession.push({ type: 'assistant.message', text: 'safe event' });
+    testSession.push({ type: 'assistant.message', text: 'x'.repeat(2 * 1024 * 1024) }); // over 1 MiB
+    testSession.push({ type: 'assistant.message', text: 'must never arrive' }); // source keeps pushing
+
+    const events = await collected;
+    const terminalIndices = events
+      .map((e, i) => (TERMINAL_TYPES.has(e.type) ? i : -1))
+      .filter((i) => i >= 0);
+    expect(terminalIndices).toEqual([events.length - 1]); // exactly one terminal event, last
+    expect(events.at(-1)).toMatchObject({ type: 'session.failed' });
+    expect(events.some((e) => 'text' in e && e.text === 'must never arrive')).toBe(false);
+
+    await tick(20);
+    expect(testSession.isCancelled()).toBe(true); // the provider was reaped, not left running
+    expect(sessionManager.get(session.id)?.status).toBe('failed');
+  }, 15_000);
+
+  it('never logs the oversized event content itself', async () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const provider = new TestProvider();
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, logger);
+    const session = sessionManager.create('claude', '/tmp', 'hi');
+    const testSession = provider.sessions.get(session.id)!;
+    const collected = collectUntilTerminal(sessionManager, session.id);
+
+    testSession.push({ type: 'assistant.message', text: `PAYLOAD_CANARY${'x'.repeat(2 * 1024 * 1024)}` });
+    await collected;
+
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('PAYLOAD_CANARY');
+  }, 15_000);
+});
+
 describe('SessionManager — replay', () => {
   it('a subscriber connecting after events were already emitted receives them via replay, in order', async () => {
     const { provider, sessionManager } = setup();

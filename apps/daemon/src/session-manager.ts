@@ -56,6 +56,12 @@ interface LegacyRuntimeState extends RuntimeStateBase {
   kind: 'legacy';
   handle: ProviderSessionHandle;
   events: AgentEventEnvelope[];
+  /** UTF-8 serialized bytes of every envelope currently in `events`, kept incrementally instead of
+   * re-summed on each append so a long-running session's replay accounting stays O(1) per event. */
+  replayBytes: number;
+  /** True once the 5,000-event or 16 MiB replay ceiling has been hit, so the daemon logs the
+   * "history full" warning at most once per session instead of once per subsequent event. */
+  replayFull: boolean;
   listeners: Set<(index: number, event: AgentEventEnvelope) => void>;
   nextSequence: number;
 }
@@ -141,6 +147,10 @@ export type DispatchResult =
 
 const MAX_STORED_EVENTS_PER_SESSION = 5_000;
 const MAX_STORED_EVENT_BYTES_PER_SESSION = 16 * 1024 * 1024;
+/** One normalized v1 envelope over this size cannot be safely replayed or streamed at all (it
+ * would itself already exceed a single subscriber's whole queue budget); the session fails rather
+ * than silently dropping or truncating provider-controlled content. */
+const MAX_LEGACY_EVENT_ENVELOPE_BYTES = 1024 * 1024;
 const MAX_RETAINED_COMPLETED_RUNTIMES = 50;
 const MAX_PENDING_COMMANDS = 64;
 const MAX_PENDING_COMMAND_BYTES = 1024 * 1024;
@@ -249,6 +259,8 @@ export class SessionManager {
       handle,
       protocolVersion,
       events: [],
+      replayBytes: 0,
+      replayFull: false,
       listeners: new Set(),
       nextSequence: 0,
       ...(workspace ? { workspace } : {}),
@@ -489,16 +501,65 @@ export class SessionManager {
         sequence,
         timestamp: new Date().toISOString(),
       };
-      if (runtime.events.length < MAX_STORED_EVENTS_PER_SESSION) {
-        runtime.events.push(envelope);
-      } else {
-        this.logger.warn('session event history full; further events will not be replayable', {
+      const bytes = utf8ByteLength(JSON.stringify(envelope));
+      if (bytes > MAX_LEGACY_EVENT_ENVELOPE_BYTES) {
+        // Deliberately stricter than the interactive path's `recordInteractiveEvent`, which drops
+        // one oversized event and lets the session continue: v1 has no per-event delivery
+        // guarantee a dropped event could quietly violate, so issue #51 asks this path to fail
+        // the whole session instead of silently discarding provider-controlled content.
+        this.logger.warn('legacy session envelope exceeded the per-frame ceiling; failing the session', {
           sessionId: id,
+          eventType: event.type,
+          bytes,
         });
+        const failure: AgentEventEnvelope = {
+          type: 'session.failed',
+          message: 'a provider event exceeded the maximum frame size and could not be delivered',
+          sequence,
+          timestamp: new Date().toISOString(),
+        };
+        this.mutateSession(id, (session) => this.applyLegacyStatus(session, failure));
+        // Storage of this terminal frame is still subject to the same replay caps below: if the
+        // history was already full, a subscriber that reconnects later (rather than staying
+        // connected) will not see it on replay. That is the same pre-existing limitation the
+        // ordinary session.completed/failed/cancelled terminal event already has once history is
+        // full (see docs/protocol-v1.md); this path does not make it worse.
+        this.storeLegacyEnvelope(id, runtime, failure, utf8ByteLength(JSON.stringify(failure)));
+        this.notifyLegacyListeners(id, runtime, sequence, failure);
+        void runtime.handle.cancel().catch(() => {});
+        break;
       }
+      this.storeLegacyEnvelope(id, runtime, envelope, bytes);
       this.notifyLegacyListeners(id, runtime, sequence, envelope);
     }
     this.markCompleted(id);
+  }
+
+  /** Bounded by both event count and UTF-8 serialized bytes (the same two limits the interactive
+   * path's `recordInteractiveEvent` enforces, though that path evicts the oldest event to make
+   * room while this one does not): once full, a v1 session simply stops accepting further
+   * replayable history rather than dropping the oldest events, so `events[index] === sequence
+   * index` keeps holding for every index `subscribe()` still has to serve. */
+  private storeLegacyEnvelope(
+    id: string,
+    runtime: LegacyRuntimeState,
+    envelope: AgentEventEnvelope,
+    bytes: number,
+  ): void {
+    if (
+      runtime.events.length < MAX_STORED_EVENTS_PER_SESSION &&
+      runtime.replayBytes + bytes <= MAX_STORED_EVENT_BYTES_PER_SESSION
+    ) {
+      runtime.events.push(envelope);
+      runtime.replayBytes += bytes;
+      return;
+    }
+    if (!runtime.replayFull) {
+      runtime.replayFull = true;
+      this.logger.warn('session event history full; further events will not be replayable', {
+        sessionId: id,
+      });
+    }
   }
 
   private async consumeInteractive(id: string, runtime: InteractiveRuntimeState): Promise<void> {

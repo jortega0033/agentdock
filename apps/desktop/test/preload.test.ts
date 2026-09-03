@@ -47,6 +47,7 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
         'onDaemonStatus',
         'listProviders',
         'listProvidersV2',
+        'openProviderInstallDocs',
         'listMcpServers',
         'configureMcpServer',
         'actionMcpServer',
@@ -803,5 +804,21 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
       'daemon:interactive-session-stream-notice',
       listener,
     );
+  });
+
+  it('opens provider install docs by id and rejects an unknown provider before any IPC call (issue #73)', async () => {
+    invoke.mockResolvedValueOnce(undefined);
+    const api = await loadPreload();
+
+    await expect(
+      (api.openProviderInstallDocs as (provider: string) => Promise<void>)('codex'),
+    ).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith('shell:open-provider-install-docs', 'codex');
+
+    invoke.mockClear();
+    await expect(
+      (api.openProviderInstallDocs as (provider: string) => Promise<void>)('not-a-real-provider'),
+    ).rejects.toThrow();
+    expect(invoke).not.toHaveBeenCalled();
   });
 });

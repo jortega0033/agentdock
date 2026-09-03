@@ -46,6 +46,7 @@ import {
   attachmentListV2Schema,
   structuredWorkflowRequestV2Schema,
   structuredWorkflowResultV2Schema,
+  providerIdSchema,
   type AgentCommandV2,
   type AgentEvent,
   type AgentEventV2Envelope,
@@ -144,6 +145,7 @@ export interface AgentDockBridge {
   onDaemonStatus(callback: (status: DaemonStatus) => void): () => void;
   listProviders(): Promise<ProviderStatus[]>;
   listProvidersV2(): Promise<ProviderStatusV2[]>;
+  openProviderInstallDocs(provider: ProviderId): Promise<void>;
   listMcpServers(provider: ProviderId, cwd: string): Promise<McpServerListV2>;
   configureMcpServer(input: McpConfigureRequestV2): Promise<McpServerListV2>;
   actionMcpServer(input: McpServerActionRequestV2): Promise<McpServerListV2>;
@@ -635,6 +637,9 @@ const api: AgentDockBridge = {
   async listProvidersV2() {
     const providers: unknown = await ipcRenderer.invoke('daemon:list-providers-v2');
     return providersV2ResponseSchema.parse({ providers }).providers;
+  },
+  async openProviderInstallDocs(provider) {
+    await ipcRenderer.invoke('shell:open-provider-install-docs', providerIdSchema.parse(provider));
   },
   async listMcpServers(provider, cwd) {
     const input = mcpListRequestV2Schema.parse({ provider, cwd });

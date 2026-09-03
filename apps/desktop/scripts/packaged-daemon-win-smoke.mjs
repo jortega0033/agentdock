@@ -127,7 +127,7 @@ try {
   assert(codex.authSource === 'chatgpt', 'shim auth source was not preserved');
 
   await verifyPackagedDaemonJobHost(discovery, tempRoot, invocationLog);
-  await verifyPackagedJobHost(PACKAGED_JOB_HOST, shimPath, tempRoot, invocationLog);
+  await verifyPackagedJobHost(PACKAGED_JOB_HOST, shimPath, tempRoot);
 
   const invocations = await readFile(invocationLog, 'utf8');
   assert(invocations.includes('--version'), 'Codex version handshake did not reach the shim');
@@ -312,7 +312,7 @@ function countInvocation(log, invocation) {
   return log.split(/\r?\n/u).filter((line) => line === invocation).length;
 }
 
-async function verifyPackagedJobHost(jobHostPath, executablePath, cwd, invocationLogPath) {
+async function verifyPackagedJobHost(jobHostPath, executablePath, cwd) {
   const args = [String(process.pid), executablePath, cwd, 'app-server', '--stdio'].map((value) =>
     Buffer.from(value, 'utf8').toString('base64'),
   );

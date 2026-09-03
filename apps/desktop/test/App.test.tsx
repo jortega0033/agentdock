@@ -107,6 +107,7 @@ function installBridge(overrides: Partial<AgentDockBridge> = {}): {
     onDaemonStatus: vi.fn().mockReturnValue(() => {}),
     listProviders: vi.fn().mockResolvedValue([LEGACY_PROVIDER]),
     listProvidersV2: vi.fn().mockResolvedValue([CLAUDE_INSTALLED]),
+    openProviderInstallDocs: vi.fn().mockResolvedValue(undefined),
     listMcpServers: vi.fn().mockResolvedValue({ servers: [], revision: 'test-1' }),
     configureMcpServer: vi.fn().mockResolvedValue({ servers: [], revision: 'test-1' }),
     actionMcpServer: vi.fn().mockResolvedValue({ servers: [], revision: 'test-1' }),

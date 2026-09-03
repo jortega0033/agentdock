@@ -167,6 +167,11 @@ const CAPABILITY_METHODS = {
   // notification a tool result would.
   'input.image': ['turn/start'],
   'output.structured': ['turn/start', 'item/completed'],
+  // Not steer/interrupt/cancel: Codex's own schema has no per-subagent-thread control method,
+  // so those three stay unadvertised -- only observation of a real, fixture-backed lifecycle
+  // (item/started, item/completed carrying a subAgentActivity item, and turn/completed for the
+  // inferred-terminal fallback) is ever claimed here. See issue #58.
+  'agents.subagents.observe': ['item/started', 'item/completed', 'turn/completed'],
 } as const satisfies Partial<Record<CoreCapabilityId, readonly string[]>>;
 
 type SupportedCapabilityId = keyof typeof CAPABILITY_METHODS;
@@ -241,6 +246,12 @@ function constraintsFor<I extends SupportedCapabilityId>(id: I): CapabilityConst
         maxSchemaBytes: 64 * 1024,
         maxSchemaDepth: 16,
         maxSchemaNodes: 1_024,
+      } as unknown as CapabilityConstraintById[I];
+    case 'agents.subagents.observe':
+      return {
+        kind: 'content',
+        maxBlockBytes: 4_096,
+        persistence: 'normalized',
       } as unknown as CapabilityConstraintById[I];
   }
 }

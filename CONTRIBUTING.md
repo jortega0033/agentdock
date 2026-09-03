@@ -23,8 +23,11 @@ pnpm typecheck
 pnpm test
 ```
 
-Requires Node 20+ and pnpm (see the `packageManager` field in the root `package.json` for the
-exact version this repo was built against).
+Requires Node 20.x or 22.x (the only versions CI tests) and the exact pnpm version pinned in the
+root `package.json`'s `packageManager` field. `pnpm install` runs a preflight check
+(`scripts/preflight.mjs`) first and fails fast with a fix if either doesn't match -- see
+[README.md#quick-start](README.md#quick-start) for the Corepack-present and Corepack-absent
+bootstrap paths, including when Corepack itself isn't available.
 
 ## Project structure
 

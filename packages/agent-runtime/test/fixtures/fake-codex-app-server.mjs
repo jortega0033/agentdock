@@ -361,6 +361,58 @@ function beginTurn(message) {
     notify('turn/completed', { threadId, turn: turn(nativeTurnId, 'completed') });
     return;
   }
+  if (scenario === 'subagent' && turnCounter === 1) {
+    notify('turn/started', { threadId, turn: turn(nativeTurnId, 'inProgress') });
+    const item = {
+      type: 'subAgentActivity',
+      id: 'subagent-item-1',
+      agentThreadId: 'native-subagent-thread-1',
+      agentPath: 'reviewer',
+      kind: 'started',
+    };
+    notify('item/started', { threadId, turnId: nativeTurnId, item, startedAtMs: 1 });
+    notify('item/completed', { threadId, turnId: nativeTurnId, item, completedAtMs: 2 });
+    const progressItem = { ...item, id: 'subagent-item-2', kind: 'interacted' };
+    notify('item/started', { threadId, turnId: nativeTurnId, item: progressItem, startedAtMs: 3 });
+    notify('item/completed', {
+      threadId,
+      turnId: nativeTurnId,
+      item: progressItem,
+      completedAtMs: 4,
+    });
+    // No interrupted kind is ever sent: the child is left open when the turn ends, exercising the
+    // adapter's inferred-terminal fallback (see closeOpenSubagents() in normalizer.ts) rather than
+    // a provider-confirmed completion signal, which this schema version has no kind value for.
+    notify('turn/completed', { threadId, turn: turn(nativeTurnId, 'completed') });
+    return;
+  }
+  if (scenario === 'subagent-interrupted' && turnCounter === 1) {
+    notify('turn/started', { threadId, turn: turn(nativeTurnId, 'inProgress') });
+    const item = {
+      type: 'subAgentActivity',
+      id: 'subagent-item-1',
+      agentThreadId: 'native-subagent-thread-1',
+      agentPath: 'reviewer',
+      kind: 'started',
+    };
+    notify('item/started', { threadId, turnId: nativeTurnId, item, startedAtMs: 1 });
+    notify('item/completed', { threadId, turnId: nativeTurnId, item, completedAtMs: 2 });
+    const interruptedItem = { ...item, id: 'subagent-item-2', kind: 'interrupted' };
+    notify('item/started', {
+      threadId,
+      turnId: nativeTurnId,
+      item: interruptedItem,
+      startedAtMs: 3,
+    });
+    notify('item/completed', {
+      threadId,
+      turnId: nativeTurnId,
+      item: interruptedItem,
+      completedAtMs: 4,
+    });
+    notify('turn/completed', { threadId, turn: turn(nativeTurnId, 'completed') });
+    return;
+  }
   emitCompletedTurn(nativeTurnId, turnCounter === 1 ? 'hello' : 'follow-up');
 }
 

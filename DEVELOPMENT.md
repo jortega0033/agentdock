@@ -5,8 +5,11 @@ is the map of how the pieces fit together; this file is the walkthrough for maki
 
 ## Prerequisites
 
-- Node 20+ and pnpm (see the `packageManager` field in the root [package.json](package.json) for
-  the exact version this repo was built against).
+- Node 20.x or 22.x (the only versions CI tests -- see the `engines` field in the root
+  [package.json](package.json)) and the exact pnpm version pinned in `packageManager` there. `pnpm
+install` runs `scripts/preflight.mjs` first and fails fast with a fix if either doesn't match; see
+  [README.md#quick-start](README.md#quick-start) for the Corepack-present and Corepack-absent
+  bootstrap paths.
 - Optionally, a real, authenticated `claude` and/or `codex` CLI install if you want to exercise a
   provider adapter against the real thing. See
   [Manual provider smoke tests](#manual-provider-smoke-tests) below. **Not required** for normal

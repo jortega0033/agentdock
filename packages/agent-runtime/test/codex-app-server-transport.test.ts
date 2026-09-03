@@ -363,6 +363,149 @@ describe('Codex app-server transport', () => {
     expect(text?.block.text).toBe('not valid json');
   });
 
+  it('maps a real subAgentActivity item into a stable subagent.status node, closing it out when its turn ends with no completed kind', () => {
+    const events: AgentEventV2[] = [];
+    const normalizer = new CodexAppServerNormalizer((event) => events.push(event));
+    normalizer.startSession('native-thread', CODEX_APP_SERVER_TRANSPORT.id, SELECTION);
+    normalizer.expectTurn(TURN_ID);
+    normalizer.bindTurnResponse('native-turn');
+    normalizer.notification('turn/started', {
+      threadId: 'native-thread',
+      turn: { id: 'native-turn', status: 'inProgress' },
+    });
+    const item = {
+      type: 'subAgentActivity',
+      id: 'subagent-item-1',
+      agentThreadId: 'native-subagent-thread',
+      agentPath: 'reviewer',
+      kind: 'started',
+    };
+    normalizer.notification('item/started', { threadId: 'native-thread', turnId: 'native-turn', item });
+    normalizer.notification('item/completed', {
+      threadId: 'native-thread',
+      turnId: 'native-turn',
+      item,
+    });
+    const progress = { ...item, id: 'subagent-item-2', kind: 'interacted' };
+    normalizer.notification('item/started', {
+      threadId: 'native-thread',
+      turnId: 'native-turn',
+      item: progress,
+    });
+    normalizer.notification('item/completed', {
+      threadId: 'native-thread',
+      turnId: 'native-turn',
+      item: progress,
+    });
+    normalizer.notification('turn/completed', {
+      threadId: 'native-thread',
+      turn: { id: 'native-turn', status: 'completed' },
+    });
+
+    const subagentEvents = events.filter((event) => event.type === 'subagent.status');
+    expect(subagentEvents).toHaveLength(3);
+    const [spawned, updated, closed] = subagentEvents as Extract<
+      AgentEventV2,
+      { type: 'subagent.status' }
+    >[];
+    expect(spawned).toMatchObject({ name: 'reviewer', status: 'spawning', nativeChildId: 'native-subagent-thread' });
+    expect(updated).toMatchObject({ name: 'reviewer', status: 'running' });
+    expect(closed).toMatchObject({ name: 'reviewer', status: 'completed' });
+    // The same native thread id maps to the same AgentDock agentId across every sighting -- the
+    // whole point of the id-stability requirement, verified across all three events.
+    expect(spawned!.agentId).toBe(updated!.agentId);
+    expect(updated!.agentId).toBe(closed!.agentId);
+  });
+
+  it('mirrors the parent turn outcome for a still-open child instead of always reporting success', () => {
+    const events: AgentEventV2[] = [];
+    const normalizer = new CodexAppServerNormalizer((event) => events.push(event));
+    normalizer.startSession('native-thread', CODEX_APP_SERVER_TRANSPORT.id, SELECTION);
+    normalizer.expectTurn(TURN_ID);
+    normalizer.bindTurnResponse('native-turn');
+    normalizer.notification('turn/started', {
+      threadId: 'native-thread',
+      turn: { id: 'native-turn', status: 'inProgress' },
+    });
+    const item = {
+      type: 'subAgentActivity',
+      id: 'subagent-item-1',
+      agentThreadId: 'native-subagent-thread',
+      agentPath: 'reviewer',
+      kind: 'started',
+    };
+    normalizer.notification('item/started', { threadId: 'native-thread', turnId: 'native-turn', item });
+    normalizer.notification('item/completed', {
+      threadId: 'native-thread',
+      turnId: 'native-turn',
+      item,
+    });
+    normalizer.notification('turn/completed', {
+      threadId: 'native-thread',
+      turn: { id: 'native-turn', status: 'failed' },
+    });
+
+    const subagentEvents = events.filter((event) => event.type === 'subagent.status');
+    expect(subagentEvents).toHaveLength(2);
+    // The turn itself failed, so a child left open when it ends must not be reported as having
+    // completed successfully -- that would misrepresent what actually happened.
+    expect((subagentEvents[1] as { status: string }).status).toBe('failed');
+  });
+
+  it('treats an explicit interrupted kind as real evidence of cancellation, not the turn-end heuristic', () => {
+    const events: AgentEventV2[] = [];
+    const normalizer = new CodexAppServerNormalizer((event) => events.push(event));
+    normalizer.startSession('native-thread', CODEX_APP_SERVER_TRANSPORT.id, SELECTION);
+    normalizer.expectTurn(TURN_ID);
+    normalizer.bindTurnResponse('native-turn');
+    normalizer.notification('turn/started', {
+      threadId: 'native-thread',
+      turn: { id: 'native-turn', status: 'inProgress' },
+    });
+    const item = {
+      type: 'subAgentActivity',
+      id: 'subagent-item-1',
+      agentThreadId: 'native-subagent-thread',
+      agentPath: 'reviewer',
+      kind: 'interrupted',
+    };
+    normalizer.notification('item/started', { threadId: 'native-thread', turnId: 'native-turn', item });
+    normalizer.notification('item/completed', {
+      threadId: 'native-thread',
+      turnId: 'native-turn',
+      item,
+    });
+    normalizer.notification('turn/completed', {
+      threadId: 'native-thread',
+      turn: { id: 'native-turn', status: 'completed' },
+    });
+
+    const subagentEvents = events.filter((event) => event.type === 'subagent.status');
+    // Exactly one: only item/completed emits (item/started is a no-op for this item type, see
+    // itemStarted()), reporting kind 'interrupted' -> 'cancelled'. The turn-end heuristic in
+    // closeOpenSubagents() must not fire a second, redundant 'completed' event for a child that
+    // already has a real, provider-confirmed terminal status.
+    expect(subagentEvents).toHaveLength(1);
+    expect((subagentEvents[0] as { status: string }).status).toBe('cancelled');
+  });
+
+  it('normalizes a real subAgentActivity sequence end to end through the fixture process', async () => {
+    const instance = transport('subagent');
+    await instance.started;
+    const events = await until(
+      instance,
+      (event) => event.type === 'session.status' && event.status === 'idle',
+    );
+    const subagentEvents = events.filter(
+      (event) => event.type === 'subagent.status',
+    ) as Extract<AgentEventV2, { type: 'subagent.status' }>[];
+    expect(subagentEvents.map((event) => event.status)).toEqual(['spawning', 'running', 'completed']);
+    expect(new Set(subagentEvents.map((event) => event.agentId)).size).toBe(1);
+    expect(subagentEvents.every((event) => event.nativeChildId === 'native-subagent-thread-1')).toBe(
+      true,
+    );
+  });
+
   it.each([
     ['item/commandExecution/outputDelta', { delta: 'late' }],
     ['item/fileChange/outputDelta', { delta: 'late' }],

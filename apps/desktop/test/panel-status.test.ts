@@ -23,8 +23,10 @@ describe('componentPanelStatus', () => {
 });
 
 describe('childAgentPanelStatus', () => {
-  it('is scaffold-only once a session is selected, since no adapter populates the graph', () => {
-    expect(childAgentPanelStatus(true).state).toBe('scaffold_only');
+  it('is provider-dependent once a session is selected, since only Codex app-server populates the graph', () => {
+    const status = childAgentPanelStatus(true);
+    expect(status.state).toBe('provider_dependent');
+    expect(status.explanation).toContain('Codex app-server');
   });
 
   it('falls back to an unsupported placeholder when no session is selected', () => {

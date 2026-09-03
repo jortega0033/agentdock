@@ -2990,6 +2990,137 @@ describe('SessionManager — staged attachments and output schema (issue #59)', 
   });
 });
 
+describe('SessionManager — subagent graph wiring (issue #58)', () => {
+  const AGENT_ID = uuid(50_000);
+  const controls = { steer: false, interrupt: false, cancel: false };
+
+  async function newSubagentStore(): Promise<SubagentGraphStore> {
+    const dir = await mkdtemp(join(tmpdir(), 'agent-dock-subagents-'));
+    return new SubagentGraphStore(join(dir, 'subagents-v1.json'));
+  }
+
+  it('upserts a spawning node into the store from a real subagent.status event', async () => {
+    const subagentStore = await newSubagentStore();
+    const { interactive, session } = await setupInteractive({}, { subagentStore });
+
+    interactive.push({
+      type: 'subagent.status',
+      turnId: INTERACTIVE_TURN_ID,
+      agentId: AGENT_ID,
+      nativeChildId: 'native-child-1',
+      name: 'reviewer',
+      status: 'spawning',
+      controls,
+    });
+    await tick();
+
+    const graph = subagentStore.graph(session.id);
+    expect(graph.nodes).toHaveLength(1);
+    expect(graph.nodes[0]).toMatchObject({
+      id: AGENT_ID,
+      sessionId: session.id,
+      nativeChildId: 'native-child-1',
+      provider: 'claude',
+      name: 'reviewer',
+      status: 'spawning',
+    });
+    expect(graph.nodes[0]?.completedAt).toBeUndefined();
+  });
+
+  it('preserves startedAt and sets completedAt only once the status becomes terminal', async () => {
+    const subagentStore = await newSubagentStore();
+    const { interactive, session } = await setupInteractive({}, { subagentStore });
+
+    interactive.push({
+      type: 'subagent.status',
+      turnId: INTERACTIVE_TURN_ID,
+      agentId: AGENT_ID,
+      name: 'reviewer',
+      status: 'spawning',
+      controls,
+    });
+    await tick();
+    const firstStartedAt = subagentStore.graph(session.id).nodes[0]?.startedAt;
+    expect(firstStartedAt).toBeDefined();
+
+    interactive.push({
+      type: 'subagent.status',
+      turnId: INTERACTIVE_TURN_ID,
+      agentId: AGENT_ID,
+      name: 'reviewer',
+      status: 'running',
+      controls,
+    });
+    await tick();
+    const running = subagentStore.graph(session.id).nodes[0];
+    expect(running?.status).toBe('running');
+    expect(running?.startedAt).toBe(firstStartedAt);
+    expect(running?.completedAt).toBeUndefined();
+
+    interactive.push({
+      type: 'subagent.status',
+      turnId: INTERACTIVE_TURN_ID,
+      agentId: AGENT_ID,
+      name: 'reviewer',
+      status: 'completed',
+      controls,
+    });
+    await tick();
+    const completed = subagentStore.graph(session.id).nodes[0];
+    expect(completed?.status).toBe('completed');
+    expect(completed?.startedAt).toBe(firstStartedAt);
+    expect(completed?.completedAt).toBeDefined();
+
+    // A replayed/duplicate terminal event for the same agentId must not slide completedAt
+    // forward -- the first terminal timestamp is the real one.
+    const firstCompletedAt = completed?.completedAt;
+    interactive.push({
+      type: 'subagent.status',
+      turnId: INTERACTIVE_TURN_ID,
+      agentId: AGENT_ID,
+      name: 'reviewer',
+      status: 'completed',
+      controls,
+    });
+    await tick();
+    expect(subagentStore.graph(session.id).nodes[0]?.completedAt).toBe(firstCompletedAt);
+  });
+
+  it('is idempotent for a replayed/duplicate event: the same agentId stays one bounded node', async () => {
+    const subagentStore = await newSubagentStore();
+    const { interactive, session } = await setupInteractive({}, { subagentStore });
+
+    for (let i = 0; i < 3; i += 1) {
+      interactive.push({
+        type: 'subagent.status',
+        turnId: INTERACTIVE_TURN_ID,
+        agentId: AGENT_ID,
+        name: 'reviewer',
+        status: 'running',
+        controls,
+      });
+    }
+    await tick();
+
+    expect(subagentStore.graph(session.id).nodes).toHaveLength(1);
+  });
+
+  it('does nothing when no subagentStore is configured (default security options)', async () => {
+    const { interactive } = await setupInteractive({}, {});
+    interactive.push({
+      type: 'subagent.status',
+      turnId: INTERACTIVE_TURN_ID,
+      agentId: AGENT_ID,
+      name: 'reviewer',
+      status: 'spawning',
+      controls,
+    });
+    await tick();
+    // No assertion target exists without a store; this only proves the event loop does not throw
+    // when subagentStore is undefined, matching every other optional security dependency.
+  });
+});
+
 /**
  * Supports both the legacy (v1) and interactive (v2) launch paths on one provider instance, each
  * session individually controllable and independently trackable, so mixed v1/v2 admission tests

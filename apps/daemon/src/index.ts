@@ -99,6 +99,7 @@ async function main() {
     providerStateDirectory: durableStateDirectory,
     executionGraphStore,
     attachmentStore,
+    subagentStore,
     admission,
   });
   const token = generateToken();

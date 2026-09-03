@@ -119,6 +119,24 @@ describe('Codex app-server compatibility selection', () => {
     });
   });
 
+  it('advertises subagent observation with no steer/interrupt/cancel and real fixture evidence', () => {
+    const support = resolveCodexV2Support(status('0.147.0'), 'app-server');
+    const ids = support!.capabilities.map((record) => record.id);
+    expect(ids).toContain('agents.subagents.observe');
+    // Codex's own schema has no per-subagent-thread control method (see issue #58), so this slice
+    // only ever claims observation -- never a control it cannot actually dispatch.
+    expect(ids).not.toContain('agents.subagents.steer');
+    expect(ids).not.toContain('agents.subagents.interrupt');
+    expect(ids).not.toContain('agents.subagents.cancel');
+    const observe = support!.capabilities.find((record) => record.id === 'agents.subagents.observe');
+    expect(observe).toMatchObject({ kind: 'observation', owner: 'provider', support: 'supported' });
+    expect(
+      observe?.evidence.some(
+        (evidence) => evidence.kind === 'fixture' && evidence.reference === CODEX_APP_SERVER_FIXTURE_SET,
+      ),
+    ).toBe(true);
+  });
+
   it('does not advertise native continuation for API-key authentication', () => {
     const support = resolveCodexV2Support(
       { ...status('0.147.0'), authSource: 'api_key' },

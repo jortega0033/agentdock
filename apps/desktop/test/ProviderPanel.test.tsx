@@ -34,7 +34,7 @@ describe('ProviderPanel', () => {
     ];
     render(<ProviderPanel providers={providers} />);
     expect(screen.getByText('Installed: No')).toBeInTheDocument();
-    expect(screen.getByText('Authenticated: unknown')).toBeInTheDocument();
+    expect(screen.getByText('Authenticated: Unknown')).toBeInTheDocument();
   });
 
   it('shows installed-but-unauthenticated state distinctly from unknown', () => {
@@ -43,14 +43,14 @@ describe('ProviderPanel', () => {
     ];
     render(<ProviderPanel providers={providers} />);
     expect(screen.getByText('Installed: Yes')).toBeInTheDocument();
-    expect(screen.getByText('Authenticated: no')).toBeInTheDocument();
+    expect(screen.getByText('Authenticated: No')).toBeInTheDocument();
     expect(screen.getByText('Version: 1.2.3')).toBeInTheDocument();
   });
 
   it('shows installed-and-authenticated state', () => {
     const providers: ProviderStatusV2[] = [provider({ id: 'claude', name: 'Claude Code' })];
     render(<ProviderPanel providers={providers} />);
-    expect(screen.getByText('Authenticated: yes')).toBeInTheDocument();
+    expect(screen.getByText('Authenticated: Yes')).toBeInTheDocument();
   });
 
   it('shows the actual auth source instead of a generic yes/no when one is known', () => {

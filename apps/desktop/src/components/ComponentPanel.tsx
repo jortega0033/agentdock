@@ -31,7 +31,7 @@ export function ComponentPanel({ provider, cwd }: { provider: ProviderId; cwd: s
           {item.displayPath && <code>{item.displayPath}</code>}
           <div className="mcp-field-list"><span>hooks {item.manifestPreview.hooks}</span><span>MCP {item.manifestPreview.mcpServers}</span><span>executables {item.manifestPreview.executables}</span><span>env {item.manifestPreview.environmentVariables}</span></div>
           {item.loadError && <p className="mcp-server__failure">{item.loadError.summary}</p>}
-          {!item.trusted && <p className="form-hint">Inspectable only. Execution is blocked until workspace trust is granted.</p>}
+          {!item.trusted && <p className="form-hint">Inspectable only. Execution stays blocked until workspace trust is granted, and no provider currently advertises a management or invocation operation for it either way.</p>}
           <div className="mcp-server__actions">
             {item.supportsManage && <button type="button" onClick={() => void window.agentDock.manageProviderComponent({ provider, cwd: cwd.trim(), componentId: item.id, action: item.enabled ? 'disable' : 'enable' })}>{item.enabled ? 'Disable' : 'Enable'}</button>}
             {item.supportsDirectInvoke && <button type="button" disabled={!item.trusted} onClick={() => void window.agentDock.invokeProviderComponent({ provider, cwd: cwd.trim(), componentId: item.id })}>Invoke</button>}

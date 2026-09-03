@@ -36,14 +36,16 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      # First-party GitHub action, pinned to the major version tag per GitHub's own published
-      # guidance for CodeQL specifically (unlike third-party actions elsewhere in this repo's
-      # workflows, which are pinned to an exact commit SHA).
-      - uses: github/codeql-action/init@v3
+      # This repository's own repository-level Actions policy requires every action pinned to a
+      # full-length commit SHA, first-party GitHub actions included -- confirmed the hard way: an
+      # earlier version of this workflow pinned to the `v3` tag and was rejected outright by that
+      # policy before the job could even start ("all actions must be pinned to a full-length commit
+      # SHA"). No tag-based exception for github/codeql-action here.
+      - uses: github/codeql-action/init@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
         with:
           languages: javascript-typescript
           build-mode: none
 
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@6f5948dfacef28e207b48d0905cf90c03365536d # v3.37.9
         with:
           category: '/language:javascript-typescript'

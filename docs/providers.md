@@ -337,6 +337,33 @@ only the manual/scheduled `live-provider-smoke.yml` workflow and a local opt-in 
 real CLI. See [release-checklist.md](release-checklist.md) for when this harness's evidence is
 required before a public "verified" claim.
 
+## Recommended stdio MCP server: agent-browser
+
+The MCP configure flow (`McpPanel`, `daemon:configure-mcp-server`) expects a stdio server's
+`command`/`args` up front and has no built-in catalog to pick from -- a user has to already know
+what to type. [agent-browser](https://github.com/vercel-labs/agent-browser) (Vercel Labs) is a
+concrete, working example: a native Rust CLI for browser automation (navigate, click, fill,
+snapshot, screenshot, JS eval, and more) that starts a stdio MCP server with `agent-browser mcp`.
+It needs no AgentDock-side code to use -- add it exactly like any other stdio server:
+
+```bash
+npm install -g agent-browser
+agent-browser install   # downloads Chrome for Testing, Google's dedicated automation build
+```
+
+Then configure it as an MCP server: transport `stdio`, command `agent-browser`, args `["mcp"]`.
+With no `--tools` flag, `agent-browser mcp` already defaults to its `core` profile (navigation,
+snapshots, interaction, waits, reads, screenshots, JS eval, tab basics) -- deliberately the
+smallest useful set, so it doesn't dominate a session's tool-call context. Pass
+`["mcp", "--tools", "all"]` for the full typed tool surface instead, or
+`["mcp", "--tools", "core,network,react"]` to combine specific profiles.
+
+This is a documentation pointer, not a bundled dependency: AgentDock does not install, update, or
+manage agent-browser. Starting any stdio MCP server is real code execution before a single tool is
+even called (see the MCP server row in
+[Execution and data boundaries](capability-security-v2.md#execution-and-data-boundaries)), so only
+add it in a workspace you trust.
+
 ## Adding a new provider
 
 This checklist targets the current protocol v1 adapter shape.

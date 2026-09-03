@@ -30,6 +30,7 @@ import type {
   StartSessionOptions,
 } from '@agent-dock/agent-runtime';
 import { SessionManager, type SessionManagerSecurityOptions } from '../src/session-manager.js';
+import { SessionAdmissionController, SessionCapacityError } from '../src/session-admission.js';
 import { AuditStore } from '../src/audit-store.js';
 import { V2ProviderStartupError, V2SessionFacade } from '../src/v2-session-facade.js';
 import { planLegacyProviderFallback, type ProviderV2Manifest } from '../src/provider-v2.js';
@@ -38,6 +39,8 @@ import { resolveWorkspaceIdentity, type WorkspaceIdentity } from '../src/workspa
 import { WorkspaceTrustStore } from '../src/workspace-trust-store.js';
 import { MemoryExecutionGraphStore } from '../src/execution-graph-store.js';
 import { MemorySessionStore } from '../src/session-store.js';
+import { AttachmentStore } from '../src/attachment-store.js';
+import { SubagentGraphStore } from '../src/subagent-graph-store.js';
 
 const TERMINAL_TYPES = new Set(['session.completed', 'session.failed', 'session.cancelled']);
 
@@ -315,6 +318,102 @@ describe('SessionManager — past the history cap (AD-01)', () => {
     await tick(20);
 
     expect(received.at(-1)?.type).toBe('session.completed');
+  }, 15_000);
+});
+
+describe('SessionManager — v1 replay byte ceiling (issue #51)', () => {
+  it('stops growing history once 16 MiB of replay would be exceeded, well before the 5,000-event cap', async () => {
+    const { provider, sessionManager } = setup();
+    const session = sessionManager.create('claude', '/tmp', 'hi');
+    const testSession = provider.sessions.get(session.id)!;
+    const collected = collectUntilTerminal(sessionManager, session.id);
+
+    // Each 'é' is 2 UTF-8 bytes, so 256K repetitions serialize to just over 512 KiB per event --
+    // safely under the 1 MiB per-envelope ceiling, but 40 of them exceed the 16 MiB session
+    // ceiling (~20 MiB) long before the 5,000-event count cap could ever be reached. Multi-byte so
+    // byte accounting (not character count) is what's actually being exercised.
+    const bigText = 'é'.repeat(256 * 1024);
+    const eventCount = 40;
+    for (let i = 0; i < eventCount; i++) {
+      testSession.push({ type: 'assistant.message', text: bigText });
+    }
+    testSession.push({ type: 'session.completed' });
+    testSession.finish();
+
+    const delivered = await collected; // every event still arrives live regardless of replay storage
+    expect(delivered.length).toBe(eventCount + 1);
+
+    // A fresh subscriber can only replay whatever fit under the byte ceiling, not everything sent.
+    const replayed: AgentEventEnvelope[] = [];
+    const unsubscribe = sessionManager.subscribe(session.id, 0, (_i, event) =>
+      replayed.push(event),
+    );
+    unsubscribe?.();
+    expect(replayed.length).toBeGreaterThan(0);
+    expect(replayed.length).toBeLessThan(eventCount + 1);
+  }, 15_000);
+
+  it('logs the "history full" warning exactly once per session, not once per subsequent event', async () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const provider = new TestProvider();
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, logger);
+    const session = sessionManager.create('claude', '/tmp', 'hi');
+    const testSession = provider.sessions.get(session.id)!;
+    const collected = collectUntilTerminal(sessionManager, session.id);
+
+    const bigText = 'x'.repeat(512 * 1024);
+    for (let i = 0; i < 40; i++) testSession.push({ type: 'assistant.message', text: bigText });
+    testSession.push({ type: 'session.completed' });
+    testSession.finish();
+    await collected;
+
+    const fullWarnings = logger.warn.mock.calls.filter(
+      ([message]) => message === 'session event history full; further events will not be replayable',
+    );
+    expect(fullWarnings.length).toBe(1);
+  }, 15_000);
+});
+
+describe('SessionManager — v1 oversized-envelope safety (issue #51)', () => {
+  it('fails the session with exactly one terminal event and reaps the provider when one envelope exceeds the 1 MiB frame ceiling', async () => {
+    const { provider, sessionManager } = setup();
+    const session = sessionManager.create('claude', '/tmp', 'hi');
+    const testSession = provider.sessions.get(session.id)!;
+    const collected = collectUntilTerminal(sessionManager, session.id);
+
+    testSession.push({ type: 'assistant.message', text: 'safe event' });
+    testSession.push({ type: 'assistant.message', text: 'x'.repeat(2 * 1024 * 1024) }); // over 1 MiB
+    testSession.push({ type: 'assistant.message', text: 'must never arrive' }); // source keeps pushing
+
+    const events = await collected;
+    const terminalIndices = events
+      .map((e, i) => (TERMINAL_TYPES.has(e.type) ? i : -1))
+      .filter((i) => i >= 0);
+    expect(terminalIndices).toEqual([events.length - 1]); // exactly one terminal event, last
+    expect(events.at(-1)).toMatchObject({ type: 'session.failed' });
+    expect(events.some((e) => 'text' in e && e.text === 'must never arrive')).toBe(false);
+
+    await tick(20);
+    expect(testSession.isCancelled()).toBe(true); // the provider was reaped, not left running
+    expect(sessionManager.get(session.id)?.status).toBe('failed');
+  }, 15_000);
+
+  it('never logs the oversized event content itself', async () => {
+    const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const provider = new TestProvider();
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, logger);
+    const session = sessionManager.create('claude', '/tmp', 'hi');
+    const testSession = provider.sessions.get(session.id)!;
+    const collected = collectUntilTerminal(sessionManager, session.id);
+
+    testSession.push({ type: 'assistant.message', text: `PAYLOAD_CANARY${'x'.repeat(2 * 1024 * 1024)}` });
+    await collected;
+
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('PAYLOAD_CANARY');
   }, 15_000);
 });
 
@@ -2704,5 +2803,534 @@ describe('SessionManager — interactive removal', () => {
     interactive.finish();
     await expect(removing).resolves.toBe(true);
     expect(sessionManager.get(session.id)).toBeUndefined();
+  });
+});
+
+describe('SessionManager — staged attachments and output schema (issue #59)', () => {
+  async function* chunks(...values: Buffer[]) {
+    for (const value of values) yield value;
+  }
+
+  async function newAttachmentStore(): Promise<AttachmentStore> {
+    const root = await mkdtemp(join(tmpdir(), 'agent-dock-session-attachments-'));
+    const store = new AttachmentStore(join(root, 'staged'), join(root, 'manifest.json'));
+    await store.load();
+    return store;
+  }
+
+  async function stagePng(store: AttachmentStore): Promise<string> {
+    const bytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from('fixture'),
+    ]);
+    const attachment = await store.stage({
+      fileName: 'image.png',
+      declaredSize: bytes.length,
+      stream: chunks(bytes),
+    });
+    return attachment.id;
+  }
+
+  it('resolves and binds a staged attachment transactionally, passing its real path to the provider', async () => {
+    const attachmentStore = await newAttachmentStore();
+    const attachmentId = await stagePng(attachmentStore);
+    const interactive = makeControllableInteractiveSession();
+    const provider = new InteractiveTestProvider(interactive);
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, { attachmentStore });
+
+    const session = await sessionManager.createInteractive(
+      provider.id,
+      '/tmp',
+      'hello',
+      INTERACTIVE_SELECTION,
+      INTERACTIVE_TRANSPORT,
+      INTERACTIVE_EXECUTION_ID,
+      INTERACTIVE_TURN_ID,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [attachmentId],
+    );
+
+    expect(provider.interactiveOptions[0]?.attachments).toEqual([
+      { attachmentId, path: expect.stringContaining('.bin') as unknown as string, mimeType: 'image/png', byteLength: expect.any(Number) as unknown as number },
+    ]);
+    const [record] = await attachmentStore.referenceForDispatch([attachmentId], session.id);
+    expect(record?.sessionId).toBe(session.id);
+  });
+
+  it('rejects a cross-session attachment id before creating any session record', async () => {
+    const attachmentStore = await newAttachmentStore();
+    const attachmentId = await stagePng(attachmentStore);
+    await attachmentStore.reference([attachmentId], '123e4567-e89b-42d3-a456-426614174099');
+    const interactive = makeControllableInteractiveSession();
+    const provider = new InteractiveTestProvider(interactive);
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, { attachmentStore });
+
+    await expect(
+      sessionManager.createInteractive(
+        provider.id,
+        '/tmp',
+        'hello',
+        INTERACTIVE_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [attachmentId],
+      ),
+    ).rejects.toMatchObject({ code: 'attachment_not_found' });
+    expect(provider.interactiveOptions).toHaveLength(0);
+  });
+
+  it('rejects requesting attachments when no attachment store is configured for the daemon', async () => {
+    const interactive = makeControllableInteractiveSession();
+    const provider = new InteractiveTestProvider(interactive);
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, {});
+
+    await expect(
+      sessionManager.createInteractive(
+        provider.id,
+        '/tmp',
+        'hello',
+        INTERACTIVE_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        ['00000000-0000-4000-8000-000000000000'],
+      ),
+    ).rejects.toThrow('no attachment store is configured');
+  });
+
+  it('releases bound attachments once the session reaches a terminal state, recovering quota', async () => {
+    const attachmentStore = await newAttachmentStore();
+    const attachmentId = await stagePng(attachmentStore);
+    const interactive = makeControllableInteractiveSession();
+    const provider = new InteractiveTestProvider(interactive);
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, { attachmentStore });
+
+    await sessionManager.createInteractive(
+      provider.id,
+      '/tmp',
+      'hello',
+      INTERACTIVE_SELECTION,
+      INTERACTIVE_TRANSPORT,
+      INTERACTIVE_EXECUTION_ID,
+      INTERACTIVE_TURN_ID,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [attachmentId],
+    );
+    expect(attachmentStore.list()).toHaveLength(1);
+
+    interactive.push({ type: 'session.completed' });
+    interactive.finish();
+    // deleteAttachments() does real disk I/O (unlink + a rewritten manifest); a fixed tick() only
+    // waits for one macrotask, not for that I/O to actually settle -- poll instead.
+    await vi.waitFor(() => expect(attachmentStore.list()).toHaveLength(0));
+  });
+
+  it('passes the negotiated output schema through to the provider', async () => {
+    const interactive = makeControllableInteractiveSession();
+    const provider = new InteractiveTestProvider(interactive);
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger);
+    const outputSchema = { type: 'object', required: ['answer'] };
+
+    await sessionManager.createInteractive(
+      provider.id,
+      '/tmp',
+      'hello',
+      INTERACTIVE_SELECTION,
+      INTERACTIVE_TRANSPORT,
+      INTERACTIVE_EXECUTION_ID,
+      INTERACTIVE_TURN_ID,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      outputSchema,
+    );
+
+    expect(provider.interactiveOptions[0]?.outputSchema).toEqual(outputSchema);
+  });
+});
+
+describe('SessionManager — subagent graph wiring (issue #58)', () => {
+  const AGENT_ID = uuid(50_000);
+  const controls = { steer: false, interrupt: false, cancel: false };
+
+  async function newSubagentStore(): Promise<SubagentGraphStore> {
+    const dir = await mkdtemp(join(tmpdir(), 'agent-dock-subagents-'));
+    return new SubagentGraphStore(join(dir, 'subagents-v1.json'));
+  }
+
+  it('upserts a spawning node into the store from a real subagent.status event', async () => {
+    const subagentStore = await newSubagentStore();
+    const { interactive, session } = await setupInteractive({}, { subagentStore });
+
+    interactive.push({
+      type: 'subagent.status',
+      turnId: INTERACTIVE_TURN_ID,
+      agentId: AGENT_ID,
+      nativeChildId: 'native-child-1',
+      name: 'reviewer',
+      status: 'spawning',
+      controls,
+    });
+    await tick();
+
+    const graph = subagentStore.graph(session.id);
+    expect(graph.nodes).toHaveLength(1);
+    expect(graph.nodes[0]).toMatchObject({
+      id: AGENT_ID,
+      sessionId: session.id,
+      nativeChildId: 'native-child-1',
+      provider: 'claude',
+      name: 'reviewer',
+      status: 'spawning',
+    });
+    expect(graph.nodes[0]?.completedAt).toBeUndefined();
+  });
+
+  it('preserves startedAt and sets completedAt only once the status becomes terminal', async () => {
+    const subagentStore = await newSubagentStore();
+    const { interactive, session } = await setupInteractive({}, { subagentStore });
+
+    interactive.push({
+      type: 'subagent.status',
+      turnId: INTERACTIVE_TURN_ID,
+      agentId: AGENT_ID,
+      name: 'reviewer',
+      status: 'spawning',
+      controls,
+    });
+    await tick();
+    const firstStartedAt = subagentStore.graph(session.id).nodes[0]?.startedAt;
+    expect(firstStartedAt).toBeDefined();
+
+    interactive.push({
+      type: 'subagent.status',
+      turnId: INTERACTIVE_TURN_ID,
+      agentId: AGENT_ID,
+      name: 'reviewer',
+      status: 'running',
+      controls,
+    });
+    await tick();
+    const running = subagentStore.graph(session.id).nodes[0];
+    expect(running?.status).toBe('running');
+    expect(running?.startedAt).toBe(firstStartedAt);
+    expect(running?.completedAt).toBeUndefined();
+
+    interactive.push({
+      type: 'subagent.status',
+      turnId: INTERACTIVE_TURN_ID,
+      agentId: AGENT_ID,
+      name: 'reviewer',
+      status: 'completed',
+      controls,
+    });
+    await tick();
+    const completed = subagentStore.graph(session.id).nodes[0];
+    expect(completed?.status).toBe('completed');
+    expect(completed?.startedAt).toBe(firstStartedAt);
+    expect(completed?.completedAt).toBeDefined();
+
+    // A replayed/duplicate terminal event for the same agentId must not slide completedAt
+    // forward -- the first terminal timestamp is the real one.
+    const firstCompletedAt = completed?.completedAt;
+    interactive.push({
+      type: 'subagent.status',
+      turnId: INTERACTIVE_TURN_ID,
+      agentId: AGENT_ID,
+      name: 'reviewer',
+      status: 'completed',
+      controls,
+    });
+    await tick();
+    expect(subagentStore.graph(session.id).nodes[0]?.completedAt).toBe(firstCompletedAt);
+  });
+
+  it('is idempotent for a replayed/duplicate event: the same agentId stays one bounded node', async () => {
+    const subagentStore = await newSubagentStore();
+    const { interactive, session } = await setupInteractive({}, { subagentStore });
+
+    for (let i = 0; i < 3; i += 1) {
+      interactive.push({
+        type: 'subagent.status',
+        turnId: INTERACTIVE_TURN_ID,
+        agentId: AGENT_ID,
+        name: 'reviewer',
+        status: 'running',
+        controls,
+      });
+    }
+    await tick();
+
+    expect(subagentStore.graph(session.id).nodes).toHaveLength(1);
+  });
+
+  it('does nothing when no subagentStore is configured (default security options)', async () => {
+    const { interactive } = await setupInteractive({}, {});
+    interactive.push({
+      type: 'subagent.status',
+      turnId: INTERACTIVE_TURN_ID,
+      agentId: AGENT_ID,
+      name: 'reviewer',
+      status: 'spawning',
+      controls,
+    });
+    await tick();
+    // No assertion target exists without a store; this only proves the event loop does not throw
+    // when subagentStore is undefined, matching every other optional security dependency.
+  });
+});
+
+/**
+ * Supports both the legacy (v1) and interactive (v2) launch paths on one provider instance, each
+ * session individually controllable and independently trackable, so mixed v1/v2 admission tests
+ * can hold an arbitrary number of sessions open and finish them one at a time.
+ */
+class MixedAdmissionProvider implements AgentProvider {
+  readonly id: ProviderId = 'claude';
+  readonly name = 'Mixed Admission Test Provider';
+  readonly legacySessions = new Map<string, ControllableSession>();
+  readonly interactiveSessions = new Map<string, ControllableInteractiveSession>();
+
+  async detect(): Promise<ProviderStatus> {
+    return {
+      id: this.id,
+      name: this.name,
+      installed: true,
+      authenticated: 'authenticated',
+      capabilities: {
+        resume: false,
+        cancellation: true,
+        tools: false,
+        usage: false,
+        thinking: false,
+      },
+    };
+  }
+
+  startSession(options: StartSessionOptions): ProviderSessionHandle {
+    const session = makeControllableSession();
+    this.legacySessions.set(options.sessionId, session);
+    return session.handle;
+  }
+
+  async startInteractiveSession(
+    options: StartInteractiveSessionOptions,
+  ): Promise<InteractiveProviderSessionHandle> {
+    const session = makeControllableInteractiveSession();
+    this.interactiveSessions.set(options.sessionId, session);
+    return session.handle;
+  }
+}
+
+describe('SessionManager — admission control (issue #52)', () => {
+  function setupMixed(maxActiveSessions: number) {
+    const provider = new MixedAdmissionProvider();
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const admission = new SessionAdmissionController({ maxActiveSessions });
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, { admission });
+    return { provider, admission, sessionManager };
+  }
+
+  it('rejects the (N+1)th start once N sessions are pending/active, across mixed v1 and v2 calls, with no phantom durable record', async () => {
+    const { provider, sessionManager } = setupMixed(2);
+
+    const a = sessionManager.create('claude', '/tmp', 'a');
+    const b = await sessionManager.createInteractive(
+      'claude',
+      '/tmp',
+      'b',
+      INTERACTIVE_SELECTION,
+      INTERACTIVE_TRANSPORT,
+      INTERACTIVE_EXECUTION_ID,
+      INTERACTIVE_TURN_ID,
+    );
+
+    expect(() => sessionManager.create('claude', '/tmp', 'c')).toThrow(SessionCapacityError);
+    await expect(
+      sessionManager.createInteractive(
+        'claude',
+        '/tmp',
+        'd',
+        INTERACTIVE_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+      ),
+    ).rejects.toThrow(SessionCapacityError);
+
+    // Exactly the two admitted sessions exist; the rejected attempts never reached the provider
+    // and left no durable record behind.
+    expect(
+      sessionManager
+        .list()
+        .map((session) => session.id)
+        .sort(),
+    ).toEqual([a.id, b.id].sort());
+    expect(provider.legacySessions.size).toBe(1);
+    expect(provider.interactiveSessions.size).toBe(1);
+  });
+
+  it('N+1 simultaneous starts at limit N launch exactly N providers and reject exactly one', async () => {
+    const { provider, admission, sessionManager } = setupMixed(3);
+
+    const results = await Promise.allSettled([
+      (async () => sessionManager.create('claude', '/tmp', 'a'))(),
+      sessionManager.createInteractive(
+        'claude',
+        '/tmp',
+        'b',
+        INTERACTIVE_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+      ),
+      (async () => sessionManager.create('claude', '/tmp', 'c'))(),
+      sessionManager.createInteractive(
+        'claude',
+        '/tmp',
+        'd',
+        INTERACTIVE_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+      ),
+    ]);
+
+    const fulfilled = results.filter((result) => result.status === 'fulfilled');
+    const rejected = results.filter((result) => result.status === 'rejected');
+    expect(fulfilled).toHaveLength(3);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(SessionCapacityError);
+    expect(admission.activeCount).toBe(3);
+    expect(sessionManager.list()).toHaveLength(3);
+    expect(provider.legacySessions.size + provider.interactiveSessions.size).toBe(3);
+  });
+
+  it('releases the slot exactly once on normal completion, making it immediately reusable', async () => {
+    const { provider, sessionManager } = setupMixed(1);
+    const a = sessionManager.create('claude', '/tmp', 'a');
+    expect(() => sessionManager.create('claude', '/tmp', 'blocked')).toThrow(SessionCapacityError);
+
+    provider.legacySessions.get(a.id)!.push({ type: 'session.completed' });
+    provider.legacySessions.get(a.id)!.finish();
+    await tick();
+
+    const b = sessionManager.create('claude', '/tmp', 'b');
+    expect(b.id).not.toBe(a.id);
+    expect(
+      sessionManager
+        .list()
+        .map((session) => session.id)
+        .sort(),
+    ).toEqual([a.id, b.id].sort());
+  });
+
+  it('releases the slot on cancel()', async () => {
+    const { provider, sessionManager } = setupMixed(1);
+    const a = sessionManager.create('claude', '/tmp', 'a');
+    expect(() => sessionManager.create('claude', '/tmp', 'blocked')).toThrow(SessionCapacityError);
+
+    const testSession = provider.legacySessions.get(a.id)!;
+    // Simulate the provider actually reacting to cancellation, the way run-session.ts does:
+    // handle.cancel() alone doesn't end the event stream, so runtime.done never resolves without it.
+    const cancelling = sessionManager.cancel(a.id);
+    testSession.push({ type: 'session.cancelled' });
+    testSession.finish();
+    await cancelling;
+    await tick();
+
+    const b = sessionManager.create('claude', '/tmp', 'b');
+    expect(b.id).not.toBe(a.id);
+  });
+
+  it('releases the slot on remove()', async () => {
+    const { provider, sessionManager } = setupMixed(1);
+    const a = sessionManager.create('claude', '/tmp', 'a');
+    expect(() => sessionManager.create('claude', '/tmp', 'blocked')).toThrow(SessionCapacityError);
+
+    const testSession = provider.legacySessions.get(a.id)!;
+    const removing = sessionManager.remove(a.id);
+    testSession.push({ type: 'session.cancelled' });
+    testSession.finish();
+    await removing;
+    await tick();
+
+    const b = sessionManager.create('claude', '/tmp', 'b');
+    expect(b.id).not.toBe(a.id);
+  });
+
+  it('releases the slot when interactive session startup fails before the runtime is ever admitted', async () => {
+    const failing = new PendingInteractiveProvider();
+    const registry = new ProviderRegistry();
+    registry.register(failing);
+    const admission = new SessionAdmissionController({ maxActiveSessions: 1 });
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, { admission });
+
+    const controller = new AbortController();
+    const starting = sessionManager.createInteractive(
+      failing.id,
+      '/tmp',
+      'hello',
+      INTERACTIVE_SELECTION,
+      INTERACTIVE_TRANSPORT,
+      INTERACTIVE_EXECUTION_ID,
+      INTERACTIVE_TURN_ID,
+      controller.signal,
+    );
+    controller.abort();
+    await expect(starting).rejects.toThrow();
+    expect(admission.activeCount).toBe(0);
+
+    // The freed slot is immediately usable by a fresh start.
+    const session = sessionManager.create(failing.id, '/tmp', 'reuses the freed slot');
+    expect(session.id).toBeDefined();
+  });
+
+  it('rejects invalid startup configuration (maxActiveSessions out of the 1..32 range) synchronously', () => {
+    expect(() => new SessionAdmissionController({ maxActiveSessions: 0 })).toThrow();
+    expect(() => new SessionAdmissionController({ maxActiveSessions: 33 })).toThrow();
   });
 });

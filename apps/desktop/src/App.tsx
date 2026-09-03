@@ -10,6 +10,7 @@ import type {
   SessionListV2Page,
   WorkspaceTrustViewV2,
 } from '@agent-dock/shared';
+import { PROVIDER_DISPLAY_NAMES } from '@agent-dock/shared';
 import type {
   RendererInteractionResolution,
   RendererQuestionResponse,
@@ -418,6 +419,15 @@ export function App() {
     cwd.trim().length > 0 &&
     prompt.trim().length > 0;
   const selectedTerminal = selectedEntry ? isTerminal(selectedEntry.session) : false;
+  // A capability the daemon has not negotiated as supported can never actually dispatch (see
+  // apps/daemon/src/v2-legacy-provider.ts, issue #54) — hide the corresponding action rather than
+  // let the user hit a guaranteed server-side rejection.
+  const sessionSupports = (capabilityId: 'session.resume' | 'session.fork'): boolean =>
+    selectedSessionProviderStatus?.capabilities.some(
+      (record) => record.id === capabilityId && record.support === 'supported',
+    ) ?? false;
+  const canResumeSelected = selectedTerminal && sessionSupports('session.resume');
+  const canForkSelected = selectedTerminal && sessionSupports('session.fork');
 
   return (
     <div className="app-shell">
@@ -558,8 +568,8 @@ export function App() {
                   onChange={(event) => setProvider(event.target.value as ProviderId)}
                   disabled={creating}
                 >
-                  <option value="claude">Claude Code</option>
-                  <option value="codex">Codex</option>
+                  <option value="claude">{PROVIDER_DISPLAY_NAMES.claude}</option>
+                  <option value="codex">{PROVIDER_DISPLAY_NAMES.codex}</option>
                 </select>
               </label>
               <label>
@@ -641,7 +651,7 @@ export function App() {
                   className="button button--secondary"
                   type="button"
                   onClick={() => void handleContinuation('resume')}
-                  disabled={!selectedTerminal || !prompt.trim() || creating}
+                  disabled={!canResumeSelected || !prompt.trim() || creating}
                 >
                   Resume
                 </button>
@@ -649,7 +659,7 @@ export function App() {
                   className="button button--secondary"
                   type="button"
                   onClick={() => void handleContinuation('fork')}
-                  disabled={!selectedTerminal || !prompt.trim() || creating}
+                  disabled={!canForkSelected || !prompt.trim() || creating}
                 >
                   Fork
                 </button>

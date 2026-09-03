@@ -336,6 +336,83 @@ function beginTurn(message) {
     notify('turn/started', { threadId, turn: turn(nativeTurnId, 'inProgress') });
     return;
   }
+  if ((scenario === 'multimodal' || scenario === 'multimodal-invalid-output') && turnCounter === 1) {
+    assert(Array.isArray(message.params.input), 'multimodal turn/start input was not an array');
+    const image = message.params.input.find((entry) => entry.type === 'localImage');
+    assert(!!image, 'multimodal turn/start missing a localImage input entry');
+    assert(image.path === '/fake/staged/image.png', 'localImage path did not match the staged attachment');
+    assert(
+      typeof message.params.outputSchema === 'object' && message.params.outputSchema !== null,
+      'multimodal turn/start missing outputSchema',
+    );
+    assert(
+      message.params.outputSchema.required?.[0] === 'answer',
+      'multimodal turn/start outputSchema did not match the negotiated schema',
+    );
+    notify('turn/started', { threadId, turn: turn(nativeTurnId, 'inProgress') });
+    const text =
+      scenario === 'multimodal-invalid-output' ? 'not valid json' : JSON.stringify({ answer: 42 });
+    notify('item/completed', {
+      threadId,
+      turnId: nativeTurnId,
+      item: { type: 'agentMessage', id: `message-${nativeTurnId}`, text },
+      completedAtMs: 2,
+    });
+    notify('turn/completed', { threadId, turn: turn(nativeTurnId, 'completed') });
+    return;
+  }
+  if (scenario === 'subagent' && turnCounter === 1) {
+    notify('turn/started', { threadId, turn: turn(nativeTurnId, 'inProgress') });
+    const item = {
+      type: 'subAgentActivity',
+      id: 'subagent-item-1',
+      agentThreadId: 'native-subagent-thread-1',
+      agentPath: 'reviewer',
+      kind: 'started',
+    };
+    notify('item/started', { threadId, turnId: nativeTurnId, item, startedAtMs: 1 });
+    notify('item/completed', { threadId, turnId: nativeTurnId, item, completedAtMs: 2 });
+    const progressItem = { ...item, id: 'subagent-item-2', kind: 'interacted' };
+    notify('item/started', { threadId, turnId: nativeTurnId, item: progressItem, startedAtMs: 3 });
+    notify('item/completed', {
+      threadId,
+      turnId: nativeTurnId,
+      item: progressItem,
+      completedAtMs: 4,
+    });
+    // No interrupted kind is ever sent: the child is left open when the turn ends, exercising the
+    // adapter's inferred-terminal fallback (see closeOpenSubagents() in normalizer.ts) rather than
+    // a provider-confirmed completion signal, which this schema version has no kind value for.
+    notify('turn/completed', { threadId, turn: turn(nativeTurnId, 'completed') });
+    return;
+  }
+  if (scenario === 'subagent-interrupted' && turnCounter === 1) {
+    notify('turn/started', { threadId, turn: turn(nativeTurnId, 'inProgress') });
+    const item = {
+      type: 'subAgentActivity',
+      id: 'subagent-item-1',
+      agentThreadId: 'native-subagent-thread-1',
+      agentPath: 'reviewer',
+      kind: 'started',
+    };
+    notify('item/started', { threadId, turnId: nativeTurnId, item, startedAtMs: 1 });
+    notify('item/completed', { threadId, turnId: nativeTurnId, item, completedAtMs: 2 });
+    const interruptedItem = { ...item, id: 'subagent-item-2', kind: 'interrupted' };
+    notify('item/started', {
+      threadId,
+      turnId: nativeTurnId,
+      item: interruptedItem,
+      startedAtMs: 3,
+    });
+    notify('item/completed', {
+      threadId,
+      turnId: nativeTurnId,
+      item: interruptedItem,
+      completedAtMs: 4,
+    });
+    notify('turn/completed', { threadId, turn: turn(nativeTurnId, 'completed') });
+    return;
+  }
   emitCompletedTurn(nativeTurnId, turnCounter === 1 ? 'hello' : 'follow-up');
 }
 

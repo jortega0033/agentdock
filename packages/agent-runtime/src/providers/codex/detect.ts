@@ -1,4 +1,5 @@
 import type { AuthSource, AuthStatus, ProviderStatus } from '@agent-dock/shared';
+import { PROVIDER_DISPLAY_NAMES } from '@agent-dock/shared';
 import { execCapture } from '../../process/exec-capture.js';
 import { buildLegacyProviderEnvironment } from '../../process/provider-environment.js';
 import { findExecutable } from '../../detect-executable.js';
@@ -50,7 +51,7 @@ export async function detectCodex(
 ): Promise<ProviderStatus> {
   const base = {
     id: 'codex' as const,
-    name: 'Codex',
+    name: PROVIDER_DISPLAY_NAMES.codex,
     capabilities: CODEX_CAPABILITIES,
     authSource: 'unknown' as const,
   };

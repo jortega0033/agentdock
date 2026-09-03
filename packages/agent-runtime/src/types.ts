@@ -12,6 +12,18 @@ import type {
 import type { ProviderMcpControlPlane } from './mcp-control.js';
 import type { ProviderComponentControlPlane } from './component-control.js';
 
+/**
+ * One already-resolved, daemon-owned staged attachment ready to deliver as real turn input.
+ * `path` is always the canonical on-disk location `AttachmentStore` wrote the file to -- never a
+ * caller/renderer-supplied path.
+ */
+export interface ProviderAttachmentInput {
+  attachmentId: string;
+  path: string;
+  mimeType: string;
+  byteLength: number;
+}
+
 export interface StartSessionOptions {
   /** Daemon-generated session UUID. Used only for logging/correlation, never as a process id. */
   sessionId: string;
@@ -130,6 +142,16 @@ export interface StartInteractiveSessionOptions extends StartSessionOptions {
   continuation?: SessionContinuationV2;
   /** Expected evidence for a daemon-bound resume/fork, verified before any native thread call. */
   expectedContinuationEvidence?: Readonly<ProviderContinuationEvidence>;
+  /**
+   * Already-resolved staged attachments (issue #59), for the first supported provider/transport
+   * only. Empty/absent for every provider that has not negotiated `input.image`.
+   */
+  attachments?: readonly ProviderAttachmentInput[];
+  /**
+   * JSON Schema constraining the session's final structured output (issue #59), for the first
+   * supported provider/transport only. Absent unless `output.structured` was negotiated.
+   */
+  outputSchema?: unknown;
 }
 
 export type AcceptedWorkState = 'not_accepted' | 'accepted' | 'unknown';

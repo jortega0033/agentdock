@@ -500,6 +500,19 @@ interactive conformance scenarios.
 | `usage`        |             Tested |             Tested | `content.usage.tokens`; cost needs separate v2 evidence    |
 | `thinking`     |             Tested |             Tested | `content.thinking`, only when the CLI emits public content |
 
+`resume`'s "Tested" column means only that the v1 CLI flag itself works when the caller already
+holds a real provider-native id (`claude --resume <id>` / `codex exec resume <id>`) — a renderer-
+supplied, daemon-unverified value the daemon has never bound to any lineage, matching v1's
+long-standing "no daemon-side verification" contract (see [Protocol v1](protocol-v1.md)). It does
+**not** mean the `legacy-one-shot` bridge advertises `session.resume` as `'supported'` at v2: that
+bridge additionally requires durable, non-secret account/model binding evidence before a v2 client
+can ever negotiate continuation, which no current Claude detection path supplies (issue #54) — so
+Claude's `session.resume`/`session.fork` v2 records are always `'unsupported'`, with the same
+"cannot yet be bound to a non-secret account and model scope" reason the Claude Agent SDK transport
+already gives (`providers/claude/sdk-support.ts`), regardless of this `resume: Tested` v1 row.
+Codex's v1 `resume` flag being genuinely testable is unaffected and continues to drive its own v2
+`session.resume` record the same as before.
+
 The shared provider contract and compatibility fixtures verify normalization and lifecycle. A
 generic Codex `mcp_tool_call` becoming `tool.started` does not prove MCP discovery, management,
 OAuth, elicitation, or approval capabilities.
@@ -755,18 +768,23 @@ diagnostics. V2 persistence stores
 only strict normalized envelopes, so raw tool inputs/results and approval response payloads are
 rejected at the storage boundary.
 
-V2 uses a per-user state directory with restrictive OS permissions. It does not add
-application-layer encryption in this phase, so the UI and documentation must describe the local
-plaintext-at-rest property.
+V2 uses a per-user state directory with restrictive OS permissions -- re-verified on every startup
+on POSIX, not just checked when the directory is first created (issue #67): an existing directory
+we own but with a looser mode is corrected; an existing directory owned by a different local user
+is refused with an actionable error rather than written into (`ensureStateDirectory()`,
+`apps/daemon/src/state-directory.ts`; the temp-rooted discovery/token-handoff directory has its own
+stricter always-refuse check, `ensureSecureRuntimeDir()` in `apps/daemon/src/discovery-file.ts`,
+unchanged by this). It does not add application-layer encryption in this phase, so the UI and
+documentation must describe the local plaintext-at-rest property.
 
 | Data class                                                                           | Persisted fields                                                                                                                  | Bounds and retention                                                                                                                                                                   | Deletion                                                                                                          |
 | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
 | Session metadata and normalized user-visible history                                 | IDs/lineage, provider/transport labels, trust/sandbox state, timestamps, user text, assistant text, safe content summaries, usage | 30 days after the whole lineage becomes terminal; global caps include all records and tombstones: 500 sessions and 250 MiB; evict the oldest eligible whole terminal lineage first     | Explicit deletion is whole-lineage and removes content promptly; active lineages cannot be deleted                |
 | Tool, command, diff, and artifact content                                            | Normalized summary and fields explicitly classified `safe_to_persist`; workspace paths stored relative where possible             | Unstructured/raw inputs, results, stdout/stderr, and external absolute paths are live-only by default                                                                                  | Deleted with lineage; explicit exports are user files outside AgentDock retention                                 |
-| Approval audit                                                                       | Version, session/turn/request IDs, normalized effect/permission key, risk, decision, actor, timestamps, safe target summary       | One append-only JSONL file capped at 64 MiB; no age-based expiry or segment rotation is currently implemented                                                                          | Appends fail at the cap; content deletion does not rewrite audit metadata                                         |
+| Approval audit                                                                       | Version, session/turn/request IDs, normalized effect/permission key, risk, decision, actor, timestamps, safe target summary       | One active append-only JSONL file capped at 64 MiB; rotated segments (issue #67) are kept up to 90 days                                                                                | Reaching the cap rotates the active file to an immutable, timestamped archive segment and starts a fresh file at sequence 0 -- no surviving entry's own fields are ever rewritten or renumbered; a segment past 90 days old is deleted whole, never partially, once per daemon startup; only the active file is queryable through the audit read API |
 | Provider extension data                                                              | Persist only provider, transport, extension name/version, safe summary, and truncation/redaction reason                           | Raw native frame never leaves adapter process memory; each encoded view is capped at 64 KiB, depth 16, 1,024 total keys/items, and a 512-character summary                             | Discard raw data after normalization and all live extension data at terminal state                                |
 | Provider-public thinking/reasoning                                                   | None by default                                                                                                                   | Live bounded display only                                                                                                                                                              | Discard at terminal state; explicit user export is separate                                                       |
-| Attachments staged by AgentDock                                                      | Opaque ID, normalized name/MIME/size, staged copy; never original path in renderer events                                         | 25 MiB each; 100 MiB and 20 files per session; 500 MiB and 200 files globally; unreferenced copies older than 24 hours are pruned when the attachment store loads, normally at startup | Referenced copies currently have no age or lineage-deletion cleanup hook; the user's source file is never altered |
+| Attachments staged by AgentDock                                                      | Opaque ID, normalized name/MIME/size, staged copy; never original path in renderer events                                         | 25 MiB each; 100 MiB and 20 files per session; 500 MiB and 200 files globally; unreferenced copies older than 24 hours are pruned when the attachment store loads; a *referenced* copy is capped at 7 days (issue #67), independent of when its session ends | Released immediately once the owning session's whole execution-graph lineage is removed (issue #67, via the same `onLineageRemoving` hook session-store cleanup already used), or once its 7-day age cap passes, whichever comes first; a crash between writing a staged file and persisting its manifest entry no longer leaks quota -- an orphaned file with no manifest entry is removed the next time the store loads; the user's source file is never altered |
 | Designated auth fields/tokens, process environments, native credential/approval data | Never                                                                                                                             | Forbidden in state, events, audit, fixtures, and logs                                                                                                                                  | Reject or redact before crossing the adapter boundary                                                             |
 
 User-controlled prompts, assistant-visible text, tool-selected files, and attachments may contain

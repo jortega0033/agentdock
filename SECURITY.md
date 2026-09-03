@@ -191,6 +191,12 @@ correct for what this daemon actually needs to be reachable by.
   `/token|secret|password|authorization|api[-_]?key|credential/i`; legacy provider stderr is counted
   without being decoded, persisted, logged, or surfaced. A non-zero exit logs only bounded numeric
   metadata such as exit code, signal, and `stderrBytes`.
+- Log a provider-controlled string (e.g. an unrecognized native event type) verbatim. Both legacy
+  parsers (`packages/agent-runtime/src/providers/claude/parser.ts`,
+  `.../providers/codex/parser.ts`) bound and control-character-strip an unrecognized event type
+  through `safeDisplay()` (`packages/agent-runtime/src/providers/common/safe-display.ts`) before it
+  reaches a `logger.debug()` call, so a malicious or buggy provider process cannot inject multiline
+  or control content into structured logs (issue #67).
 - Leak the token back through any API response, even an error body. **Verified** by regression
   test (`apps/daemon/test/server.test.ts`).
 
@@ -298,8 +304,13 @@ navigation away from the app's own content (`setWindowOpenHandler` returning `{ 
 a `will-navigate` handler that compares real origins in dev mode (not a `startsWith` prefix
 check, which a URL like `http://localhost:5173.evil.example` would have passed against an allowed
 `http://localhost:5173`) and in packaged mode allows only the exact `file://` URL of the app's own
-`dist/index.html`, not any local file path); anything else opens in the OS's default browser
-instead via `shell.openExternal`. A `session.setPermissionRequestHandler` denies every permission
+`dist/index.html`, not any local file path); anything else, along with every `window.open` target
+and OAuth authorization URL, is validated against one allowlisted shape (`parseAllowedExternalUrl`,
+`electron/allowed-external-url.ts`: an absolute `https:` URL with a non-empty host and no embedded
+credentials; `file:`, `javascript:`, `data:`, `blob:`, `mailto:`, `tel:`, a custom scheme, a bare
+UNC/filesystem path, and malformed input are all rejected) before it can reach
+`shell.openExternal`, and only a bounded scheme/host summary is ever logged. A
+`session.setPermissionRequestHandler` denies every permission
 request (camera, microphone, geolocation, notifications, etc.) by default, since nothing in this UI
 asks for any of them. The current UI renders normalized provider/user content as inert React text,
 not raw HTML or remote pages, and requests no browser permissions. These controls remain defense in
@@ -313,10 +324,27 @@ which remain subject to main/daemon validation and policy. The two daemon-status
 reconstruct a clean status object from the IPC payload, so accidental extra fields cannot ride
 along. Client network-error messages can still contain the daemon base URL as noted above. There is
 no `remote` module or `eval`, and no generic direct shell, filesystem, or daemon-route passthrough.
+Every privileged `ipcMain.handle` registration also verifies its sender before running: a local
+`handle()` wrapper (`isFromMainWindowFrame`, `electron/ipc-sender-guard.ts`) rejects any message
+that did not come from the current main window's own top-level frame, rather than relying on the
+current single-window topology holding forever.
 The page's `Content-Security-Policy` is
 `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'`: no
 `unsafe-eval`, and `connect-src` is just same-origin now that the renderer makes no network calls
 of its own.
+
+## Supported versions
+
+Security fixes target the packaged Windows build described in
+[packaging.md's platform matrix](docs/packaging.md#platform-matrix): **Windows 10 21H2 or later,
+and Windows 11, x64 only** (issue #61). macOS and Linux packaging are not implemented (see that same
+matrix), so there is no packaged build on those platforms to carry a fix; running from source is
+unaffected by this policy and follows whatever Node/OS versions [architecture.md](docs/architecture.md)
+documents for development.
+
+There is currently one supported line: the latest released version. This project does not yet
+maintain parallel maintenance branches for older releases -- a reported vulnerability is fixed
+against `main` and shipped in the next release, not backported.
 
 ## Reporting a vulnerability
 
@@ -325,3 +353,16 @@ This repository does not have a dedicated security contact address. Report vulne
 rather than filing a public issue, pull request, or exploit writeup. Include reproduction steps,
 affected versions, impact, and any suggested mitigation. Avoid disclosing details publicly until a
 fix or coordinated disclosure is ready.
+
+**Response and triage expectations (issue #61):** this is a small, non-commercial OSS project
+without a dedicated security team, so treat these as good-faith targets, not a contractual SLA:
+
+- **Acknowledgment**: within 5 business days of a report through the advisory form above.
+- **Initial triage** (confirmed, needs more information, or not applicable): within 10 business
+  days of acknowledgment.
+- **Fix timeline**: depends on severity and complexity; a confirmed high-severity issue affecting
+  the supported platform above is prioritized over feature work. There is no fixed deadline, but the
+  reporter will get a status update at least every 30 days until resolution or coordinated
+  disclosure.
+- Coordinated disclosure is preferred: the reporter and maintainer agree on a disclosure date once a
+  fix is ready, rather than either side disclosing unilaterally.

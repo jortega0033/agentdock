@@ -40,6 +40,7 @@ import { WorkspaceTrustStore } from '../src/workspace-trust-store.js';
 import { MemoryExecutionGraphStore } from '../src/execution-graph-store.js';
 import { MemorySessionStore } from '../src/session-store.js';
 import { AttachmentStore } from '../src/attachment-store.js';
+import { SubagentGraphStore } from '../src/subagent-graph-store.js';
 
 const TERMINAL_TYPES = new Set(['session.completed', 'session.failed', 'session.cancelled']);
 

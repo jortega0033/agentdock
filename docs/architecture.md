@@ -57,17 +57,23 @@ those.
 
 ```
 packages/shared  ←  packages/agent-runtime  ←  apps/daemon
-       ↑
+       ↑                                            ↑
        └──────────  packages/client  ←  apps/desktop
+                          ↑
+                          └── apps/daemon (live-smoke CLI only, see below)
 ```
 
 `packages/shared` sits underneath everything: it's the one place `ProviderId`, `ProviderStatus`,
 `ProviderCapabilities`, `AgentSession`, `AgentEvent`/`AgentEventEnvelope`, the protocol version, and
 the Zod request/response schemas are defined, so the daemon, `@agent-dock/client`, and the desktop
 app can never drift from what `agent-runtime` actually produces. `packages/client` depends on
-`packages/shared` only, **never** on `agent-runtime` or `apps/daemon`, so the graph stays acyclic.
-Nothing depends "sideways" or "up": `apps/daemon` never imports from `apps/desktop`, and
-`packages/agent-runtime` never imports from `apps/daemon`.
+`packages/shared` only, **never** on `agent-runtime`, so the graph stays acyclic even though
+`apps/daemon` itself also depends on `packages/client` — its `live-smoke` CLI
+(`apps/daemon/src/live-smoke/cli.ts`) uses `AgentDockClient` the same way any other trusted caller
+would, to drive a real running daemon in bounded live-provider smoke checks, rather than the daemon
+reaching into its own runtime internals for that. Nothing depends "sideways" or "up" in the sense
+that matters: `apps/daemon` never imports from `apps/desktop`, and `packages/agent-runtime` never
+imports from `apps/daemon` or `packages/client`.
 
 ## What belongs where
 
@@ -115,8 +121,11 @@ Three reasons, in order of importance:
    agent execution behind an HTTP+token boundary (see [SECURITY.md](../SECURITY.md)) is a much
    smaller, more auditable surface than "whatever the renderer/main process can reach."
 2. **The daemon can run independently of Electron.** The reference desktop owns and stops its
-   sidecar, while a CLI client, VS Code extension, or another shell can run the standalone daemon
-   and use the same HTTP+SSE API without re-implementing process management.
+   sidecar — though "stops" now means "on a real quit," not "whenever the window closes": closing
+   the window hides it to a tray icon and keeps the daemon running, see
+   [Tray lifecycle](electron.md#tray-lifecycle) — while a CLI client, VS Code extension, or another
+   shell can run the standalone daemon and use the same HTTP+SSE API without re-implementing
+   process management.
 3. **Testability.** `pnpm daemon` runs and can be curled directly, with no Electron, no display
    server, and no GUI test harness required.
 
@@ -124,7 +133,8 @@ Three reasons, in order of importance:
 
 The reference desktop uses protocol v2:
 
-1. The renderer calls `window.agentDock.createInteractiveSession(...)` with the provider, working
+1. The renderer calls `createInteractiveSession(...)` through `getBridge()`
+   (`apps/desktop/src/bridge.ts`, see [electron.md](electron.md)) with the provider, working
    directory, prompt, and requested capabilities.
 2. Preload validates the request, main validates it again at the privileged IPC boundary, and
    `AgentDockClient` sends authenticated `POST /v2/sessions`.
@@ -197,6 +207,11 @@ spawn/parse/normalize lifecycle happens. It:
   request-supplied path
 - spawns with `child_process.spawn`, `shell: false`, and an argv array: prompts are **never**
   interpolated into a shell string
+- spawns with a sanitized, default-deny environment built by
+  `packages/agent-runtime/src/process/provider-environment.ts`, never the daemon's raw
+  `process.env` — see [SECURITY.md](../SECURITY.md#provider-subprocess-environment-isolation) for
+  the exact allowed-key matrix and its one known gap (the MCP stdio server subprocess itself is a
+  separate spawn path not yet covered, tracked in #103)
 - reads stdout through `readLines` (`process/line-reader.ts`), which tolerates a JSON line split
   across chunk boundaries and multiple JSON lines arriving in one chunk, and caps a single line at
   10MB to bound memory

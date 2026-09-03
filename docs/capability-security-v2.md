@@ -596,17 +596,23 @@ Worktree include/copy rules are ignored before trust; after trust, AgentDock pre
 and possible secrets before copying. A transport must report which sources it loaded. If it cannot
 suppress the disallowed scopes above, it cannot run an untrusted workspace.
 
-For Claude SDK sessions, the restricted profile requires Claude Code 2.1.246 or later,
-`settingSources: []`, `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `strictMcpConfig: true`, an isolated or
-relocated `CLAUDE_CONFIG_DIR`, and no configured plugins, skills, hooks, agents, or MCP servers.
-Version 2.1.246 is the minimum version whose source exclusion also ignores the excluded source's
-sandbox filesystem and Edit/Read permission entries. Managed settings and provider-owned state
-remain separately classified and must still satisfy the source matrix.
+For Claude SDK sessions, the restricted profile requires `settingSources: []`,
+`CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `strictMcpConfig: true`, an isolated or relocated
+`CLAUDE_CONFIG_DIR`, and no configured plugins, skills, hooks, agents, or MCP servers. It pins an
+exact embedded Claude Code version (`CLAUDE_AGENT_SDK_CLAUDE_CODE_VERSION`, currently `2.1.251`) --
+not a minimum -- and rejects any other version outright as an SDK executable mismatch, rather than
+running with reduced confidence. 2.1.246 was the version that introduced source exclusion also
+ignoring the excluded source's sandbox filesystem and Edit/Read permission entries; the pinned
+version is newer and keeps that property. Managed settings and provider-owned state remain
+separately classified and must still satisfy the source matrix.
 
 `allowedTools` alone is not a tool allowlist and can bypass `canUseTool` for a matching tool. The
-restricted profile therefore supplies an explicit bounded `tools` set, denies every other tool with
-`disallowedTools`/`dontAsk`, and uses a `PreToolUse` canonical-path gate where a provider file tool
-cannot be removed. Escape fixtures must prove that project instructions, environment blocks,
+restricted profile therefore supplies an explicit bounded `tools` set and denies every other tool
+with `disallowedTools` (`Bash`, `Agent`, `Skill`, `WebFetch`, `WebSearch`). Canonical-path
+enforcement for the file tools that remain is a `canUseTool` callback, not a `PreToolUse` hook (the
+restricted profile registers no hooks at all): it resolves the real path with `realpath` and denies
+anything that escapes the trusted workspace root before the tool ever runs. Escape fixtures must
+prove that project instructions, environment blocks,
 auto-memory, path traversal, symlink traversal, MCP, hooks, plugins, skills, agents, and helpers
 cannot load or execute. A CLI flag that merely reduces features is not proof. See
 [Claude Code permissions](https://code.claude.com/docs/en/permissions) and

@@ -92,7 +92,7 @@ window or renders untrusted content in an iframe.
 ## Daemon lifecycle from Electron's side
 
 On `app.whenReady()`, `main.ts` spawns the daemon as a child process
-(`spawn(process.execPath, args, { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, ... })`),
+(`spawn(process.execPath, args, { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', AGENT_DOCK_APP_ID: APP_ID }, ... })`),
 using `resolveDaemonEntry()` (`electron/resolve-daemon-entry.ts`) to pick the right entry point for
 dev/packaged/unpacked, see [packaging.md](packaging.md#resolvedaemonentry) for the three cases. It
 then polls the discovery file (`waitForDaemonReady`, 200ms interval, 15s timeout) until it can read
@@ -106,15 +106,23 @@ instead of opening a second one, which would otherwise spawn a second daemon and
 simultaneous-start race described in
 [daemon.md#duplicate-start-behavior](daemon.md#duplicate-start-behavior).
 
-On quit, `killDaemon()` first stops admitting interactive creates, aborts their HTTP requests, and
-waits through the bounded cleanup window; a create that still resolves is cancelled immediately
-instead of joining the active set. It then aborts active SSE
-subscriptions, best-effort calls
-`POST /sessions/cancel-all` over HTTP to cancel every in-flight v1 session, cancels every tracked
-interactive v2 session, then kills the daemon child process. This exists specifically because
-Windows' `child.kill()` doesn't deliver a real `SIGTERM` the daemon's own shutdown handler could
-otherwise catch, see
+On quit, `killDaemon()` first stops admitting interactive creates and aborts every active v1 and v2
+SSE subscription, then waits through the bounded cleanup window for pending interactive creates; a
+create that still resolves after that is cancelled immediately instead of joining the active set.
+It then best-effort calls `POST /sessions/cancel-all` over HTTP to cancel every in-flight v1
+session, cancels every tracked interactive v2 session, then kills the daemon child process. This
+exists specifically because Windows' `child.kill()` doesn't deliver a real `SIGTERM` the daemon's
+own shutdown handler could otherwise catch, see
 [daemon.md#shutdown](daemon.md#shutdown) for the full explanation.
+
+## Tray lifecycle
+
+Closing the main window does not quit the app: the window's `close` handler hides it instead
+(`event.preventDefault(); mainWindow?.hide();`) and a tray icon (`createTray()`, both in
+`main.ts`) keeps running, so the daemon and any in-flight sessions stay alive in the background.
+Only a real quit — the tray menu's Quit item, `app.quit()` from the OS, or `before-quit` — sets an
+`isQuitting` flag that lets the window actually close and runs `killDaemon()`. The tray's "Open
+AgentDock" item and a left-click on the icon both restore the hidden window.
 
 ## Renderer trust assumptions
 
@@ -154,11 +162,17 @@ and revalidates identity/trust before provider dispatch.
 ## Where to safely add native functionality
 
 - **A new daemon capability the UI needs**: add the IPC handler in `main.ts`, the typed function in
-  `preload.ts`'s `AgentDockBridge`, and call it from the renderer through `window.agentDock`. Don't
-  add a daemon call directly in renderer code.
-- **A new native OS integration** (file picker, notifications, tray icon, etc.): same pattern, main
-  process owns the Electron/Node API, preload exposes a narrow typed function, renderer calls it.
-  Never enable `nodeIntegration` or disable `contextIsolation`/`sandbox` to shortcut this.
+  `preload.ts`'s `AgentDockBridge`, and call it from the renderer through `getBridge()`
+  (`apps/desktop/src/bridge.ts`), not `window.agentDock` directly. `getBridge()` is the only place
+  that reads `window.agentDock`; every other call site goes through it so the reference UI's demo
+  mode (`apps/desktop/src/demo-bridge.ts`, swapped in via `setBridgeOverride()` in `AppRoot.tsx`)
+  can substitute a fixture bridge without touching call sites. Don't add a daemon call directly in
+  renderer code.
+- **A new native OS integration** (file picker, notifications, etc. — the tray icon already
+  follows this pattern, see [Tray lifecycle](#tray-lifecycle) above): same idea, main process owns
+  the Electron/Node API, preload exposes a narrow typed function, renderer calls it through
+  `getBridge()`. Never enable `nodeIntegration` or disable `contextIsolation`/`sandbox` to
+  shortcut this.
 - **Rendering content that isn't this repo's own UI** (e.g. a tool result containing a link or
   HTML): route external links through `shell.openExternal` (already the default for any navigation
   away from the app, see [BrowserWindow security settings](#browserwindow-security-settings) above)

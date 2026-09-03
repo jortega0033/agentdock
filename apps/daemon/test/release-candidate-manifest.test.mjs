@@ -1,6 +1,7 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Ajv from 'ajv';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   aggregateGateResults,
@@ -155,5 +156,86 @@ describe('buildManifest', () => {
     });
     expect(manifest.providerMatrix.available).toBe(false);
     expect(manifest.providerMatrix.rows).toEqual([]);
+  });
+
+  it('sbom and provenance default to unavailable rather than being silently omitted (issue #61)', () => {
+    const manifest = buildManifest({ ...baseInput, gates: [{ name: 'lint', passed: true }] });
+    expect(manifest.sbom).toEqual({ available: false });
+    expect(manifest.provenance).toEqual({ available: false });
+  });
+
+  it('carries a real sbom/provenance record through when supplied', () => {
+    const manifest = buildManifest({
+      ...baseInput,
+      gates: [{ name: 'lint', passed: true }],
+      sbom: { available: true, format: 'CycloneDX', path: 'sbom.cdx.json', sha256: 'a'.repeat(64) },
+      provenance: { available: true, attestationUrl: 'https://github.com/jortega0033/agentdock/attestations/1' },
+    });
+    expect(manifest.sbom).toEqual({
+      available: true,
+      format: 'CycloneDX',
+      path: 'sbom.cdx.json',
+      sha256: 'a'.repeat(64),
+    });
+    expect(manifest.provenance).toEqual({
+      available: true,
+      attestationUrl: 'https://github.com/jortega0033/agentdock/attestations/1',
+    });
+  });
+});
+
+describe('manifest.schema.json conformance (issue #61)', () => {
+  it('validates a manifest with everything unavailable', async () => {
+    const schema = JSON.parse(
+      await readFile(
+        join(import.meta.dirname, '..', '..', '..', 'scripts', 'release-candidate', 'manifest.schema.json'),
+        'utf8',
+      ),
+    );
+    const ajv = new Ajv({ strict: true, validateFormats: false });
+    const validate = ajv.compile(schema);
+    const manifest = buildManifest({
+      commit: 'a'.repeat(40),
+      dirty: false,
+      osImage: 'windows-2022',
+      nodeVersion: '20.18.0',
+      pnpmVersion: '10.29.2',
+      providerPins: { 'codex-app-server': '0.147.0' },
+      gates: [{ name: 'lint', passed: true }],
+      artifacts: [],
+      signingStatus: 'unsigned',
+      documentedExceptions: [],
+      providerMatrix: { available: false, rows: [] },
+    });
+    expect(validate(manifest), JSON.stringify(validate.errors)).toBe(true);
+  });
+
+  it('validates a manifest with a real sbom, provenance, and artifact record', async () => {
+    const schema = JSON.parse(
+      await readFile(
+        join(import.meta.dirname, '..', '..', '..', 'scripts', 'release-candidate', 'manifest.schema.json'),
+        'utf8',
+      ),
+    );
+    const ajv = new Ajv({ strict: true, validateFormats: false });
+    const validate = ajv.compile(schema);
+    const manifest = buildManifest({
+      commit: 'a'.repeat(40),
+      dirty: false,
+      osImage: 'windows-2022',
+      nodeVersion: '20.18.0',
+      pnpmVersion: '10.29.2',
+      providerPins: { 'codex-app-server': '0.147.0' },
+      gates: [{ name: 'lint', passed: true }],
+      artifacts: [
+        { name: 'installer', path: 'dist-packages/AgentDock-Setup-0.1.0.exe', sha256: 'b'.repeat(64), sizeBytes: 12_345 },
+      ],
+      signingStatus: 'unsigned',
+      documentedExceptions: ['pnpm audit (not --prod) has a documented dev-tool exception'],
+      providerMatrix: { available: false, rows: [] },
+      sbom: { available: true, format: 'CycloneDX', path: 'sbom.cdx.json', sha256: 'c'.repeat(64) },
+      provenance: { available: true, attestationUrl: 'https://github.com/jortega0033/agentdock/attestations/1' },
+    });
+    expect(validate(manifest), JSON.stringify(validate.errors)).toBe(true);
   });
 });

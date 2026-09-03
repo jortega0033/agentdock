@@ -87,6 +87,8 @@ export async function importProviderMatrixEvidence(evidencePath) {
  *   signingStatus: 'unsigned',
  *   documentedExceptions: string[],
  *   providerMatrix: Awaited<ReturnType<typeof importProviderMatrixEvidence>>,
+ *   sbom?: { available: boolean, format?: string, path?: string, sha256?: string },
+ *   provenance?: { available: boolean, attestationUrl?: string },
  *   generatedAt?: string,
  * }} input
  */
@@ -111,5 +113,9 @@ export function buildManifest(input) {
     published: false,
     documentedExceptions: input.documentedExceptions,
     providerMatrix: input.providerMatrix,
+    // False (issue #61) means exactly what providerMatrix.available: false already means elsewhere
+    // in this manifest -- "not generated for this run", never an implicit claim either way.
+    sbom: input.sbom ?? { available: false },
+    provenance: input.provenance ?? { available: false },
   };
 }

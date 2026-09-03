@@ -1,0 +1,49 @@
+name: CodeQL
+
+# Issue #61: static analysis security gate. Runs on every push to main, every PR, and weekly, so a
+# vulnerable pattern introduced anywhere in the TypeScript/JavaScript sources is caught before it
+# reaches main, not just at release time. Least-privilege: only the two permissions CodeQL actually
+# needs (reading the checked-out code, writing analysis results back as code-scanning alerts) --
+# nothing else, and never anything that could publish an artifact or touch a secret. A PR from a
+# fork gets GitHub's own automatically-reduced, read-only token for this workflow regardless of
+# what's declared here; declaring the narrow scope explicitly is defense in depth, not the only
+# guardrail.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    - cron: '43 8 * * 3' # Wednesdays, 08:43 UTC -- an arbitrary off-peak time, not a meaningful bound.
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (javascript-typescript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # First-party GitHub action, pinned to the major version tag per GitHub's own published
+      # guidance for CodeQL specifically (unlike third-party actions elsewhere in this repo's
+      # workflows, which are pinned to an exact commit SHA).
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: '/language:javascript-typescript'

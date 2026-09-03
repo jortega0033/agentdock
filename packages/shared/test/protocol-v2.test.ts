@@ -24,7 +24,8 @@ const toolCallId = '123e4567-e89b-42d3-a456-426614174005';
 const executionId = '123e4567-e89b-42d3-a456-426614174006';
 const questionId = '123e4567-e89b-42d3-a456-426614174007';
 const optionId = '123e4567-e89b-42d3-a456-426614174008';
-const agentId = '123e4567-e89b-42d3-a456-426614174009';
+const attachmentId = '123e4567-e89b-42d3-a456-426614174009';
+const agentId = '123e4567-e89b-42d3-a456-426614174010';
 const timestamp = '2026-08-30T12:00:00.000Z';
 const selection = {
   transport: 'cli',
@@ -238,6 +239,50 @@ describe('protocol v2 content and interaction schemas', () => {
           optional: [],
           allowExperimental: false,
         },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('accepts bounded initialAttachmentIds and outputSchema, rejecting oversized ones (issue #59)', () => {
+    expect(
+      createSessionV2RequestSchema.safeParse({
+        provider: 'codex',
+        cwd: '/tmp',
+        prompt: 'hi',
+        initialAttachmentIds: [attachmentId, requestId],
+        outputSchema: { type: 'object', required: ['answer'] },
+      }).success,
+    ).toBe(true);
+    expect(
+      createSessionV2RequestSchema.safeParse({
+        provider: 'codex',
+        cwd: '/tmp',
+        prompt: 'hi',
+        initialAttachmentIds: [],
+      }).success,
+    ).toBe(false);
+    expect(
+      createSessionV2RequestSchema.safeParse({
+        provider: 'codex',
+        cwd: '/tmp',
+        prompt: 'hi',
+        initialAttachmentIds: ['not-a-uuid'],
+      }).success,
+    ).toBe(false);
+    expect(
+      createSessionV2RequestSchema.safeParse({
+        provider: 'codex',
+        cwd: '/tmp',
+        prompt: 'hi',
+        initialAttachmentIds: Array.from({ length: 21 }, () => attachmentId),
+      }).success,
+    ).toBe(false);
+    expect(
+      createSessionV2RequestSchema.safeParse({
+        provider: 'codex',
+        cwd: '/tmp',
+        prompt: 'hi',
+        outputSchema: { type: 'object', title: 'x'.repeat(70 * 1024) },
       }).success,
     ).toBe(false);
   });

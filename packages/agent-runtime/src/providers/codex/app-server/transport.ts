@@ -12,6 +12,7 @@ import {
   type ProviderContinuationEvidence,
   type ProviderRuntimeMetadata,
   type StartInteractiveSessionOptions,
+  type ProviderAttachmentInput,
 } from '../../../types.js';
 import {
   CODEX_APP_SERVER_FIXTURE_SET,
@@ -281,6 +282,27 @@ function nativeThreadId(
 function nativeTurnId(result: unknown): string {
   const response = asObject(result, 'turn response');
   return asString(asObject(response.turn, 'turn').id, 'turn id');
+}
+
+// PNG/JPEG only, matching AttachmentStore's own MIME-sniffing allowlist and issue #59's
+// explicitly scoped first slice -- never a generic file, and never trusted from a caller-declared
+// MIME type (the daemon only ever hands this transport an attachment record whose mimeType was
+// sniffed from real file bytes).
+const SUPPORTED_LOCAL_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg']);
+
+function localImageInputs(attachments: readonly ProviderAttachmentInput[] | undefined): JsonObject[] {
+  if (!attachments || attachments.length === 0) return [];
+  return attachments.map((attachment) => {
+    if (!SUPPORTED_LOCAL_IMAGE_MIME_TYPES.has(attachment.mimeType)) {
+      throw new CodexAppServerProtocolError(
+        'forbidden_method',
+        'Codex app-server transport only supports PNG/JPEG local images',
+      );
+    }
+    // `path` always comes from AttachmentStore's canonical, daemon-owned on-disk location -- this
+    // transport never accepts or forwards a caller/renderer-supplied path.
+    return { type: 'localImage', path: attachment.path };
+  });
 }
 
 function textInput(
@@ -910,6 +932,7 @@ export class CodexAppServerTransport implements InteractiveProviderTransport {
       providerThreadId,
       this.options.transport.id || CODEX_APP_SERVER_TRANSPORT_ID,
       this.options.selection,
+      this.options.outputSchema,
     );
     this.normalizer.expectTurn(this.options.turnId);
     await this.options.beforeWorkDelivery?.();
@@ -917,7 +940,13 @@ export class CodexAppServerTransport implements InteractiveProviderTransport {
       'turn/start',
       {
         threadId: providerThreadId,
-        input: [{ type: 'text', text: this.options.prompt, text_elements: [] }],
+        input: [
+          ...localImageInputs(this.options.attachments),
+          { type: 'text', text: this.options.prompt, text_elements: [] },
+        ],
+        ...(this.options.outputSchema !== undefined
+          ? { outputSchema: this.options.outputSchema }
+          : {}),
       },
       () => {
         this.deliveryState = 'ambiguous';

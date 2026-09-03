@@ -115,6 +115,42 @@ function transport(
   return instance;
 }
 
+function multimodalTransport(scenario: 'multimodal' | 'multimodal-invalid-output'): CodexAppServerTransport {
+  const instance = new CodexAppServerTransport({
+    executable: process.execPath,
+    executableArgs: [FIXTURE],
+    processPlatform: 'linux',
+    sessionId: SESSION_ID,
+    executionId: EXECUTION_ID,
+    turnId: TURN_ID,
+    cwd: process.cwd(),
+    prompt: 'hello fixture',
+    transport: CODEX_APP_SERVER_TRANSPORT,
+    selection: SELECTION,
+    env: { ...process.env, FAKE_CODEX_APP_SERVER_SCENARIO: scenario },
+    providerStatus: {
+      id: 'codex',
+      name: 'Codex',
+      installed: true,
+      authenticated: 'authenticated',
+      authSource: 'chatgpt',
+      executablePath: process.execPath,
+      version: '0.147.0',
+      capabilities: {},
+    },
+    attachments: [
+      { attachmentId: 'a'.repeat(32), path: '/fake/staged/image.png', mimeType: 'image/png', byteLength: 4 },
+    ],
+    outputSchema: {
+      type: 'object',
+      required: ['answer'],
+      properties: { answer: { type: 'number' } },
+    },
+  });
+  live.add(instance);
+  return instance;
+}
+
 async function next(
   iterator: AsyncGenerator<unknown, void, void>,
 ): Promise<IteratorResult<unknown, void>> {
@@ -287,6 +323,44 @@ describe('Codex app-server transport', () => {
         delta: 'y',
       }),
     ).toThrow('after completion');
+  });
+
+  it('sends a staged attachment as localImage and the negotiated outputSchema on the real turn/start request, emitting structured_data once the final message validates', async () => {
+    const instance = multimodalTransport('multimodal');
+    await instance.started;
+    const events = await until(
+      instance,
+      (event) => event.type === 'session.status' && event.status === 'idle',
+    );
+    // The fixture's own assert() calls (see fake-codex-app-server.mjs) already fail the process
+    // if `input`/`outputSchema` were wrong on the wire; reaching idle here proves they were right.
+    const structured = events.find((event) => event.type === 'content.completed' && (event as { block: { type: string } }).block.type === 'structured_data');
+    expect(structured).toBeDefined();
+    expect((structured as { block: { data: unknown } }).block.data).toEqual({ answer: 42 });
+    // The plain text is still emitted too -- structured_data is additive, never a replacement.
+    expect(
+      events.some(
+        (event) => event.type === 'content.completed' && (event as { block: { type: string } }).block.type === 'text',
+      ),
+    ).toBe(true);
+  });
+
+  it('never emits structured_data for output that fails to parse as JSON, leaving only the inspectable text block', async () => {
+    const instance = multimodalTransport('multimodal-invalid-output');
+    await instance.started;
+    const events = await until(
+      instance,
+      (event) => event.type === 'session.status' && event.status === 'idle',
+    );
+    expect(
+      events.some(
+        (event) => event.type === 'content.completed' && (event as { block: { type: string } }).block.type === 'structured_data',
+      ),
+    ).toBe(false);
+    const text = events.find(
+      (event) => event.type === 'content.completed' && (event as { block: { type: string } }).block.type === 'text',
+    ) as { block: { text: string } } | undefined;
+    expect(text?.block.text).toBe('not valid json');
   });
 
   it('maps a real subAgentActivity item into a stable subagent.status node, closing it out when its turn ends with no completed kind', () => {

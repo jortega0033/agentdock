@@ -39,6 +39,7 @@ import { resolveWorkspaceIdentity, type WorkspaceIdentity } from '../src/workspa
 import { WorkspaceTrustStore } from '../src/workspace-trust-store.js';
 import { MemoryExecutionGraphStore } from '../src/execution-graph-store.js';
 import { MemorySessionStore } from '../src/session-store.js';
+import { AttachmentStore } from '../src/attachment-store.js';
 import { SubagentGraphStore } from '../src/subagent-graph-store.js';
 
 const TERMINAL_TYPES = new Set(['session.completed', 'session.failed', 'session.cancelled']);
@@ -2802,6 +2803,191 @@ describe('SessionManager — interactive removal', () => {
     interactive.finish();
     await expect(removing).resolves.toBe(true);
     expect(sessionManager.get(session.id)).toBeUndefined();
+  });
+});
+
+describe('SessionManager — staged attachments and output schema (issue #59)', () => {
+  async function* chunks(...values: Buffer[]) {
+    for (const value of values) yield value;
+  }
+
+  async function newAttachmentStore(): Promise<AttachmentStore> {
+    const root = await mkdtemp(join(tmpdir(), 'agent-dock-session-attachments-'));
+    const store = new AttachmentStore(join(root, 'staged'), join(root, 'manifest.json'));
+    await store.load();
+    return store;
+  }
+
+  async function stagePng(store: AttachmentStore): Promise<string> {
+    const bytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from('fixture'),
+    ]);
+    const attachment = await store.stage({
+      fileName: 'image.png',
+      declaredSize: bytes.length,
+      stream: chunks(bytes),
+    });
+    return attachment.id;
+  }
+
+  it('resolves and binds a staged attachment transactionally, passing its real path to the provider', async () => {
+    const attachmentStore = await newAttachmentStore();
+    const attachmentId = await stagePng(attachmentStore);
+    const interactive = makeControllableInteractiveSession();
+    const provider = new InteractiveTestProvider(interactive);
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, { attachmentStore });
+
+    const session = await sessionManager.createInteractive(
+      provider.id,
+      '/tmp',
+      'hello',
+      INTERACTIVE_SELECTION,
+      INTERACTIVE_TRANSPORT,
+      INTERACTIVE_EXECUTION_ID,
+      INTERACTIVE_TURN_ID,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [attachmentId],
+    );
+
+    expect(provider.interactiveOptions[0]?.attachments).toEqual([
+      { attachmentId, path: expect.stringContaining('.bin') as unknown as string, mimeType: 'image/png', byteLength: expect.any(Number) as unknown as number },
+    ]);
+    const [record] = await attachmentStore.referenceForDispatch([attachmentId], session.id);
+    expect(record?.sessionId).toBe(session.id);
+  });
+
+  it('rejects a cross-session attachment id before creating any session record', async () => {
+    const attachmentStore = await newAttachmentStore();
+    const attachmentId = await stagePng(attachmentStore);
+    await attachmentStore.reference([attachmentId], '123e4567-e89b-42d3-a456-426614174099');
+    const interactive = makeControllableInteractiveSession();
+    const provider = new InteractiveTestProvider(interactive);
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, { attachmentStore });
+
+    await expect(
+      sessionManager.createInteractive(
+        provider.id,
+        '/tmp',
+        'hello',
+        INTERACTIVE_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        [attachmentId],
+      ),
+    ).rejects.toMatchObject({ code: 'attachment_not_found' });
+    expect(provider.interactiveOptions).toHaveLength(0);
+  });
+
+  it('rejects requesting attachments when no attachment store is configured for the daemon', async () => {
+    const interactive = makeControllableInteractiveSession();
+    const provider = new InteractiveTestProvider(interactive);
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, {});
+
+    await expect(
+      sessionManager.createInteractive(
+        provider.id,
+        '/tmp',
+        'hello',
+        INTERACTIVE_SELECTION,
+        INTERACTIVE_TRANSPORT,
+        INTERACTIVE_EXECUTION_ID,
+        INTERACTIVE_TURN_ID,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        ['00000000-0000-4000-8000-000000000000'],
+      ),
+    ).rejects.toThrow('no attachment store is configured');
+  });
+
+  it('releases bound attachments once the session reaches a terminal state, recovering quota', async () => {
+    const attachmentStore = await newAttachmentStore();
+    const attachmentId = await stagePng(attachmentStore);
+    const interactive = makeControllableInteractiveSession();
+    const provider = new InteractiveTestProvider(interactive);
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger, undefined, { attachmentStore });
+
+    await sessionManager.createInteractive(
+      provider.id,
+      '/tmp',
+      'hello',
+      INTERACTIVE_SELECTION,
+      INTERACTIVE_TRANSPORT,
+      INTERACTIVE_EXECUTION_ID,
+      INTERACTIVE_TURN_ID,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [attachmentId],
+    );
+    expect(attachmentStore.list()).toHaveLength(1);
+
+    interactive.push({ type: 'session.completed' });
+    interactive.finish();
+    // deleteAttachments() does real disk I/O (unlink + a rewritten manifest); a fixed tick() only
+    // waits for one macrotask, not for that I/O to actually settle -- poll instead.
+    await vi.waitFor(() => expect(attachmentStore.list()).toHaveLength(0));
+  });
+
+  it('passes the negotiated output schema through to the provider', async () => {
+    const interactive = makeControllableInteractiveSession();
+    const provider = new InteractiveTestProvider(interactive);
+    const registry = new ProviderRegistry();
+    registry.register(provider);
+    const sessionManager = new SessionManager(registry, noopLogger);
+    const outputSchema = { type: 'object', required: ['answer'] };
+
+    await sessionManager.createInteractive(
+      provider.id,
+      '/tmp',
+      'hello',
+      INTERACTIVE_SELECTION,
+      INTERACTIVE_TRANSPORT,
+      INTERACTIVE_EXECUTION_ID,
+      INTERACTIVE_TURN_ID,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      outputSchema,
+    );
+
+    expect(provider.interactiveOptions[0]?.outputSchema).toEqual(outputSchema);
   });
 });
 

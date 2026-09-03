@@ -27,12 +27,14 @@ import {
   type ProviderContinuationEvidence,
   type ProviderDetectionOptions,
   type ProviderRegistry,
+  type ProviderAttachmentInput,
   type ProviderSessionHandle,
   type StartSessionOptions,
   type WorkspaceTrustEvidence,
 } from '@agent-dock/agent-runtime';
 import { basename } from 'node:path';
 import { MemorySessionStore, type SessionStore } from './session-store.js';
+import type { AttachmentStore } from './attachment-store.js';
 import type { AuditStore } from './audit-store.js';
 import type { ExecutionGraphStore } from './execution-graph-store.js';
 import type { SubagentGraphStore } from './subagent-graph-store.js';
@@ -98,6 +100,8 @@ interface InteractiveRuntimeState extends RuntimeStateBase {
   providerSessionId?: string;
   runtimeMetadata?: Readonly<ProviderRuntimeMetadata>;
   continuationEvidence?: Readonly<ProviderContinuationEvidence>;
+  /** Attachment ids bound to this session at creation (issue #59), released once it terminates. */
+  attachmentIds?: readonly string[];
 }
 
 interface PendingInteractiveStart {
@@ -128,6 +132,7 @@ export interface SessionManagerSecurityOptions {
   interactionTimeoutMs?: number;
   providerStateDirectory?: string;
   executionGraphStore?: ExecutionGraphStore;
+  attachmentStore?: AttachmentStore;
   subagentStore?: SubagentGraphStore;
   /**
    * Daemon-owned cap on concurrent pending+running provider processes, shared by every session
@@ -310,6 +315,8 @@ export class SessionManager {
       evidence: Readonly<ProviderContinuationEvidence> | undefined,
     ) => Promise<void>,
     beforeProviderDispatch?: (session: Readonly<AgentSession>) => void,
+    initialAttachmentIds?: string[],
+    outputSchema?: unknown,
   ): Promise<AgentSession> {
     if (this.shuttingDown) {
       throw new InteractiveSessionError('session_terminal', 'session manager is shutting down');
@@ -335,6 +342,8 @@ export class SessionManager {
         expectedContinuationEvidence,
         beforeProviderThreadStart,
         beforeProviderDispatch,
+        initialAttachmentIds,
+        outputSchema,
         (done) => {
           void done.finally(() => lease.release());
           leaseTransferred = true;
@@ -361,6 +370,8 @@ export class SessionManager {
     beforeProviderThreadStart:
       ((evidence: Readonly<ProviderContinuationEvidence> | undefined) => Promise<void>) | undefined,
     beforeProviderDispatch: ((session: Readonly<AgentSession>) => void) | undefined,
+    initialAttachmentIds: string[] | undefined,
+    outputSchema: unknown,
     onAdmitted: (done: Promise<void>) => void,
   ): Promise<AgentSession> {
     const workspaceEpoch = workspace
@@ -384,6 +395,25 @@ export class SessionManager {
         }
       : { state: 'untrusted' };
     const id = randomUUID();
+    // Resolved and bound before any session record exists (issue #59): a failed reference --
+    // cross-session id, missing attachment, quota exceeded -- throws here and nothing is ever
+    // created. `referenceForDispatch` is atomic (validates every id before mutating any record).
+    let resolvedAttachments: ProviderAttachmentInput[] | undefined;
+    if (initialAttachmentIds && initialAttachmentIds.length > 0) {
+      if (!this.security.attachmentStore) {
+        throw new Error('no attachment store is configured for this daemon');
+      }
+      const records = await this.security.attachmentStore.referenceForDispatch(
+        initialAttachmentIds,
+        id,
+      );
+      resolvedAttachments = records.map((record) => ({
+        attachmentId: record.id,
+        path: record.path,
+        mimeType: record.mimeType,
+        byteLength: record.size,
+      }));
+    }
     const session = this.newSession(id, provider, cwd, prompt);
     this.store.create(session, 2);
     try {
@@ -425,6 +455,8 @@ export class SessionManager {
         ...(this.security.providerStateDirectory
           ? { providerStateDirectory: this.security.providerStateDirectory }
           : {}),
+        ...(resolvedAttachments ? { attachments: resolvedAttachments } : {}),
+        ...(outputSchema !== undefined ? { outputSchema } : {}),
         beforeWorkDelivery: async () => {
           if (controller.signal.aborted || this.shuttingDown) {
             throw new InteractiveSessionError('session_aborted', 'session start was cancelled');
@@ -479,6 +511,9 @@ export class SessionManager {
           ? { continuationEvidence: { ...handle.continuationEvidence } }
           : {}),
         ...(workspace ? { workspace } : {}),
+        ...(resolvedAttachments
+          ? { attachmentIds: resolvedAttachments.map((attachment) => attachment.attachmentId) }
+          : {}),
         done: Promise.resolve(),
       };
       this.runtime.set(id, runtime);
@@ -500,6 +535,11 @@ export class SessionManager {
       return session;
     } catch (error) {
       this.store.delete(id);
+      if (resolvedAttachments) {
+        await this.security.attachmentStore
+          ?.deleteAttachments(resolvedAttachments.map((attachment) => attachment.attachmentId))
+          .catch(() => undefined);
+      }
       throw error;
     } finally {
       signal?.removeEventListener('abort', relayAbort);
@@ -624,6 +664,19 @@ export class SessionManager {
       }
     }
     this.markCompleted(id);
+    if (runtime.attachmentIds && runtime.attachmentIds.length > 0) {
+      // Issue #59: recover attachment quota once the owning session reaches a terminal state
+      // (the event stream above always ends with one), rather than waiting for the 24h
+      // unreferenced-TTL sweep that never applies to attachments a session actually used.
+      await this.security.attachmentStore
+        ?.deleteAttachments(runtime.attachmentIds)
+        .catch((error: unknown) => {
+          this.logger.warn('failed to release attachments for a terminated session', {
+            sessionId: id,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+    }
   }
 
   private async prepareInteractiveEvent(

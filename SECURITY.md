@@ -28,7 +28,7 @@ actually demonstrated versus what follows from the design.
 - **Another process running as the same OS user with equivalent privileges.** If a process can
   already read your files, it can already do everything the CLI itself can do. This is a
   localhost trust boundary, not a sandbox between OS users or processes.
-- **A compromised legacy Claude or Codex CLI installation.** AgentDock spawns the CLI you already
+- **A compromised Claude or Codex CLI installation.** AgentDock spawns the CLI you already
   installed and authenticated; it does not vet, sandbox, or restrict what that CLI does once
   running.
 - **Malicious code already running with equivalent local privileges** (e.g. another app on the
@@ -44,14 +44,16 @@ The v2 provider path assigns explicit workspace trust and requires a trusted wor
 Agent SDK sessions. The SDK policy disables settings, MCP, hooks, plugins, skills, agents, and Bash;
 only the reviewed SDK auth sources (Anthropic API key, Bedrock, Vertex, or Foundry) are eligible.
 Claude.ai/subscription OAuth and `CLAUDE_CODE_OAUTH_TOKEN` are excluded. AgentDock never stores or
-logs credentials, and does not fall back from accepted SDK work to the legacy CLI under a different
+logs credentials, and does not fall back from accepted SDK work to the CLI compatibility transport
+under a different
 auth source. The `BrowserWindow` renderer sandbox described later in this file is unrelated to
 isolation of an agent's shell, filesystem, or network access.
 
 The implemented v2 path adds evidence-backed capability negotiation, default-untrusted workspaces,
 platform-specific sandbox states, approval/audit rules, credential boundaries, durable normalized
 history, and guarded transport fallback. The exact guarantees are bound to the negotiated transport
-and its evidence; the Claude SDK policy above must not be attributed to a legacy CLI transport. See
+and its evidence; the Claude SDK policy above must not be attributed to the CLI compatibility
+transport. See
 [Capability and security model for protocol v2](docs/capability-security-v2.md).
 
 ## Renderer never talks to the daemon directly

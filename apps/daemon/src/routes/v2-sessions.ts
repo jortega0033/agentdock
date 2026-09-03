@@ -23,7 +23,11 @@ import {
   workspaceLeaseMode,
   type WorkspaceExecutionLease,
 } from '../workspace-execution-lease.js';
-import { capabilityRequestForContinuation, resolveProviderV2Manifest } from '../provider-v2.js';
+import {
+  capabilityRequestForContinuation,
+  capabilityRequestForMultimodal,
+  resolveProviderV2Manifest,
+} from '../provider-v2.js';
 import { BoundedV2SseWriter } from '../v2-sse-writer.js';
 import {
   V2ProviderStartupError,
@@ -282,9 +286,10 @@ export function registerV2SessionRoutes(
         });
         return;
       }
-      const capabilityRequest = capabilityRequestForContinuation(
-        parsed.data.capabilities,
-        parsed.data.continuation,
+      const capabilityRequest = capabilityRequestForMultimodal(
+        capabilityRequestForContinuation(parsed.data.capabilities, parsed.data.continuation),
+        (parsed.data.initialAttachmentIds?.length ?? 0) > 0,
+        parsed.data.outputSchema !== undefined,
       );
       const negotiation = negotiateCapabilities({
         request: capabilityRequest,

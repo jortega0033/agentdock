@@ -336,6 +336,31 @@ function beginTurn(message) {
     notify('turn/started', { threadId, turn: turn(nativeTurnId, 'inProgress') });
     return;
   }
+  if ((scenario === 'multimodal' || scenario === 'multimodal-invalid-output') && turnCounter === 1) {
+    assert(Array.isArray(message.params.input), 'multimodal turn/start input was not an array');
+    const image = message.params.input.find((entry) => entry.type === 'localImage');
+    assert(!!image, 'multimodal turn/start missing a localImage input entry');
+    assert(image.path === '/fake/staged/image.png', 'localImage path did not match the staged attachment');
+    assert(
+      typeof message.params.outputSchema === 'object' && message.params.outputSchema !== null,
+      'multimodal turn/start missing outputSchema',
+    );
+    assert(
+      message.params.outputSchema.required?.[0] === 'answer',
+      'multimodal turn/start outputSchema did not match the negotiated schema',
+    );
+    notify('turn/started', { threadId, turn: turn(nativeTurnId, 'inProgress') });
+    const text =
+      scenario === 'multimodal-invalid-output' ? 'not valid json' : JSON.stringify({ answer: 42 });
+    notify('item/completed', {
+      threadId,
+      turnId: nativeTurnId,
+      item: { type: 'agentMessage', id: `message-${nativeTurnId}`, text },
+      completedAtMs: 2,
+    });
+    notify('turn/completed', { threadId, turn: turn(nativeTurnId, 'completed') });
+    return;
+  }
   if (scenario === 'subagent' && turnCounter === 1) {
     notify('turn/started', { threadId, turn: turn(nativeTurnId, 'inProgress') });
     const item = {

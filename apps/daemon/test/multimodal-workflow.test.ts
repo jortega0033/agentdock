@@ -103,6 +103,56 @@ describe('private attachment staging', () => {
     } satisfies Partial<AttachmentStoreError>);
   });
 
+  it('referenceForDispatch resolves the real staged path -- unlike reference(), which never exposes it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-dock-attachments-dispatch-'));
+    const staged = join(root, 'staged');
+    const store = new AttachmentStore(staged, join(root, 'manifest.json'));
+    await store.load();
+    const bytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from('fixture'),
+    ]);
+    const attachment = await store.stage({
+      fileName: 'image.png',
+      declaredSize: bytes.length,
+      stream: chunks(bytes),
+    });
+    const sessionId = '123e4567-e89b-42d3-a456-426614174001';
+    const [record] = await store.referenceForDispatch([attachment.id], sessionId);
+    expect(record!.path.startsWith(staged)).toBe(true);
+    expect(record!.mimeType).toBe('image/png');
+
+    const otherSessionId = '123e4567-e89b-42d3-a456-426614174002';
+    await expect(store.referenceForDispatch([attachment.id], otherSessionId)).rejects.toMatchObject({
+      code: 'attachment_not_found',
+    } satisfies Partial<AttachmentStoreError>);
+
+    await expect(
+      store.referenceForDispatch(['00000000-0000-4000-8000-000000000000'], sessionId),
+    ).rejects.toMatchObject({ code: 'attachment_not_found' } satisfies Partial<AttachmentStoreError>);
+  });
+
+  it('deleteAttachments immediately removes referenced files, recovering quota without waiting for the TTL sweep', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-dock-attachments-delete-'));
+    const store = new AttachmentStore(join(root, 'staged'), join(root, 'manifest.json'));
+    await store.load();
+    const bytes = Buffer.from('x');
+    const attachment = await store.stage({
+      fileName: 'file.txt',
+      declaredSize: bytes.length,
+      stream: chunks(bytes),
+    });
+    const sessionId = '123e4567-e89b-42d3-a456-426614174003';
+    await store.reference([attachment.id], sessionId);
+    expect(store.list()).toHaveLength(1);
+
+    await store.deleteAttachments([attachment.id]);
+    expect(store.list()).toHaveLength(0);
+
+    // Deleting an already-gone or unknown id is not an error -- release calls are idempotent.
+    await expect(store.deleteAttachments([attachment.id])).resolves.toBeUndefined();
+  });
+
   it('expires a referenced attachment once it exceeds maxReferencedAgeMs, not just unreferenced ones (issue #67)', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agent-dock-attachments-referenced-age-'));
     let clock = new Date('2026-01-01T00:00:00.000Z');
@@ -266,6 +316,22 @@ describe('multimodal daemon routes', () => {
     });
     expect(validation.statusCode, validation.body).toBe(200);
     expect(validation.json()).toMatchObject({ valid: false, errors: [{ path: '$/answer' }] });
+
+    const attachmentId = upload.json().id as string;
+    const deletion = await app.inject({
+      method: 'DELETE',
+      url: `/v2/attachments/${attachmentId}`,
+      headers: { authorization: 'Bearer token' },
+    });
+    expect(deletion.statusCode, deletion.body).toBe(204);
+    expect(store.list()).toHaveLength(0);
+    // Deleting again (or an id that never existed) is still a clean no-op, not an error.
+    const redeletion = await app.inject({
+      method: 'DELETE',
+      url: `/v2/attachments/${attachmentId}`,
+      headers: { authorization: 'Bearer token' },
+    });
+    expect(redeletion.statusCode, redeletion.body).toBe(204);
     await app.close();
   });
 });

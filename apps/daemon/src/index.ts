@@ -44,14 +44,19 @@ async function main() {
   const registry = buildProviderRegistry(logger);
   const durableStateDirectory = stateDirectory({ appId });
   const subagentStore = new SubagentGraphStore(join(durableStateDirectory, 'subagents-v1.json'));
-  const worktreeManager = new OwnedWorktreeManager(join(durableStateDirectory, 'worktrees'), join(durableStateDirectory, 'worktrees-v1.json'));
+  const trustStore = new WorkspaceTrustStore(
+    join(durableStateDirectory, 'workspace-trust-v1.json'),
+  );
+  const worktreeManager = new OwnedWorktreeManager(
+    join(durableStateDirectory, 'worktrees'),
+    join(durableStateDirectory, 'worktrees-v1.json'),
+    undefined,
+    trustStore,
+  );
   await worktreeManager.load();
   const attachmentStore = new AttachmentStore(join(durableStateDirectory, 'attachments-v1'), join(durableStateDirectory, 'attachments-v1.json'));
   await attachmentStore.load();
   const auditStore = new AuditStore(join(durableStateDirectory, 'audit-v1.jsonl'));
-  const trustStore = new WorkspaceTrustStore(
-    join(durableStateDirectory, 'workspace-trust-v1.json'),
-  );
   const sessionStoreDirectory = join(durableStateDirectory, 'sessions-v1');
   const sessionStore = new FileSessionStore(sessionStoreDirectory);
   const executionGraphStore = new FileExecutionGraphStore(

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu } from 'electron';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
@@ -74,6 +74,10 @@ type DaemonStatus =
 let daemonChild: ChildProcess | undefined;
 let client: AgentDockClient | undefined;
 let mainWindow: BrowserWindow | undefined;
+let tray: Tray | undefined;
+// Closing the window hides it to the tray instead of quitting (see createWindow's 'close'
+// handler below); only a real quit (tray menu, OS shutdown, before-quit) should let it through.
+let isQuitting = false;
 const activeSessionIds = new Set<string>();
 const streamAborts = new Map<string, AbortController>();
 const activeInteractiveSessionIds = new Set<string>();
@@ -576,6 +580,48 @@ function createWindow(): void {
   mainWindow.webContents.on('did-finish-load', () => {
     if (client) sendStatus({ state: 'ready' });
   });
+
+  // The daemon keeps running for the tray icon's sake; only a real quit should tear it down, so
+  // the window's own close button hides it instead (see the tray menu's Quit and before-quit).
+  mainWindow.on('close', (event) => {
+    if (isQuitting) return;
+    event.preventDefault();
+    mainWindow?.hide();
+  });
+}
+
+function createTray(): void {
+  const iconPath = resolveWindowIcon({
+    appPath: app.getAppPath(),
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+  });
+  if (!iconPath) return; // no icon asset resolved (see resolveWindowIcon); skip rather than show a blank tray glyph
+  tray = new Tray(iconPath);
+  tray.setToolTip('AgentDock');
+  tray.setContextMenu(
+    Menu.buildFromTemplate([
+      {
+        label: 'Open AgentDock',
+        click: () => {
+          mainWindow?.show();
+          mainWindow?.focus();
+        },
+      },
+      { type: 'separator' },
+      {
+        label: 'Quit',
+        click: () => {
+          isQuitting = true;
+          app.quit();
+        },
+      },
+    ]),
+  );
+  tray.on('click', () => {
+    mainWindow?.show();
+    mainWindow?.focus();
+  });
 }
 
 type IpcHandlerListener = Parameters<typeof ipcMain.handle>[1];
@@ -846,17 +892,23 @@ if (gotSingleInstanceLock) {
   app.whenReady().then(() => {
     spawnDaemon();
     createWindow();
+    createTray();
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow();
+      else mainWindow?.show();
     });
   });
 
   app.on('window-all-closed', () => {
+    // The window hides rather than closes (see createWindow's 'close' handler), so this only
+    // fires on an actual close (e.g. macOS's Cmd+Q path); the tray icon otherwise keeps the app
+    // and daemon alive after the window is hidden.
     if (process.platform !== 'darwin') app.quit();
   });
 
   app.on('before-quit', (event) => {
+    isQuitting = true;
     if (pendingInteractiveCreates.isClosing || !daemonChild) return;
     pendingInteractiveCreates.beginShutdown();
     event.preventDefault();

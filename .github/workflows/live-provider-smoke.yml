@@ -1,0 +1,61 @@
+name: Live provider smoke
+
+# Issue #65: an explicit opt-in, version-scoped smoke matrix that drives one real Protocol v2
+# session per production transport (Claude Agent SDK, Claude CLI one-shot compatibility, Codex
+# app-server, Codex exec one-shot compatibility) using a genuinely installed and authenticated
+# provider CLI. This is NOT part of the everyday CI gate: it needs a runner with real, licensed
+# Claude/Codex credentials, which no GitHub-hosted runner has. On a stock GitHub-hosted runner
+# every case reports a clean `skipped_missing_binary`/`skipped_missing_auth` -- that is expected,
+# not a failure. To make this meaningful, point it at a self-hosted runner with both CLIs
+# installed and authenticated, and set the `AGENT_DOCK_LIVE_PROVIDER_SMOKE` variable in a
+# protected GitHub Environment scoped to that runner. The `environment:` gate below is what makes
+# this "protected": a run against it needs whatever required reviewers/secrets that environment is
+# configured with, separate from ordinary push/PR CI.
+#
+# Never runs on `push` or `pull_request` -- manual dispatch or the weekly schedule only.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '17 6 * * 1' # Mondays, 06:17 UTC -- an arbitrary off-peak time, not a meaningful bound.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-provider-smoke-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Live provider smoke matrix
+    runs-on: windows-latest
+    environment: live-provider-smoke
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run live provider smoke matrix
+        working-directory: apps/daemon
+        env:
+          AGENT_DOCK_LIVE_PROVIDER_SMOKE: ${{ vars.AGENT_DOCK_LIVE_PROVIDER_SMOKE || '0' }}
+        run: pnpm smoke:live-providers
+
+      - name: Upload redacted evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: live-provider-smoke-evidence
+          path: apps/daemon/live-provider-smoke-evidence.jsonl
+          if-no-files-found: ignore
+          retention-days: 90

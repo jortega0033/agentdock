@@ -263,6 +263,23 @@ describe('App security flow', () => {
     expect(screen.queryByText(/bash sandboxed/i)).not.toBeInTheDocument();
   });
 
+  it('labels every advanced panel with its real implementation state (issue #62)', async () => {
+    render(<App />);
+    await screen.findByText('Claude Code');
+
+    // MCP, Components, and Workflow are all scaffold-only regardless of provider; Child agents
+    // reads as unsupported only because no session is selected yet in this test.
+    expect(screen.getAllByText('Scaffold only').length).toBeGreaterThanOrEqual(3);
+    expect(screen.getByText('Unsupported')).toBeInTheDocument();
+    expect(
+      screen.getByText(/Configuration and inspection only, for either provider/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Files you stage here are not included in any run/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Select a session to see its child-agent state/)).toBeInTheDocument();
+  });
+
   it('requires explicit incarnation-bound trust before starting and supports Escape cancellation', async () => {
     const untrusted = { ...TRUSTED_WORKSPACE, state: 'untrusted' as const };
     const { bridge } = installBridge({

@@ -1,0 +1,157 @@
+name: Release publish
+
+# Issue #61: the one workflow that actually creates a GitHub Release. Deliberately separate from
+# release-candidate.yml (issue #66), which only ever produces reviewable evidence and never
+# publishes anything -- this workflow *consumes* a specific release-candidate run's evidence
+# bundle (by its run id, an explicit human choice, not "whatever ran most recently") and refuses
+# to publish unless that run's manifest says `ready: true`. See docs/release-checklist.md for the
+# full procedure this automates, and its "Rollback" section for undoing a publish.
+#
+# Never runs on push or pull_request -- workflow_dispatch only, and gated by the `release`
+# GitHub Environment (see docs/release-checklist.md#recommended-environment-protection-for-release
+# for the protection rules this repo's admin should configure there; this workflow does not, and
+# cannot, configure them itself). A fork or a pull_request can never reach a run of this workflow:
+# workflow_dispatch is only triggerable by someone with write access to this repository, through
+# the Actions UI or `gh workflow run`, and an environment with required reviewers additionally
+# pauses every run for approval before any of its secrets or `contents: write` permission are
+# granted.
+#
+# This repository has no code-signing certificate (see docs/packaging.md#unsigned-installer-and-smartscreen);
+# every release this workflow creates is `unsigned`, exactly like every release-candidate manifest
+# already says. Wiring an actual signing step is explicitly out of scope for this change --
+# tracked as a separate, later follow-up once a certificate exists, not simulated or faked here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_candidate_run_id:
+        description: >-
+          The exact run ID of a completed release-candidate.yml run to publish from (see that
+          workflow's run URL, e.g. .../actions/runs/<this number>). Its release-candidate-evidence
+          artifact is downloaded and its manifest.json is what this workflow actually checks.
+        required: true
+      tag:
+        description: 'Git tag for this release, e.g. v0.2.0. Must not already exist.'
+        required: true
+      draft:
+        description: 'Create the GitHub Release as a draft (recommended: review it, then publish by hand).'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-publish-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish a release from an already-ready candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The one gate this whole workflow exists to enforce: a run against the `release` environment
+    # needs whatever required reviewers/branch restriction that environment is configured with in
+    # this repository's Settings, independent of and in addition to everything below.
+    environment: release
+    permissions:
+      contents: write
+      actions: read # to download release-candidate.yml's evidence artifact by run id
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Download the release-candidate evidence bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-candidate-evidence
+          run-id: ${{ inputs.release_candidate_run_id }}
+          github-token: ${{ github.token }}
+          path: evidence
+
+      - name: Verify the candidate is actually ready, tied to this exact tag's commit
+        id: verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="evidence/release-candidate-manifest.json"
+          if [ ! -f "$manifest" ]; then
+            echo "::error::No release-candidate-manifest.json in the downloaded evidence bundle"
+            exit 1
+          fi
+          ready=$(node -p "require('./${manifest}').ready")
+          if [ "$ready" != "true" ]; then
+            failed=$(node -p "require('./${manifest}').failedGates.join(', ')")
+            echo "::error::Release candidate run ${{ inputs.release_candidate_run_id }} is NOT ready. Failed gates: ${failed}"
+            exit 1
+          fi
+          dirty=$(node -p "require('./${manifest}').dirty")
+          if [ "$dirty" == "true" ]; then
+            echo "::error::Release candidate was built from a dirty working tree -- refusing to publish an unreproducible build"
+            exit 1
+          fi
+          commit=$(node -p "require('./${manifest}').commit")
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "Candidate is ready. Commit: $commit"
+
+      - name: Verify the installer's checksum matches the manifest exactly
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="evidence/release-candidate-manifest.json"
+          installer=$(ls evidence/AgentDock-Setup-*.exe 2>/dev/null | head -n1)
+          if [ -z "$installer" ]; then
+            echo "::error::No installer .exe found in the downloaded evidence bundle"
+            exit 1
+          fi
+          expected=$(node -e "
+            const m = require('./${manifest}');
+            const entry = (m.artifacts || []).find(a => a.name === 'installer');
+            if (!entry || !entry.sha256) {
+              console.error('No installer entry with a sha256 in the manifest\'s artifacts list');
+              process.exit(1);
+            }
+            console.log(entry.sha256);
+          ")
+          actual=$(sha256sum "$installer" | cut -d' ' -f1)
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::Installer checksum mismatch: manifest says ${expected}, downloaded file hashes to ${actual}"
+            exit 1
+          fi
+          echo "Installer checksum verified: $actual"
+
+      - name: Write a checksums file for the release
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd evidence
+          # sbom.cdx.json is best-effort in release-candidate.yml (continue-on-error), so it may
+          # be absent from this evidence bundle even on an otherwise-ready candidate -- hash only
+          # what's actually present rather than assuming every optional artifact exists.
+          files=(AgentDock-Setup-*.exe release-candidate-manifest.json)
+          if [ -f sbom.cdx.json ]; then files+=(sbom.cdx.json); fi
+          sha256sum "${files[@]}" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          draft_flag="--draft"
+          if [ "${{ inputs.draft }}" != "true" ]; then draft_flag=""; fi
+          assets=(
+            evidence/AgentDock-Setup-*.exe
+            evidence/release-candidate-manifest.json
+            evidence/SHA256SUMS.txt
+          )
+          if [ -f evidence/sbom.cdx.json ]; then
+            assets+=(evidence/sbom.cdx.json)
+          else
+            echo "::warning::No sbom.cdx.json in the evidence bundle -- publishing without it. Check the manifest's sbom.available field."
+          fi
+          gh release create "${{ inputs.tag }}" \
+            --target "${{ steps.verify.outputs.commit }}" \
+            --title "AgentDock ${{ inputs.tag }}" \
+            $draft_flag \
+            --notes "Unsigned Windows build. See the attached release-candidate-manifest.json for exact gate results, SBOM availability, and provenance, and docs/release-checklist.md for what this evidence does and does not prove." \
+            "${assets[@]}"

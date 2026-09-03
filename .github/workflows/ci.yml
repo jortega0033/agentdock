@@ -60,6 +60,12 @@ jobs:
       - name: Docs claim check
         run: pnpm docs:claim-check
 
+      # Production dependencies only (issue #61): a vulnerable devDependency (e.g. the documented
+      # electron-builder dev-tool-chain exception, docs/packaging.md#current-dependency-audit-exception)
+      # never blocks this gate, but anything reachable from an actually-shipped runtime path does.
+      - name: Production dependency audit
+        run: pnpm audit --prod
+
       - name: Provider conformance
         run: pnpm test:provider-conformance
 

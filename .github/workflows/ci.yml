@@ -57,6 +57,9 @@ jobs:
           python scripts/assets/test_svg_safety.py
           python scripts/assets/validate_assets.py
 
+      - name: Docs claim check
+        run: pnpm docs:claim-check
+
       - name: Provider conformance
         run: pnpm test:provider-conformance
 

@@ -64,14 +64,22 @@ never add a generic IPC passthrough to the preload bridge.
 ## Before opening a PR
 
 ```bash
-pnpm typecheck   # strict TypeScript, no `any` without a comment justifying it
+pnpm typecheck        # strict TypeScript, no `any` without a comment justifying it
 pnpm lint
-pnpm test        # must pass without a real Claude/Codex install or any paid API call
+pnpm test             # must pass without a real Claude/Codex install or any paid API call
 pnpm build
-pnpm audit --prod # currently passes; treat any production/runtime finding as a blocker
-pnpm audit       # currently exits nonzero for two documented electron-builder dev-tool advisories;
-                 # compare any new finding with docs/packaging.md
+pnpm docs:claim-check # every public doc's relative links resolve; no "legacy Claude/Codex CLI"
+                       # branding; docs/capability-matrix.md still covers every required category
+pnpm audit --prod     # currently passes; treat any production/runtime finding as a blocker
+pnpm audit            # currently exits nonzero for two documented electron-builder dev-tool
+                       # advisories; compare any new finding with docs/packaging.md
 ```
+
+If you touched a public Markdown file (README, `docs/*.md`, `CONTRIBUTING.md`, `DEVELOPMENT.md`,
+`SECURITY.md`) and it makes a capability claim, check it against
+[docs/capability-matrix.md](docs/capability-matrix.md) first: every public capability claim should
+map to a row there (or an explicit design-target label), not restate what a provider's marketing
+page says. See [docs/capability-matrix.md#keeping-this-matrix-honest](docs/capability-matrix.md#keeping-this-matrix-honest).
 
 If you touched anything under `apps/desktop/electron/` (main process, preload, or packaging
 config), also run `pnpm package:win` (Windows) and confirm the app still launches from

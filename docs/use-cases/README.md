@@ -8,9 +8,11 @@ This catalog is for downstream products built from AgentDock. It is not AgentDoc
 delivery roadmap.
 
 AgentDock is most useful as the supervised runtime inside a focused workflow product: inspect a
-real workspace, show progress and evidence, pause before consequential actions, produce a
-reviewable artifact, and leave an audit trail. A generic chat window does not use enough of the
-boilerplate to be a strong product wedge.
+real workspace, show progress as normalized activity, pause before consequential actions where the
+selected provider and transport support approvals, and produce a reviewable artifact with a durable
+record of the approval decisions made along the way (see the
+[capability matrix](../capability-matrix.md) for exactly which transports support what). A generic
+chat window does not use enough of the boilerplate to be a strong product wedge.
 
 ## How to read the directory
 
@@ -220,12 +222,17 @@ Most of the concepts above can share the same product skeleton:
 
 1. **Intake:** one folder, case, issue, alert, transaction, or document set enters a bounded session.
 2. **Plan:** the agent states its steps, requested capabilities, data sources, and expected artifact.
-3. **Evidence:** progress appears as a structured timeline with source and tool provenance.
-4. **Gate:** questions and consequential actions enter an explicit human review queue.
+3. **Activity:** progress appears as a structured timeline of normalized events; whether it also
+   carries source/tool provenance a user can audit depends on what the product layer adds on top.
+4. **Gate:** questions and consequential actions enter an explicit human review queue, on the
+   transports that support approvals (see the [capability matrix](../capability-matrix.md)).
 5. **Action:** approved tools operate only within the selected workspace and integration scope.
 6. **Verification:** the agent reruns checks and separates observed facts from inference.
 7. **Artifact:** the product exports a diff, matrix, brief, workpaper, issue, or action packet.
-8. **Memory:** lineage, decisions, and safe normalized history support resume, fork, and audit.
+8. **Memory:** durable lineage and history exist for every session; resume and fork are negotiated
+   capabilities that vary by provider and transport, and the durable audit record covers approval
+   decisions specifically, not a general activity log (see the
+   [capability matrix](../capability-matrix.md)).
 
 This skeleton is a better starting point than preserving the reference desktop's generic composer.
 Replace the composer with the domain intake form, the provider panel with policy-aware defaults,

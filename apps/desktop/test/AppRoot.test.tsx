@@ -1,6 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AppRoot } from '../src/AppRoot.js';
+import { getBridge } from '../src/bridge.js';
 import type { AgentDockBridge, DaemonStatus } from '../src/window.js';
 
 function realBridge(): AgentDockBridge {
@@ -62,20 +63,24 @@ describe('AppRoot demo-mode lifecycle', () => {
     const original = window.agentDock;
     render(<AppRoot />);
 
+    // window.agentDock itself must never be reassigned -- Electron's contextBridge.exposeInMainWorld
+    // makes it non-writable in the real app, so demo mode swaps through bridge.ts's override instead.
     expect(screen.queryByText(/demo mode/i)).not.toBeInTheDocument();
+    expect(getBridge()).toBe(original);
     expect(
-      (window.agentDock as unknown as { __agentDockDemo?: boolean }).__agentDockDemo,
+      (getBridge() as unknown as { __agentDockDemo?: boolean }).__agentDockDemo,
     ).toBeUndefined();
 
     fireEvent.click(await screen.findByRole('button', { name: 'Try a demo' }));
 
     expect(await screen.findByText(/demo mode/i)).toBeInTheDocument();
-    expect((window.agentDock as unknown as { __agentDockDemo?: boolean }).__agentDockDemo).toBe(
-      true,
-    );
+    expect(getBridge()).not.toBe(original);
+    expect((getBridge() as unknown as { __agentDockDemo?: boolean }).__agentDockDemo).toBe(true);
+    expect(window.agentDock).toBe(original);
 
     fireEvent.click(screen.getByRole('button', { name: 'Exit demo' }));
 
+    expect(getBridge()).toBe(original);
     expect(window.agentDock).toBe(original);
     expect(screen.queryByText(/demo mode/i)).not.toBeInTheDocument();
   });

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { McpCatalogV2, McpServerDescriptorV2, McpTransportV2, ProviderId } from '@agent-dock/shared';
+import { getBridge } from '../bridge.js';
 
 interface McpPanelProps {
   provider: ProviderId;
@@ -33,7 +34,7 @@ export function McpPanel({ provider, cwd }: McpPanelProps) {
     setBusy(true);
     setError(undefined);
     try {
-      const result = await window.agentDock.listMcpServers(provider, cwd.trim());
+      const result = await getBridge().listMcpServers(provider, cwd.trim());
       setServers(result.servers);
       setRevision(result.revision);
     } catch (failure) {
@@ -77,7 +78,7 @@ export function McpPanel({ provider, cwd }: McpPanelProps) {
     const config = transport === 'stdio'
       ? { transport: 'stdio' as const, command: endpoint.trim(), args: args.trim() ? args.trim().split(/\s+/).slice(0, 128) : [] }
       : { transport: 'streamable_http' as const, url: endpoint.trim() };
-    await mutate(() => window.agentDock.configureMcpServer(editing
+    await mutate(() => getBridge().configureMcpServer(editing
       ? { provider, cwd: cwd.trim(), action: 'edit', serverId: editing, name: name.trim(), config }
       : { provider, cwd: cwd.trim(), action: 'add', name: name.trim(), scope: 'project', config }));
     setEditing(undefined);
@@ -88,7 +89,7 @@ export function McpPanel({ provider, cwd }: McpPanelProps) {
 
   async function loadCatalog(serverId: string): Promise<void> {
     try {
-      const catalog = await window.agentDock.getMcpCatalog(provider, serverId, cwd.trim());
+      const catalog = await getBridge().getMcpCatalog(provider, serverId, cwd.trim());
       setCatalogs((current) => ({ ...current, [serverId]: catalog }));
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'Failed to load MCP catalog');
@@ -97,7 +98,7 @@ export function McpPanel({ provider, cwd }: McpPanelProps) {
 
   async function startOAuth(serverId: string): Promise<void> {
     try {
-      const status = await window.agentDock.startMcpOAuth(provider, serverId, cwd.trim());
+      const status = await getBridge().startMcpOAuth(provider, serverId, cwd.trim());
       setNotice(status.authorizationHost ? `Opened ${status.authorizationHost} in your browser.` : status.safeSummary ?? `OAuth: ${status.status}`);
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : 'Failed to start MCP OAuth');
@@ -128,11 +129,11 @@ export function McpPanel({ provider, cwd }: McpPanelProps) {
             {server.sessionIds.length > 0 && <div className="mcp-server__meta">Used by {server.sessionIds.length} session{server.sessionIds.length === 1 ? '' : 's'}</div>}
             <div className="mcp-server__actions">
               <button type="button" disabled={busy} aria-label={`Catalog ${server.name}`} onClick={() => void loadCatalog(server.id)}>Catalog</button>
-              {server.capabilities.reload && <button type="button" disabled={busy} aria-label={`Reload ${server.name}`} onClick={() => void mutate(() => window.agentDock.actionMcpServer({ provider, cwd: cwd.trim(), serverId: server.id, action: 'reload' }))}>Reload</button>}
-              {server.capabilities.configure && <button type="button" disabled={busy} aria-label={`${server.enabled ? 'Disable' : 'Enable'} ${server.name}`} onClick={() => void mutate(() => window.agentDock.configureMcpServer({ provider, cwd: cwd.trim(), serverId: server.id, action: server.enabled ? 'disable' : 'enable' }))}>{server.enabled ? 'Disable' : 'Enable'}</button>}
+              {server.capabilities.reload && <button type="button" disabled={busy} aria-label={`Reload ${server.name}`} onClick={() => void mutate(() => getBridge().actionMcpServer({ provider, cwd: cwd.trim(), serverId: server.id, action: 'reload' }))}>Reload</button>}
+              {server.capabilities.configure && <button type="button" disabled={busy} aria-label={`${server.enabled ? 'Disable' : 'Enable'} ${server.name}`} onClick={() => void mutate(() => getBridge().configureMcpServer({ provider, cwd: cwd.trim(), serverId: server.id, action: server.enabled ? 'disable' : 'enable' }))}>{server.enabled ? 'Disable' : 'Enable'}</button>}
               {server.capabilities.configure && server.transport !== 'legacy_sse_read_only' && <button type="button" disabled={busy} aria-label={`Edit ${server.name}`} onClick={() => beginEdit(server)}>Edit</button>}
               {server.capabilities.oauth && <button type="button" disabled={busy} aria-label={`Sign in to ${server.name}`} onClick={() => void startOAuth(server.id)}>Sign in</button>}
-              {server.capabilities.configure && <button type="button" className="button--danger" disabled={busy} aria-label={`Remove ${server.name}`} onClick={() => void mutate(() => window.agentDock.configureMcpServer({ provider, cwd: cwd.trim(), serverId: server.id, action: 'remove' }))}>Remove</button>}
+              {server.capabilities.configure && <button type="button" className="button--danger" disabled={busy} aria-label={`Remove ${server.name}`} onClick={() => void mutate(() => getBridge().configureMcpServer({ provider, cwd: cwd.trim(), serverId: server.id, action: 'remove' }))}>Remove</button>}
             </div>
             {catalogs[server.id] && <ul className="mcp-catalog" aria-label={`${server.name} catalog`}>{catalogs[server.id]!.items.map((item) => <li key={`${item.kind}:${item.id}`}><strong>{item.name}</strong> <span>{item.kind}{item.kind === 'tool' && item.destructive ? ' · approval required' : ''}</span></li>)}</ul>}
           </article>

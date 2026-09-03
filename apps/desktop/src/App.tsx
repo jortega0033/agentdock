@@ -11,6 +11,7 @@ import type {
   WorkspaceTrustViewV2,
 } from '@agent-dock/shared';
 import { PROVIDER_DISPLAY_NAMES } from '@agent-dock/shared';
+import { getBridge } from './bridge.js';
 import type {
   RendererInteractionResolution,
   RendererQuestionResponse,
@@ -109,7 +110,7 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
 
   useEffect(() => {
     let cancelled = false;
-    window.agentDock.getDaemonStatus().then((status) => {
+    getBridge().getDaemonStatus().then((status) => {
       if (cancelled) return;
       if (status.state === 'ready') setDaemonState('ready');
       else if (status.state === 'unavailable') {
@@ -117,7 +118,7 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
         setDaemonError(status.error);
       }
     });
-    const unsubscribeStatus = window.agentDock.onDaemonStatus((status) => {
+    const unsubscribeStatus = getBridge().onDaemonStatus((status) => {
       setDaemonState(status.state);
       setDaemonError(status.state === 'unavailable' ? status.error : undefined);
     });
@@ -133,11 +134,11 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
   }, []);
 
   useEffect(() => {
-    // A future refactor could set window.agentDock to the demo bridge without going through
+    // A future refactor could set the bridge override to the demo bridge without going through
     // AppRoot's enterDemoMode (or vice versa) -- that would silently mislabel demo data as real
     // (or vice versa), so surface it loudly instead of trusting the `demoMode` prop alone.
     const bridgeIsDemo = Boolean(
-      (window.agentDock as unknown as { __agentDockDemo?: boolean }).__agentDockDemo,
+      (getBridge() as unknown as { __agentDockDemo?: boolean }).__agentDockDemo,
     );
     if (bridgeIsDemo !== demoMode) {
       console.error('AgentDock: demo-mode flag and active bridge disagree — refusing to trust labeling');
@@ -147,7 +148,7 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
   useEffect(() => {
     if (daemonState !== 'ready') return;
     let cancelled = false;
-    void window.agentDock
+    void getBridge()
       .listProvidersV2()
       .then((statuses) => {
         if (!cancelled) setProviders(statuses);
@@ -185,7 +186,7 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
             if (cancelled) return;
             dispatchWorkspace({ type: 'replace_history', sessionId: session.id, events });
             if (!isTerminal(session))
-              await window.agentDock.reconnectInteractiveSession(session.id);
+              await getBridge().reconnectInteractiveSession(session.id);
           }),
         );
       } catch (error) {
@@ -212,10 +213,10 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
   }, [catalogLoaded, workspace, demoMode]);
 
   useEffect(() => {
-    const unsubscribeEvents = window.agentDock.onInteractiveSessionEvent((sessionId, event) => {
+    const unsubscribeEvents = getBridge().onInteractiveSessionEvent((sessionId, event) => {
       dispatchOrQueue(sessionId, { type: 'append_event', event });
     });
-    const unsubscribeNotices = window.agentDock.onInteractiveSessionStreamNotice(
+    const unsubscribeNotices = getBridge().onInteractiveSessionStreamNotice(
       (sessionId, notice) => {
         if (notice.type === 'replay_reset') {
           dispatchWorkspace({ type: 'replay_reset', session: notice.session });
@@ -224,7 +225,7 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
         dispatchWorkspace({ type: 'stream_error', sessionId, message: notice.message });
       },
     );
-    const unsubscribeInteractions = window.agentDock.onInteractionRequested(
+    const unsubscribeInteractions = getBridge().onInteractionRequested(
       (sessionId, interaction) => {
         setInteractionError(undefined);
         dispatchOrQueue(sessionId, {
@@ -235,7 +236,7 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
         });
       },
     );
-    const unsubscribeResolutions = window.agentDock.onInteractionResolved(
+    const unsubscribeResolutions = getBridge().onInteractionResolved(
       (sessionId: string, resolution: RendererInteractionResolution) => {
         dispatchOrQueue(sessionId, {
           type: 'interaction_resolved',
@@ -257,7 +258,7 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
   const startInteractiveSession = useCallback(async () => {
     setCreating(true);
     try {
-      const session = await window.agentDock.createInteractiveSession({
+      const session = await getBridge().createInteractiveSession({
         provider,
         cwd: cwd.trim(),
         prompt: prompt.trim(),
@@ -283,7 +284,7 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
     if (!prompt.trim()) return setFormError('prompt is required');
     setCreating(true);
     try {
-      const trust = await window.agentDock.inspectWorkspace(cwd.trim());
+      const trust = await getBridge().inspectWorkspace(cwd.trim());
       setWorkspaceTrust(trust);
       if (trust.state !== 'trusted') return setTrustPrompt(trust);
       await startInteractiveSession();
@@ -299,7 +300,7 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
     setTrustBusy(true);
     setTrustError(undefined);
     try {
-      const trust = await window.agentDock.setWorkspaceTrust(trustPrompt.workspaceId, {
+      const trust = await getBridge().setWorkspaceTrust(trustPrompt.workspaceId, {
         cwd: cwd.trim(),
         incarnation: trustPrompt.incarnation,
         state: 'trusted',
@@ -329,7 +330,7 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
     const target = sessionId ?? workspaceRef.current.selectedSessionId;
     if (!target) return;
     try {
-      await window.agentDock.cancelInteractiveSession(target);
+      await getBridge().cancelInteractiveSession(target);
     } catch (error) {
       setFormError(error instanceof Error ? error.message : 'failed to cancel session');
     }
@@ -341,7 +342,7 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
       setInteractionBusy(true);
       setInteractionError(undefined);
       try {
-        await window.agentDock.respondApproval(selectedInteraction.interactionHandle, decision);
+        await getBridge().respondApproval(selectedInteraction.interactionHandle, decision);
       } catch (error) {
         setInteractionError(
           `${error instanceof Error ? error.message : 'approval response failed'}; the request will fail closed`,
@@ -364,7 +365,7 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
       setInteractionBusy(true);
       setInteractionError(undefined);
       try {
-        await window.agentDock.answerQuestions(selectedInteraction.interactionHandle, answers);
+        await getBridge().answerQuestions(selectedInteraction.interactionHandle, answers);
       } catch (error) {
         setInteractionError(
           `${error instanceof Error ? error.message : 'question response failed'}; the request will fail closed`,
@@ -389,8 +390,8 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
       try {
         const operation =
           kind === 'resume'
-            ? window.agentDock.resumeInteractiveSession
-            : window.agentDock.forkInteractiveSession;
+            ? getBridge().resumeInteractiveSession
+            : getBridge().forkInteractiveSession;
         const session = await operation(selectedEntry.session.id, {
           prompt: prompt.trim(),
           capabilities: INTERACTIVE_CAPABILITIES,
@@ -413,7 +414,7 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
   const handleDelete = useCallback(async () => {
     if (!selectedEntry || !isTerminal(selectedEntry.session)) return;
     try {
-      await window.agentDock.deleteInteractiveSession(selectedEntry.session.id);
+      await getBridge().deleteInteractiveSession(selectedEntry.session.id);
       interactionProjectorsRef.current.delete(selectedEntry.session.id);
       dispatchWorkspace({ type: 'delete', sessionId: selectedEntry.session.id });
     } catch (error) {
@@ -427,7 +428,7 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
     setFormError(undefined);
     try {
       setWorkspaceTrust(
-        await window.agentDock.setWorkspaceTrust(workspaceTrust.workspaceId, {
+        await getBridge().setWorkspaceTrust(workspaceTrust.workspaceId, {
           cwd: cwd.trim(),
           incarnation: workspaceTrust.incarnation,
           state: 'untrusted',
@@ -665,7 +666,7 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
                     type="button"
                     disabled={creating}
                     onClick={async () => {
-                      const directory = await window.agentDock.selectDirectory();
+                      const directory = await getBridge().selectDirectory();
                       if (directory) {
                         setCwd(directory);
                         setWorkspaceTrust(undefined);
@@ -869,7 +870,7 @@ async function readAllSessions(): Promise<AgentSessionV2[]> {
   const seenCursors = new Set<string>();
   let cursor: string | undefined;
   for (let pageIndex = 0; pageIndex < MAX_CATALOG_PAGES; pageIndex += 1) {
-    const page: SessionListV2Page = await window.agentDock.listInteractiveSessions({
+    const page: SessionListV2Page = await getBridge().listInteractiveSessions({
       limit: CATALOG_PAGE_LIMIT,
       ...(cursor ? { cursor } : {}),
     });
@@ -887,7 +888,7 @@ async function readAllHistory(sessionId: string): Promise<AgentEventV2Envelope[]
   const seenCursors = new Set<string>();
   let cursor: string | undefined;
   for (let pageIndex = 0; pageIndex < MAX_CATALOG_PAGES; pageIndex += 1) {
-    const page: SessionEventHistoryV2Page = await window.agentDock.readInteractiveSessionHistory(
+    const page: SessionEventHistoryV2Page = await getBridge().readInteractiveSessionHistory(
       sessionId,
       { limit: CATALOG_PAGE_LIMIT, ...(cursor ? { cursor } : {}) },
     );

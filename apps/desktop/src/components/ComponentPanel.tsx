@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { ProviderComponentDescriptorV2, ProviderComponentKindV2, ProviderId } from '@agent-dock/shared';
+import { getBridge } from '../bridge.js';
 
 export function ComponentPanel({ provider, cwd }: { provider: ProviderId; cwd: string }) {
   const [kind, setKind] = useState<ProviderComponentKindV2 | 'all'>('all');
@@ -10,7 +11,7 @@ export function ComponentPanel({ provider, cwd }: { provider: ProviderId; cwd: s
   useEffect(() => {
     if (!cwd.trim()) { setItems([]); return; }
     let cancelled = false;
-    void window.agentDock.listProviderComponents({ provider, cwd: cwd.trim(), ...(kind === 'all' ? {} : { kind }) })
+    void getBridge().listProviderComponents({ provider, cwd: cwd.trim(), ...(kind === 'all' ? {} : { kind }) })
       .then((result) => { if (!cancelled) { setItems(result.items); setRevision(result.revision); setError(undefined); } })
       .catch((failure: unknown) => { if (!cancelled) setError(failure instanceof Error ? failure.message : 'Component inspection failed'); });
     return () => { cancelled = true; };
@@ -38,8 +39,8 @@ export function ComponentPanel({ provider, cwd }: { provider: ProviderId; cwd: s
               : <p className="form-hint">Inspectable only. Execution stays blocked until workspace trust is granted, and no provider currently advertises a management or invocation operation for it either way.</p>
           )}
           <div className="mcp-server__actions">
-            {item.supportsManage && <button type="button" disabled={!item.trusted} onClick={() => void window.agentDock.manageProviderComponent({ provider, cwd: cwd.trim(), componentId: item.id, action: item.enabled ? 'disable' : 'enable' })}>{item.enabled ? 'Disable' : 'Enable'}</button>}
-            {item.supportsDirectInvoke && <button type="button" disabled={!item.trusted} onClick={() => void window.agentDock.invokeProviderComponent({ provider, cwd: cwd.trim(), componentId: item.id })}>Invoke</button>}
+            {item.supportsManage && <button type="button" disabled={!item.trusted} onClick={() => void getBridge().manageProviderComponent({ provider, cwd: cwd.trim(), componentId: item.id, action: item.enabled ? 'disable' : 'enable' })}>{item.enabled ? 'Disable' : 'Enable'}</button>}
+            {item.supportsDirectInvoke && <button type="button" disabled={!item.trusted} onClick={() => void getBridge().invokeProviderComponent({ provider, cwd: cwd.trim(), componentId: item.id })}>Invoke</button>}
             {!item.supportsManage && !item.supportsDirectInvoke && <span className="form-hint">No provider-advertised control operation</span>}
           </div>
         </article>)}

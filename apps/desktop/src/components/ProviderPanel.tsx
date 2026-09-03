@@ -1,4 +1,5 @@
 import { PROVIDER_DISPLAY_NAMES, type ProviderStatusV2 } from '@agent-dock/shared';
+import { getBridge } from '../bridge.js';
 import noProvidersIllustration from '../../assets/illustrations/no-providers.svg';
 
 const AUTH_SOURCE_LABELS: Record<string, string> = {
@@ -46,10 +47,10 @@ export function ProviderPanel({
           AgentDock.
         </span>
         <div className="provider-panel__install-links">
-          <button type="button" onClick={() => void window.agentDock.openProviderInstallDocs('claude')}>
+          <button type="button" onClick={() => void getBridge().openProviderInstallDocs('claude')}>
             {PROVIDER_DISPLAY_NAMES.claude} install docs
           </button>
-          <button type="button" onClick={() => void window.agentDock.openProviderInstallDocs('codex')}>
+          <button type="button" onClick={() => void getBridge().openProviderInstallDocs('codex')}>
             {PROVIDER_DISPLAY_NAMES.codex} install docs
           </button>
           {onTryDemo && (

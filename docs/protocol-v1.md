@@ -104,15 +104,37 @@ Upheld by `SessionManager` and enforced structurally by `runProviderSession()` (
 - That terminal event is always last: nothing is ever emitted after it.
 - A fresh SSE subscriber (no `Last-Event-ID`) gets the stored history replayed from `sequence` `0`,
   then live events as they arrive. A subscriber that sends `Last-Event-ID: <n>` requests replay
-  from `n + 1`. The stored history is a prefix capped at 5,000 events per session
-  (`MAX_STORED_EVENTS_PER_SESSION` in `apps/daemon/src/session-manager.ts`). Beyond that, further
-  events are delivered only to subscribers connected at the time, while `sequence` continues to
-  increment. A subscriber that disconnects after the cap cannot recover later missed events,
-  including a terminal event emitted while it was disconnected. This v1 limitation is
-  regression-tested directly in `apps/daemon/test/session-manager.test.ts`.
+  from `n + 1`. The stored history is a prefix capped at 5,000 events *and* 16 MiB of serialized
+  bytes per session (`MAX_STORED_EVENTS_PER_SESSION` / `MAX_STORED_EVENT_BYTES_PER_SESSION` in
+  `apps/daemon/src/session-manager.ts`), whichever is reached first; large events can hit the byte
+  ceiling well before 5,000 events. Beyond either cap, further events are delivered only to
+  subscribers connected at the time, while `sequence` continues to increment; the daemon logs the
+  "history full" condition once per session, not once per subsequent event. A subscriber that
+  disconnects after either cap cannot recover later missed events, including a terminal event
+  emitted while it was disconnected. This v1 limitation is regression-tested directly in
+  `apps/daemon/test/session-manager.test.ts`.
+- One normalized envelope cannot exceed 1 MiB serialized (`MAX_LEGACY_EVENT_ENVELOPE_BYTES`). A
+  provider event that would exceed it is never stored or streamed: the daemon reaps the provider
+  process, records the session as `failed`, and emits exactly one synthetic `session.failed`
+  envelope (its own message describes the size violation, not the oversized content) as that
+  session's sole terminal event. `@agent-dock/client` enforces the identical 1 MiB ceiling on the
+  wire independently (`MAX_V1_SSE_FRAME_BYTES` in `packages/client/src/client.ts`), so a
+  daemon that somehow put an oversized frame on the wire would still be rejected client-side with a
+  `ValidationError` rather than accepted.
+- Each subscriber's own SSE connection is bounded independently to 256 queued frames and 4 MiB
+  (`apps/daemon/src/v1-sse-writer.ts`, sharing its bounded-queue/backpressure implementation with
+  protocol v2's writer): the daemon never calls `write()` again on a connection that reported
+  backpressure until it drains. If one slow subscriber's queue overflows either limit, only that
+  subscriber's connection is closed -- the provider session, its stored replay history, and every
+  other subscriber are unaffected. Protocol v1 has no wire-level "you overflowed" signal (unlike
+  v2's `stream.error`/`stream_overflow`): the connection simply ends, exactly like a normal stream
+  close, so the client sees the same thing it would see from a network hiccup.
 - `@agent-dock/client`'s `sessions.events()` iterator ends when the terminal event arrives; it does
   not auto-reconnect. Reopening the stream is a complete reconnect only while every missed event is
-  still in the retained prefix; it is not gap recovery after the cap. See
+  still in the retained history prefix (i.e. under both the count and byte caps above) and, for an
+  overflow-closed connection, while the provider session itself is still running -- it is not gap
+  recovery after either replay cap, and a session that already failed or completed while a
+  subscriber was disconnected cannot be replayed past that point either. See
   [client-sdk.md](client-sdk.md#design-decisions).
 
 ## Runtime validation

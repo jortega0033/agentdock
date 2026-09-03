@@ -24,7 +24,12 @@ import { createCodexAppServerTransport } from './app-server/index.js';
 import { ProviderCliMcpControlPlane } from '../../mcp-control.js';
 import { FilesystemProviderComponentControlPlane } from '../../component-control.js';
 
-export const CODEX_PROMPT_VIA_STDIN = false;
+/**
+ * Codex exec's `-` positional argument (see build-args.ts) tells it to read the prompt from
+ * stdin, matching how `runProviderSession` writes it (AD-05): keeps prompt content out of argv
+ * and off any same-user process's command-line view for both fresh and resumed sessions.
+ */
+export const CODEX_PROMPT_VIA_STDIN = true;
 
 /**
  * Codex CLI adapter. Runs `codex exec --json ...` (or `codex exec resume <id> --json ...` to

@@ -8,6 +8,8 @@ import { noopLogger } from '../src/logger.js';
 import { runProviderSession } from '../src/providers/common/run-session.js';
 import { parseClaudeLine } from '../src/providers/claude/parser.js';
 import { parseCodexLine } from '../src/providers/codex/parser.js';
+import { buildCodexArgs } from '../src/providers/codex/build-args.js';
+import { CODEX_PROMPT_VIA_STDIN } from '../src/providers/codex/adapter.js';
 
 const fixturesDir = fileURLToPath(new URL('./fixtures', import.meta.url));
 
@@ -384,6 +386,95 @@ describe('runProviderSession (spawns real node child processes via fixtures)', (
       for await (const event of iterator) collected.push(event);
 
       expect(collected.at(-1)).toEqual({ type: 'session.cancelled' });
+    }, 10_000);
+  });
+
+  describe('Codex prompt via stdin (issue #57)', () => {
+    function runCodexFixture(
+      fixtureName: string,
+      prompt: string,
+      resumeProviderSessionId?: string,
+    ) {
+      return runProviderSession(
+        {
+          providerId: 'codex',
+          executableNames: [process.execPath],
+          buildArgs: () => [join(fixturesDir, fixtureName)],
+          parseLine: parseCodexLine,
+          promptViaStdin: CODEX_PROMPT_VIA_STDIN,
+        },
+        {
+          sessionId: 'codex-stdin-session',
+          cwd,
+          prompt,
+          ...(resumeProviderSessionId ? { resumeProviderSessionId } : {}),
+        },
+        noopLogger,
+      );
+    }
+
+    // The fixture JSON-encodes the received text (see fake-codex-stdin-echo.mjs) so an empty
+    // prompt still produces an observable, decodable event instead of being silently dropped by
+    // parseCodexLine's (correct, real-Codex-matching) empty-agent-message filter.
+    function receivedPrompt(events: AgentEvent[]): string | undefined {
+      const message = events.find((e) => e.type === 'assistant.message') as
+        { text: string } | undefined;
+      return message ? (JSON.parse(message.text) as string) : undefined;
+    }
+
+    it('never places the prompt in argv, delivers it over stdin through the real "-" placeholder, and round-trips exactly (spaces, quotes, CRLF, Unicode)', async () => {
+      const prompt = 'line one\nline "two" with quotes\r\nCRLF too, emoji 🎉, CJK 日本語テスト';
+      const args = buildCodexArgs({ sessionId: 'x', cwd, prompt });
+      expect(args).toContain('-');
+      expect(args.join(' ')).not.toContain(prompt);
+
+      const events = await collectEvents(
+        runCodexFixture('fake-codex-stdin-echo.mjs', prompt).events,
+      );
+      expect(receivedPrompt(events)).toBe(prompt);
+    });
+
+    it('delivers the resumed-session prompt over stdin too', async () => {
+      const events = await collectEvents(
+        runCodexFixture('fake-codex-stdin-echo.mjs', 'resumed prompt content', 'prior-thread-1')
+          .events,
+      );
+      expect(receivedPrompt(events)).toBe('resumed prompt content');
+    });
+
+    it('handles a 200k-character prompt (the shared schema max) over stdin', async () => {
+      const prompt = 'z'.repeat(200_000);
+      const events = await collectEvents(
+        runCodexFixture('fake-codex-stdin-echo.mjs', prompt).events,
+      );
+      const text = receivedPrompt(events);
+      expect(text).toBe(prompt);
+      expect(text?.length).toBe(200_000);
+    }, 10_000);
+
+    it('handles the empty-prompt boundary explicitly: zero bytes written, stdin still ends cleanly', async () => {
+      const events = await collectEvents(runCodexFixture('fake-codex-stdin-echo.mjs', '').events);
+      expect(receivedPrompt(events)).toBe('');
+      expect(events.at(-1)).toMatchObject({ type: 'session.completed' });
+    });
+
+    it('handles the whitespace-only prompt boundary explicitly', async () => {
+      const prompt = '   \n\t  ';
+      const events = await collectEvents(
+        runCodexFixture('fake-codex-stdin-echo.mjs', prompt).events,
+      );
+      expect(receivedPrompt(events)).toBe(prompt);
+    });
+
+    it('cancelling immediately (racing the spawn, before any stdin write can happen) still ends cleanly in session.cancelled', async () => {
+      const handle = runCodexFixture('fake-hang.mjs', 'hi');
+      const cancelling = handle.cancel();
+      const collected: AgentEvent[] = [];
+      for await (const event of handle.events) collected.push(event);
+      await cancelling;
+
+      expect(collected.at(-1)).toEqual({ type: 'session.cancelled' });
+      expect(collected.some((e) => e.type === 'session.completed')).toBe(false);
     }, 10_000);
   });
 

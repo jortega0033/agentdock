@@ -879,7 +879,7 @@ defines one tested boundary:
 | ---------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
 | Codex app-server | The complete `turn/start` request is handed to app-server                   | No fallback after delivery; app-server exposes no documented idempotency/no-work proof     |
 | Claude Agent SDK | `WarmQuery.query(prompt)` is invoked after an inert, successful `startup()` | No runtime fallback is wired after SDK selection; startup/query failure fails that session |
-| Codex exec       | Process spawn is attempted because the prompt is already present in argv    | No fallback after the spawn attempt; success/failure ambiguity cannot replay               |
+| Codex exec       | Process spawn is attempted (the prompt is then handed to stdin immediately) | No fallback after the spawn attempt; success/failure ambiguity cannot replay               |
 | Claude CLI       | The first prompt byte is handed to child stdin                              | No fallback after any prompt delivery; partial-write failure is ambiguous                  |
 
 - Codex probe, schema, handshake, or startup failure may fall back at most once when it occurs before

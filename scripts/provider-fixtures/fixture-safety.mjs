@@ -50,8 +50,11 @@ const NATIVE_ARGV_GRAMMARS = [
     operandArg('provider_session_id'),
   ],
   [
+    // Codex exec's prompt travels over stdin (issue #57); '-' is Codex's own documented
+    // positional placeholder telling it to read the prompt from stdin, a fixed literal, not a
+    // sensitive operand.
     literalArg('exec'),
-    operandArg('prompt'),
+    literalArg('-'),
     literalArg('--json'),
     literalArg('--skip-git-repo-check'),
   ],
@@ -59,7 +62,7 @@ const NATIVE_ARGV_GRAMMARS = [
     literalArg('exec'),
     literalArg('resume'),
     operandArg('provider_session_id'),
-    operandArg('prompt'),
+    literalArg('-'),
     literalArg('--json'),
     literalArg('--skip-git-repo-check'),
   ],

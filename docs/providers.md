@@ -173,8 +173,8 @@ restricted to its exact validated CLI version and requires authenticated, truste
   session id are the same value from the start, instead of needing to reconcile two ids after the
   fact. Resuming is reachable end to end via `POST /sessions`'s `resumeProviderSessionId` field.
   **The prompt itself is not an argv element**: it's written to the child's stdin and the stdin
-  stream is then closed (`run-session.ts`'s `promptViaStdin` config, only set for Claude). Two
-  reasons: an argv element has to fit inside Windows' `CreateProcess` command-line limit (~32,767
+  stream is then closed (`run-session.ts`'s `promptViaStdin` config; Codex exec sets it too, see
+  below). Two reasons: an argv element has to fit inside Windows' `CreateProcess` command-line limit (~32,767
   characters), well under what the shared request schema permits (200,000), and an argv-passed
   prompt is visible to any same-user process for the whole life of the process (`ps`/Task
   Manager's command-line column), not just at spawn time.
@@ -226,11 +226,16 @@ Agent**; distribution and commercial-terms review gates any release packaging ch
   line (`"Logged in using ChatGPT"`, `"Logged in using API key"`, or a not-logged-in variant)
   rather than JSON. The parser matches conservatively and falls back to `'unknown'` rather than
   guessing when the text doesn't clearly say one way or the other.
-- **Execution**: `codex exec <prompt> --json --skip-git-repo-check`, or
-  `codex exec resume <providerSessionId> <prompt> --json --skip-git-repo-check` to continue a
-  prior thread (argv construction is in `build-args.ts`). `--skip-git-repo-check` is required
-  because a session's working directory is whatever the user picked, not necessarily a git
-  repository. Resuming is reachable end to end via `POST /sessions`'s `resumeProviderSessionId` field.
+- **Execution**: `codex exec - --json --skip-git-repo-check`, or
+  `codex exec resume <providerSessionId> - --json --skip-git-repo-check` to continue a prior
+  thread (argv construction is in `build-args.ts`). `--skip-git-repo-check` is required because a
+  session's working directory is whatever the user picked, not necessarily a git repository.
+  Resuming is reachable end to end via `POST /sessions`'s `resumeProviderSessionId` field. **The
+  prompt itself is not an argv element**: the `-` is Codex's own documented placeholder for "read
+  the prompt from stdin instead," and `run-session.ts` writes it there and closes the stream, the
+  same as Claude CLI's stdin transport above and for the same two reasons (Windows argv limit,
+  and an argv-passed prompt staying visible in `ps`/Task Manager for the process's whole
+  lifetime).
 - **Parsing** (`parser.ts`): `thread.started` → captures the thread id as `providerSessionId`;
   `item.started` / `item.completed` → `tool.started` / `tool.completed` for `command_execution`,
   `file_change`, and `mcp_tool_call` items, `assistant.message` for a completed `agent_message`

@@ -27,11 +27,11 @@
         "exec",
         "resume",
         "<redacted:provider-session-id>",
-        { "$fixturePlaceholder": "prompt" },
+        "-",
         "--json",
         "--skip-git-repo-check"
       ],
-      "stdin": null
+      "stdin": { "$fixturePlaceholder": "prompt" }
     }
   ],
   "nativeOutput": [

@@ -74,3 +74,24 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+  # This repository's branch ruleset names its required status check literally "Lint, typecheck,
+  # test, build" (no per-matrix-leg suffix). GitHub Actions appends the matrix combination to a
+  # job's check name automatically once a job has `strategy.matrix`, so build-and-test's own check
+  # never matches that literal string again -- discovered the hard way: a PR with a green matrix
+  # still couldn't merge ("2 of 2 required status checks are expected"), because the required
+  # check name no longer existed. This gate job carries the exact required name and only succeeds
+  # once every matrix leg has, so "all Node versions passed" is still what actually gates merge.
+  build-and-test-gate:
+    name: Lint, typecheck, test, build
+    needs: build-and-test
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every Node version to have passed
+        run: |
+          if [ "${{ needs.build-and-test.result }}" != "success" ]; then
+            echo "::error::build-and-test matrix did not fully succeed (result: ${{ needs.build-and-test.result }})"
+            exit 1
+          fi

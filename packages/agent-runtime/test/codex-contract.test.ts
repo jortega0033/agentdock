@@ -37,7 +37,7 @@ describe('Codex pinned fallback scope', () => {
       }),
     ).toEqual([
       'exec',
-      'hello',
+      '-',
       '--json',
       '--skip-git-repo-check',
       '--sandbox',

@@ -22,8 +22,8 @@
   "nativeInput": [
     {
       "prompt": { "$fixturePlaceholder": "prompt" },
-      "argv": ["exec", { "$fixturePlaceholder": "prompt" }, "--json", "--skip-git-repo-check"],
-      "stdin": null
+      "argv": ["exec", "-", "--json", "--skip-git-repo-check"],
+      "stdin": { "$fixturePlaceholder": "prompt" }
     }
   ],
   "nativeOutput": [

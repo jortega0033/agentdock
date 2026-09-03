@@ -236,21 +236,24 @@ Windows packaging workflow; focused unit tests cover both platform branches.
 
 ## Provider subprocess environment isolation
 
-Every provider subprocess -- one-shot Claude/Codex, Codex app-server, version/auth probes, and
-provider CLI control operations that shell out to the CLI itself (MCP list/configure/act via
-`claude mcp ...`/`codex mcp ...`) -- is spawned with a sanitized, default-deny environment, never
-the daemon's full `process.env`. A downstream fork that adds database or connector secrets to the
-daemon process cannot have those secrets silently reach a spawned provider CLI just because a call
-site forgot to pass an explicit environment: the *default* itself, at every low-level spawn point
-(`spawnProcess`/`execCapture` callers, the Codex app-server's own child spawn), is the sanitized
-environment, not raw inheritance.
+Every provider subprocess -- one-shot Claude/Codex, Codex app-server, version/auth probes, provider
+CLI control operations that shell out to the CLI itself (MCP list/configure/act via
+`claude mcp ...`/`codex mcp ...`), and the MCP *server* subprocess an enabled stdio server config
+actually starts for catalog/invoke (`packages/agent-runtime/src/mcp/stdio-mcp-connection.ts`) --
+is spawned with a sanitized, default-deny environment, never the daemon's full `process.env`. A
+downstream fork that adds database or connector secrets to the daemon process cannot have those
+secrets silently reach a spawned provider CLI or MCP server just because a call site forgot to pass
+an explicit environment: the *default* itself, at every low-level spawn point
+(`spawnProcess`/`execCapture` callers, the Codex app-server's own child spawn, the MCP stdio
+transport's own spawn) is the sanitized environment, not raw inheritance. **Verified**: regression
+tests in `packages/agent-runtime/test/mcp-stdio-client.test.ts` spawn a real MCP server, set a
+secret on the test process's own env, and assert the server never sees it while a server's own
+explicitly declared `env` entries still pass through (issue #103).
 
-**Known gap:** this does not yet cover the MCP *server* subprocess itself -- the stdio process an
-enabled MCP server config actually starts for catalog/invoke
-(`packages/agent-runtime/src/mcp/stdio-mcp-connection.ts`) is a separate spawn path from the
-provider-CLI control operations above, and currently receives the daemon's full `process.env`
-rather than the sanitized set. Tracked in #103; do not rely on this section for that path until
-it's closed.
+The MCP server subprocess uses the provider-agnostic floor
+(`buildBaseProcessEnvironment()`: reviewed OS/runtime keys only, no provider auth keys, since an
+MCP server is not a Claude/Codex CLI) with the server config's own declared `env` entries layered
+on top; everything else below covers the provider-CLI paths specifically.
 
 `packages/agent-runtime/src/process/provider-environment.ts` builds it:
 `buildLegacyProviderEnvironment(env, { provider })` starts from nothing and copies in only two

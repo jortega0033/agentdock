@@ -1,4 +1,5 @@
 import type { AgentEvent } from '@agent-dock/shared';
+import { PROVIDER_DISPLAY_NAMES } from '@agent-dock/shared';
 import type { Logger } from '../../logger.js';
 import type { ParsedLine } from '../common/run-session.js';
 
@@ -88,7 +89,10 @@ export function parseClaudeLine(raw: unknown, logger: Logger): ParsedLine {
         events.push({
           type: 'error',
           code: typeof obj.subtype === 'string' ? obj.subtype : undefined,
-          message: typeof obj.result === 'string' ? obj.result : 'Claude Code reported an error result',
+          message:
+            typeof obj.result === 'string'
+              ? obj.result
+              : `${PROVIDER_DISPLAY_NAMES.claude} reported an error result`,
           recoverable: false,
         });
       }

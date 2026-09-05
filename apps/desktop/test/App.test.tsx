@@ -239,7 +239,10 @@ beforeEach(() => {
   window.localStorage.clear();
   installBridge();
 });
-afterEach(() => vi.restoreAllMocks());
+// Not `restoreAllMocks()`: `installBridge()` always creates fresh `vi.fn()`s, so there's nothing
+// to restore, and a straggling React-scheduled effect (see test/setup.ts) that calls into a mock
+// after the reset would otherwise find it stripped of its implementation entirely.
+afterEach(() => vi.clearAllMocks());
 
 describe('App security flow', () => {
   it('shows the daemon-unavailable state when startup fails', async () => {
@@ -590,8 +593,12 @@ describe('App security flow', () => {
     fireEvent.change(screen.getByPlaceholderText(/describe the task/i), {
       target: { value: 'continue please' },
     });
-    expect(resumeButton).toBeEnabled();
-    expect(forkButton).toBeEnabled();
+    // The enabled state also depends on the async-loaded provider capability list settling, not
+    // just this synchronous input change, so poll rather than asserting immediately.
+    await waitFor(() => {
+      expect(resumeButton).toBeEnabled();
+      expect(forkButton).toBeEnabled();
+    });
   });
 
   it('sends dirty-worktree sharing consent only after explicit opt-in', async () => {

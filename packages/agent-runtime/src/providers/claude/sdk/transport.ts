@@ -1,12 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { lstat, mkdir, realpath as realpathAsync, rm } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import {
   query as nativeQuery,
   startup as nativeStartup,
+  type ModelInfo,
   type Options as ClaudeSdkOptions,
   type PermissionResult,
+  type SDKMessage,
   type SDKUserMessage,
   type SpawnOptions,
   type SpawnedProcess,
@@ -26,7 +27,12 @@ import {
 import { ClaudeSdkEventChannel, ClaudeSdkInputChannel } from './channel.js';
 import { boundedDisplay, ClaudeAgentSdkProtocolError, object } from './errors.js';
 import { ClaudeAgentSdkNormalizer } from './normalizer.js';
-import { resolveClaudeSdkConfigDir } from '../sdk-options.js';
+import {
+  escapesWorkspace,
+  prepareClaudeSdkConfigDirectory,
+  removeClaudeSdkConfigDirectory,
+  resolveClaudeSdkConfigDir,
+} from '../sdk-options.js';
 
 const INTERACTION_TIMEOUT_MS = 300_000;
 const CLOSE_TIMEOUT_MS = 2_500;
@@ -51,6 +57,14 @@ export interface ClaudeAgentSdkQuery extends AsyncIterable<unknown> {
   interrupt(): Promise<unknown>;
   streamInput?(stream: AsyncIterable<SDKUserMessage>): Promise<void>;
   close(): void;
+  /**
+   * Control-protocol calls, present on the real native `Query` but not exercised by the
+   * interactive transport itself -- only by the model-catalog probe (`probeClaudeModelCatalog`,
+   * issue #110), which needs the model list and the session's resolved default model without ever
+   * delivering a real turn. Optional so the transport's own test fakes need not implement them.
+   */
+  supportedModels?(): Promise<ModelInfo[]>;
+  next?(): Promise<IteratorResult<SDKMessage, void>>;
 }
 
 export interface ClaudeAgentSdkWarmQuery {
@@ -161,15 +175,6 @@ function inputMessage(text: string): SDKUserMessage {
     uuid: randomUUID(),
     origin: { kind: 'human' },
   };
-}
-
-function escapesWorkspace(workspace: string, target: string): boolean {
-  const pathFromWorkspace = relative(workspace, target);
-  return (
-    pathFromWorkspace === '..' ||
-    pathFromWorkspace.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) ||
-    isAbsolute(pathFromWorkspace)
-  );
 }
 
 function canonicalExistingOrParent(target: string): string {
@@ -846,48 +851,8 @@ export class ClaudeAgentSdkTransport implements InteractiveProviderTransport {
         'Claude SDK config directory is not bound to the daemon session',
       );
     }
-    let rootStat;
-    try {
-      rootStat = await lstat(this.options.daemonConfigRoot);
-    } catch {
-      throw new ClaudeAgentSdkProtocolError(
-        'claude_sdk_state_invalid',
-        'Claude SDK daemon config root is unavailable',
-      );
-    }
-    if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
-      throw new ClaudeAgentSdkProtocolError(
-        'claude_sdk_state_invalid',
-        'Claude SDK daemon config root is not a safe directory',
-      );
-    }
-    const canonicalRoot = await realpathAsync(this.options.daemonConfigRoot);
-    const sdkRoot = resolve(this.options.daemonConfigRoot, 'claude-agent-sdk');
-    await mkdir(sdkRoot, {
-      recursive: true,
-      mode: 0o700,
-    });
-    const sdkRootStat = await lstat(sdkRoot);
-    const canonicalSdkRoot = await realpathAsync(sdkRoot);
-    if (
-      !sdkRootStat.isDirectory() ||
-      sdkRootStat.isSymbolicLink() ||
-      escapesWorkspace(canonicalRoot, canonicalSdkRoot)
-    ) {
-      throw new ClaudeAgentSdkProtocolError(
-        'claude_sdk_state_invalid',
-        'Claude SDK config parent escaped the daemon root',
-      );
-    }
-    try {
-      await mkdir(this.configDirectory, { mode: 0o700 });
-      this.ownsConfigDirectory = true;
-    } catch {
-      throw new ClaudeAgentSdkProtocolError(
-        'claude_sdk_state_invalid',
-        'Claude SDK session config directory already exists',
-      );
-    }
+    await prepareClaudeSdkConfigDirectory(this.options.daemonConfigRoot, this.configDirectory);
+    this.ownsConfigDirectory = true;
   }
 
   private spawnProcess(options: SpawnOptions): SpawnedProcess {
@@ -931,27 +896,7 @@ export class ClaudeAgentSdkTransport implements InteractiveProviderTransport {
 
   private async removeConfigDirectory(): Promise<void> {
     if (!this.ownsConfigDirectory) return;
-    let stat;
-    try {
-      stat = await lstat(this.configDirectory);
-    } catch {
-      this.ownsConfigDirectory = false;
-      return;
-    }
-    if (!stat.isDirectory() || stat.isSymbolicLink()) {
-      throw new ClaudeAgentSdkProtocolError(
-        'claude_sdk_config_cleanup_failed',
-        'Claude SDK config directory changed before cleanup',
-      );
-    }
-    try {
-      await rm(this.configDirectory, { recursive: true, force: false });
-    } catch {
-      throw new ClaudeAgentSdkProtocolError(
-        'claude_sdk_config_cleanup_failed',
-        'Claude SDK config directory cleanup failed',
-      );
-    }
+    await removeClaudeSdkConfigDirectory(this.configDirectory);
     this.ownsConfigDirectory = false;
   }
 

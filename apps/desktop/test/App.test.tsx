@@ -239,7 +239,10 @@ beforeEach(() => {
   window.localStorage.clear();
   installBridge();
 });
-afterEach(() => vi.restoreAllMocks());
+// Not `restoreAllMocks()`: `installBridge()` always creates fresh `vi.fn()`s, so there's nothing
+// to restore, and a straggling React-scheduled effect (see test/setup.ts) that calls into a mock
+// after the reset would otherwise find it stripped of its implementation entirely.
+afterEach(() => vi.clearAllMocks());
 
 describe('App security flow', () => {
   it('shows the daemon-unavailable state when startup fails', async () => {

@@ -41,7 +41,12 @@ const PACKAGED_CLAUDE_SDK_NOTICE = join(
   'NOTICE.txt',
 );
 const BUILDER_CONFIG = join(ROOT, 'apps', 'desktop', 'electron-builder.yml');
-const TIMEOUT_MS = 15_000;
+// Covers discovery-file wait, packaged Job Object host shutdown, and the full
+// compile-shim -> spawn-packaged-daemon -> real /v2/sessions -> Codex app-server invocation
+// round trip. 15s was too tight on a loaded CI runner (PowerShell JIT-compiling the shim and
+// Defender scanning the freshly written .exe both add real, variable latency); this only bounds
+// a hang, so a longer ceiling costs nothing on the normal, fast path.
+const TIMEOUT_MS = 45_000;
 
 if (process.platform !== 'win32') {
   console.log('Skipping packaged daemon Windows smoke test (requires win32).');

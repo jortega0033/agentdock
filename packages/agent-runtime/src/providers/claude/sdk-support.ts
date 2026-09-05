@@ -58,10 +58,17 @@ type ClaudeCapabilityId = (typeof TRUSTED_CAPABILITIES)[number];
 // launder it into a safe "account identity," it just obscures a value that still shouldn't be
 // derived from. Any such probe also needs its own compatibility fixture set, the same as every
 // other adapter-tested claim in this file (CLAUDE_AGENT_SDK_FIXTURE_SET).
+// model.catalog (issue #107): the vendor SDK's `Query.supportedModels()`/`initializationResult()`
+// can only be called on an already-started query, so listing models live means spinning up a
+// probe session with the same auth/spawn machinery `startInteractiveSession()` uses for a real
+// one -- deliberately not built here yet. `StartSessionOptions.model` is still honored: an
+// invalid caller-supplied model surfaces as a real provider error at first turn instead of a
+// pre-flight catalog check.
 const EXPLICITLY_UNSUPPORTED_CAPABILITIES = [
   'session.resume',
   'session.fork',
   'integration.mcp.oauth',
+  'model.catalog',
 ] as const satisfies readonly CoreCapabilityId[];
 
 type ClaudeUnsupportedCapabilityId = (typeof EXPLICITLY_UNSUPPORTED_CAPABILITIES)[number];
@@ -223,10 +230,14 @@ function unsupportedRecord<I extends ClaudeUnsupportedCapabilityId>(
     effectsComplete: true,
     constraints: continuation
       ? ({ kind: 'continuation', native: true } as CapabilityConstraintById[I])
-      : ({ kind: 'none' } as CapabilityConstraintById[I]),
+      : id === 'model.catalog'
+        ? ({ kind: 'catalog', pageSize: 0 } as CapabilityConstraintById[I])
+        : ({ kind: 'none' } as CapabilityConstraintById[I]),
     reason: continuation
       ? 'Provider session identity cannot yet be bound to a non-secret account and model scope'
-      : 'Claude Agent SDK transport disables MCP servers and OAuth flows',
+      : id === 'model.catalog'
+        ? 'Claude Agent SDK exposes no live model catalog probe yet'
+        : 'Claude Agent SDK transport disables MCP servers and OAuth flows',
   } as CapabilitySupportRecord;
 }
 

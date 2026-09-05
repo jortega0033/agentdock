@@ -344,6 +344,45 @@ describe('protocol v2 content and interaction schemas', () => {
     ).toBe(false);
   });
 
+  it('accepts an optional bounded model id on create and continuation input (issue #107)', () => {
+    expect(
+      createSessionV2RequestSchema.safeParse({
+        provider: 'codex',
+        cwd: '/tmp',
+        prompt: 'hi',
+        model: 'gpt-5-codex',
+      }).success,
+    ).toBe(true);
+    expect(
+      createSessionV2RequestSchema.safeParse({
+        provider: 'codex',
+        cwd: '/tmp',
+        prompt: 'hi',
+        model: '',
+      }).success,
+    ).toBe(false);
+    expect(
+      createSessionV2RequestSchema.safeParse({
+        provider: 'codex',
+        cwd: '/tmp',
+        prompt: 'hi',
+        model: 'bad\nmodel',
+      }).success,
+    ).toBe(false);
+    expect(
+      createSessionV2RequestSchema.safeParse({
+        provider: 'codex',
+        cwd: '/tmp',
+        prompt: 'hi',
+        model: 'x'.repeat(257),
+      }).success,
+    ).toBe(false);
+    expect(
+      sessionContinuationInputV2Schema.safeParse({ prompt: 'continue', model: 'gpt-5-codex' })
+        .success,
+    ).toBe(true);
+  });
+
   it('validates bounded opaque session and event-history pages', () => {
     expect(sessionListV2QuerySchema.safeParse({ cursor: 'page_1', limit: 100 }).success).toBe(true);
     expect(sessionListV2QuerySchema.safeParse({ cursor: 'page+1' }).success).toBe(false);

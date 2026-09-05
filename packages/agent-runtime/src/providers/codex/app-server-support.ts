@@ -148,6 +148,7 @@ const CAPABILITY_METHODS = {
   'session.cancel': ['turn/interrupt'],
   'session.resume': ['thread/resume', 'turn/start'],
   'session.fork': ['thread/fork'],
+  'model.catalog': ['model/list'],
   'interaction.approval': [
     'item/commandExecution/requestApproval',
     'item/fileChange/requestApproval',
@@ -199,6 +200,8 @@ function constraintsFor<I extends SupportedCapabilityId>(id: I): CapabilityConst
     case 'session.resume':
     case 'session.fork':
       return { kind: 'continuation', native: true } as unknown as CapabilityConstraintById[I];
+    case 'model.catalog':
+      return { kind: 'catalog', pageSize: 1_024 } as unknown as CapabilityConstraintById[I];
     case 'interaction.approval':
     case 'interaction.question':
       return {

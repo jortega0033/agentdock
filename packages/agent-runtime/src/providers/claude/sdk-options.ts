@@ -23,6 +23,8 @@ export interface ClaudeSdkOptionsInput {
   sessionId: string;
   /** Transport-owned interactive authorization callback; omitted means SDK prompts auto-deny. */
   canUseTool?: Options['canUseTool'];
+  /** Caller-selected model (issue #107). Omitted keeps the SDK's own default. */
+  model?: string;
 }
 
 /** Derives an isolated config directory from daemon-owned root and unique session identity. */
@@ -54,6 +56,7 @@ export function buildClaudeSdkOptions(input: ClaudeSdkOptionsInput): Options {
     tools,
     disallowedTools: ['Bash', 'Agent', 'Skill', 'WebFetch', 'WebSearch'],
     ...(input.canUseTool ? { canUseTool: input.canUseTool } : {}),
+    ...(input.model ? { model: input.model } : {}),
     permissionMode: 'default',
     persistSession: false,
     settingSources: [],

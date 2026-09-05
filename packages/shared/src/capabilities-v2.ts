@@ -1042,6 +1042,20 @@ export const providersV2ResponseSchema = z
   .object({ providers: z.array(providerStatusV2Schema) })
   .strict();
 
+export const providerModelV2Schema = z
+  .object({
+    id: nonemptyByteBoundedStringSchema,
+    displayName: z.string(),
+    isDefault: z.boolean(),
+  })
+  .strict();
+
+export const providerModelCatalogV2ResponseSchema = z
+  .object({ models: z.array(providerModelV2Schema) })
+  .strict();
+
+export type ProviderModelV2 = z.infer<typeof providerModelV2Schema>;
+
 export type CapabilityRuntimeScope = Omit<CapabilityScope, 'transport'>;
 
 export interface CapabilityExtensionHandler {

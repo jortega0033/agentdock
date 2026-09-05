@@ -125,7 +125,9 @@ export async function detectCodex(
         const evidence = await probeCodexAppServerScope({
           executable: executablePath,
           cwd: options.cwd,
-          providerStatus: status,
+          providerStatus: options.requestedModel
+            ? { ...status, selectedModel: options.requestedModel }
+            : status,
           signal: options.signal,
           env,
         });

@@ -21,7 +21,10 @@ import {
   CodexAppServerRpc,
   type IncomingRequestResponder,
 } from '../src/providers/codex/app-server/rpc.js';
-import { probeCodexAppServerScope } from '../src/providers/codex/app-server/scope-probe.js';
+import {
+  fetchCodexModelCatalog,
+  probeCodexAppServerScope,
+} from '../src/providers/codex/app-server/scope-probe.js';
 import type { ProviderContinuationEvidence } from '../src/types.js';
 
 const SESSION_ID = '123e4567-e89b-42d3-a456-426614174200';
@@ -64,6 +67,63 @@ describe('Codex app-server launch scope probe', () => {
       accountFingerprint: createHash('sha256').update('fixture@example.test').digest('hex'),
       selectedModel: 'fake-model',
     });
+  });
+
+  it('pins a caller-requested model when it is present in the live catalog (issue #107)', async () => {
+    const evidence = await probeCodexAppServerScope({
+      executable: process.execPath,
+      executableArgs: [FIXTURE],
+      processPlatform: 'linux',
+      cwd: process.cwd(),
+      providerStatus: {
+        id: 'codex',
+        name: 'Codex',
+        installed: true,
+        authenticated: 'authenticated',
+        authSource: 'chatgpt',
+        executablePath: process.execPath,
+        version: '0.999.0',
+        capabilities: {},
+        selectedModel: 'fake-model',
+      },
+    });
+
+    expect(evidence?.selectedModel).toBe('fake-model');
+  });
+
+  it('rejects a caller-requested model absent from the live catalog (issue #107)', async () => {
+    await expect(
+      probeCodexAppServerScope({
+        executable: process.execPath,
+        executableArgs: [FIXTURE],
+        processPlatform: 'linux',
+        cwd: process.cwd(),
+        providerStatus: {
+          id: 'codex',
+          name: 'Codex',
+          installed: true,
+          authenticated: 'authenticated',
+          authSource: 'chatgpt',
+          executablePath: process.execPath,
+          version: '0.999.0',
+          capabilities: {},
+          selectedModel: 'not-a-real-model',
+        },
+      }),
+    ).rejects.toThrow(/Pinned Codex model is unavailable/);
+  });
+});
+
+describe('fetchCodexModelCatalog (issue #107)', () => {
+  it('reads the live model catalog without resolving account scope', async () => {
+    const models = await fetchCodexModelCatalog({
+      executable: process.execPath,
+      executableArgs: [FIXTURE],
+      processPlatform: 'linux',
+      cwd: process.cwd(),
+    });
+
+    expect(models).toEqual([{ id: 'fake-model', displayName: 'Fake model', isDefault: true }]);
   });
 });
 

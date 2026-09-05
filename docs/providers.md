@@ -11,6 +11,10 @@ interface AgentProvider {
   readonly name: string;
   detect(options?: ProviderDetectionOptions): Promise<ProviderStatus>;
   startSession(options: StartSessionOptions): ProviderSessionHandle;
+  fetchModelCatalog?(options: {
+    cwd: string;
+    signal?: AbortSignal;
+  }): Promise<readonly ProviderModelCatalogEntry[]>;
   getV2Support?(status: ProviderStatus): ProviderV2Support | undefined;
   startInteractiveSession?(
     options: StartInteractiveSessionOptions,

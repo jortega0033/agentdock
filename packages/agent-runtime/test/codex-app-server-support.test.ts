@@ -89,7 +89,13 @@ describe('Codex app-server compatibility selection', () => {
     }
     expect(support!.capabilities.map((record) => record.id)).toContain('content.plans');
     expect(support!.capabilities.map((record) => record.id)).not.toContain('content.thinking');
-    expect(support!.capabilities.map((record) => record.id)).not.toContain('model.catalog');
+    const modelCatalog = support!.capabilities.find((record) => record.id === 'model.catalog');
+    expect(modelCatalog).toMatchObject({
+      support: 'supported',
+      kind: 'operation',
+      owner: 'provider',
+      constraints: { kind: 'catalog', pageSize: 1_024 },
+    });
     expect(
       support!.capabilities.every((record) =>
         record.evidence.some(

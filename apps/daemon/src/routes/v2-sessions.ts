@@ -3,6 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import {
   agentCommandV2Schema,
   type CreateSessionV2Request,
+  type ProviderStatus,
   commandAcknowledgementV2Schema,
   createSessionV2RequestSchema,
   cancelSessionV2ResponseSchema,
@@ -255,6 +256,13 @@ export function registerV2SessionRoutes(
         controller.signal,
       );
       if (detected.aborted) return;
+      // Overrides the auto-detected default with the caller's pin (proposal 1, issue #107).
+      // Downstream provider transports (Codex app-server's resolveCodexSelectedModel, Claude's
+      // first turn) validate it against the provider's real supported set; an invalid pin fails
+      // session startup rather than being silently ignored.
+      const providerStatus: ProviderStatus = parsed.data.model
+        ? { ...detected.value, selectedModel: parsed.data.model }
+        : detected.value;
       const transportMode = requestedTransportMode(parsed.data.provider);
       if (
         (parsed.data.provider === 'codex' || parsed.data.provider === 'claude') &&
@@ -268,7 +276,7 @@ export function registerV2SessionRoutes(
       }
       let manifest;
       try {
-        manifest = resolveProviderV2Manifest(provider, detected.value);
+        manifest = resolveProviderV2Manifest(provider, providerStatus);
       } catch {
         reply.code(422).send({
           error: 'requested provider transport is unavailable',
@@ -380,7 +388,7 @@ export function registerV2SessionRoutes(
           controller.signal,
           workspace,
           {
-            providerStatus: detected.value,
+            providerStatus,
             ...(fallbackIntent ? { fallbackIntent } : {}),
             ...(legacyIntent ? { legacyIntent } : {}),
           },

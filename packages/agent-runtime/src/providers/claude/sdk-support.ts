@@ -231,7 +231,8 @@ function unsupportedRecord<I extends ClaudeUnsupportedCapabilityId>(
     constraints: continuation
       ? ({ kind: 'continuation', native: true } as CapabilityConstraintById[I])
       : id === 'model.catalog'
-        ? ({ kind: 'catalog', pageSize: 0 } as CapabilityConstraintById[I])
+        // catalogConstraintsSchema requires pageSize >= 1 even for an unsupported record.
+        ? ({ kind: 'catalog', pageSize: 1 } as CapabilityConstraintById[I])
         : ({ kind: 'none' } as CapabilityConstraintById[I]),
     reason: continuation
       ? 'Provider session identity cannot yet be bound to a non-secret account and model scope'

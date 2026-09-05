@@ -1,4 +1,4 @@
-import type { ProviderStatus } from '@agent-dock/shared';
+import { capabilitySupportRecordSchema, type ProviderStatus } from '@agent-dock/shared';
 import { describe, expect, it } from 'vitest';
 import {
   CLAUDE_AGENT_SDK_TRANSPORT_ID,
@@ -82,6 +82,18 @@ describe('resolveClaudeSdkV2Support', () => {
     expect(
       support?.capabilities.find((record) => record.id === 'integration.mcp.oauth'),
     ).toMatchObject({ support: 'unsupported' });
+  });
+
+  it('produces every capability record as real, schema-valid wire data', () => {
+    const support = resolveClaudeSdkV2Support(
+      status,
+      'sdk',
+      { ANTHROPIC_API_KEY: 'canary' },
+      runtime,
+    );
+    for (const record of support!.capabilities) {
+      expect(() => capabilitySupportRecordSchema.parse(record)).not.toThrow();
+    }
   });
 
   it.each([

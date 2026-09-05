@@ -201,7 +201,11 @@ function constraintsFor<I extends SupportedCapabilityId>(id: I): CapabilityConst
     case 'session.fork':
       return { kind: 'continuation', native: true } as unknown as CapabilityConstraintById[I];
     case 'model.catalog':
-      return { kind: 'catalog', pageSize: 1_024 } as unknown as CapabilityConstraintById[I];
+      // catalogConstraintsSchema bounds pageSize to <= 100 (packages/shared/src/capabilities-v2.ts);
+      // the RPC call itself still requests up to 1,024 models (model/list's own limit param in
+      // scope-evidence.ts) -- this only advertises a conservative per-page count for callers that
+      // page through the capability's own catalog semantics, not the live RPC request.
+      return { kind: 'catalog', pageSize: 100 } as unknown as CapabilityConstraintById[I];
     case 'interaction.approval':
     case 'interaction.question':
       return {

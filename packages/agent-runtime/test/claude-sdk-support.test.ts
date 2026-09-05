@@ -96,6 +96,21 @@ describe('resolveClaudeSdkV2Support', () => {
     }
   });
 
+  it('advertises a live model catalog (issue #110)', () => {
+    const support = resolveClaudeSdkV2Support(
+      status,
+      'sdk',
+      { ANTHROPIC_API_KEY: 'canary' },
+      runtime,
+    );
+    expect(support?.capabilities.find((record) => record.id === 'model.catalog')).toMatchObject({
+      support: 'supported',
+      kind: 'operation',
+      owner: 'provider',
+      constraints: { kind: 'catalog', pageSize: 64 },
+    });
+  });
+
   it.each([
     [{ ...runtime, runtimePlatform: 'linux' as const }, 'unsupported platform'],
     [{ ...runtime, sdkAssetAvailable: false }, 'SDK asset missing'],

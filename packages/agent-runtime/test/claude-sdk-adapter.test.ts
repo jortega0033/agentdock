@@ -136,6 +136,7 @@ function dependencies(
         reaped: Promise.resolve(),
       } as unknown as ClaudeAgentSdkManagedSpawn;
     }) as never,
+    probeModelCatalog: vi.fn(async () => []),
     ...overrides,
   };
 }

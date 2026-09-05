@@ -10,3 +10,7 @@ export {
   type ClaudeAgentSdkWarmQuery,
 } from './transport.js';
 export { ClaudeAgentSdkProtocolError } from './errors.js';
+export {
+  probeClaudeModelCatalog,
+  type ClaudeModelCatalogProbeOptions,
+} from './catalog-probe.js';

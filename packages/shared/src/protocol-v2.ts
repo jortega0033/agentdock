@@ -320,6 +320,24 @@ export const providerSessionIdV2Schema = z
     },
   );
 
+/** Caller-selected provider model id, validated against the provider's real catalog at dispatch. */
+export const providerModelIdV2Schema = z
+  .string()
+  .min(1)
+  .refine((value) => utf8ByteLength(value) <= 256, {
+    message: 'model id must be at most 256 UTF-8 bytes',
+  })
+  .refine(
+    (value) =>
+      ![...value].some((character) => {
+        const codePoint = character.codePointAt(0) ?? 0;
+        return codePoint <= 31 || codePoint === 127;
+      }),
+    {
+      message: 'model id must not contain control characters',
+    },
+  );
+
 export const sessionContinuationV2Schema = z.discriminatedUnion('kind', [
   z
     .object({
@@ -346,6 +364,12 @@ export const sessionContinuationInputV2Schema = z
     prompt: z.string().min(1, 'prompt is required').max(200_000, 'prompt is too long'),
     capabilities: capabilityRequestSchema.optional(),
     allowDirtyWorkspaceShare: z.boolean().optional(),
+    /**
+     * Optional model pin for the continued session. Must match the parent session's frozen
+     * continuation model -- the daemon's existing continuation-evidence check rejects a mismatch
+     * (`continuation_scope_mismatch`), since a provider-native thread cannot switch models mid-run.
+     */
+    model: providerModelIdV2Schema.optional(),
   })
   .strict()
   .superRefine((input, ctx) => {
@@ -358,6 +382,12 @@ export interface CreateSessionV2Request {
   provider: (typeof PROVIDER_IDS)[number];
   cwd: string;
   prompt: string;
+  /**
+   * Caller-selected provider model id. Validated against the provider's real supported set at
+   * dispatch (Codex: the app-server's live `model/list` catalog; Claude: the provider API itself
+   * at first turn) rather than against an arbitrary string.
+   */
+  model?: string;
   capabilities?: CapabilityRequest;
   /** Explicit consent to add a read-only session to an already-shared dirty Git worktree. */
   allowDirtyWorkspaceShare?: boolean;
@@ -385,6 +415,7 @@ export const createSessionV2RequestSchema = z
     provider: z.enum(PROVIDER_IDS),
     cwd: z.string().min(1, 'cwd is required'),
     prompt: z.string().min(1, 'prompt is required').max(200_000, 'prompt is too long'),
+    model: providerModelIdV2Schema.optional(),
     capabilities: capabilityRequestSchema.optional(),
     allowDirtyWorkspaceShare: z.boolean().optional(),
     initialAttachmentIds: z

@@ -479,6 +479,7 @@ export class V2SessionFacade {
             cwd: input.cwd,
             workspaceTrust: preProbeTrust,
             includeLaunchScopeEvidence: true,
+            ...(input.model ? { requestedModel: input.model } : {}),
           });
           const preSpawnTrust = await this.sessions.verifiedWorkspaceTrust(workspace);
           if (
@@ -533,6 +534,7 @@ export class V2SessionFacade {
             cwd: input.cwd,
             workspaceTrust: preProbeTrust,
             includeLaunchScopeEvidence: true,
+            ...(input.model ? { requestedModel: input.model } : {}),
           });
           const preSpawnTrust = await this.sessions.verifiedWorkspaceTrust(workspace);
           if (
@@ -649,6 +651,7 @@ export class V2SessionFacade {
           cwd: input.cwd,
           workspaceTrust: currentTrust,
           includeLaunchScopeEvidence: true,
+          ...(input.model ? { requestedModel: input.model } : {}),
         });
         const preFallbackTrust = await this.sessions.verifiedWorkspaceTrust(workspace);
         if (!redetectedStatus) {
@@ -900,6 +903,7 @@ export class V2SessionFacade {
         ...(input.allowDirtyWorkspaceShare === undefined
           ? {}
           : { allowDirtyWorkspaceShare: input.allowDirtyWorkspaceShare }),
+        ...(input.model === undefined ? {} : { model: input.model }),
         continuation: { kind, providerSessionId: parent.providerSessionId },
       },
       lineage: {

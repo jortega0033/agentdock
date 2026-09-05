@@ -3,6 +3,7 @@ import type {
   AgentProvider,
   InteractiveProviderSessionHandle,
   ProviderDetectionOptions,
+  ProviderModelCatalogEntry,
   ProviderSessionHandle,
   ProviderV2Support,
   StartInteractiveSessionOptions,
@@ -10,6 +11,7 @@ import type {
 } from '../../types.js';
 import { ProviderTransportStartupError } from '../../types.js';
 import { type Logger, noopLogger } from '../../logger.js';
+import { buildLegacyProviderEnvironment } from '../../process/provider-environment.js';
 import { runProviderSession } from '../common/run-session.js';
 import { superviseInteractiveSession } from '../common/session-supervisor.js';
 import { buildCodexArgs } from './build-args.js';
@@ -21,6 +23,7 @@ import {
   resolveCodexV2Support,
 } from './app-server-support.js';
 import { createCodexAppServerTransport } from './app-server/index.js';
+import { fetchCodexModelCatalog } from './app-server/scope-probe.js';
 import { ProviderCliMcpControlPlane } from '../../mcp-control.js';
 import { FilesystemProviderComponentControlPlane } from '../../component-control.js';
 
@@ -55,6 +58,34 @@ export class CodexProvider implements AgentProvider {
 
   getV2Support(status: ProviderStatus): ProviderV2Support | undefined {
     return resolveCodexV2Support(status, resolveCodexTransportMode());
+  }
+
+  async fetchModelCatalog(options: {
+    cwd: string;
+    signal?: AbortSignal;
+  }): Promise<readonly ProviderModelCatalogEntry[]> {
+    const status = await detectCodex(this.logger, { cwd: options.cwd, signal: options.signal });
+    if (!status.installed || !status.executablePath) {
+      throw new ProviderTransportStartupError(
+        'codex_model_catalog_unavailable',
+        'not_delivered',
+        'Codex executable is not installed',
+      );
+    }
+    if (status.authenticated !== 'authenticated') {
+      throw new ProviderTransportStartupError(
+        'codex_model_catalog_unavailable',
+        'not_delivered',
+        'Codex runtime authentication must be verified before listing models',
+      );
+    }
+    const env = buildLegacyProviderEnvironment(process.env, { provider: 'codex' });
+    return fetchCodexModelCatalog({
+      executable: status.executablePath,
+      cwd: options.cwd,
+      signal: options.signal,
+      env,
+    });
   }
 
   startSession(options: StartSessionOptions): ProviderSessionHandle {

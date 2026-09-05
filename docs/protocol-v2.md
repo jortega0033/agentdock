@@ -42,6 +42,7 @@ All routes are relative to `http://127.0.0.1:<port>`. Every route except `GET /h
 | --------------------------------------- | ------: | ----------------------------------------------------------------------------------------- |
 | `GET /v2/providers`                     |   `200` | Strict `{ providers: ProviderStatusV2[] }`                                                |
 | `GET /v2/providers/:providerId`         |   `200` | One `ProviderStatusV2`                                                                    |
+| `GET /v2/providers/:providerId/models`  |   `200` | `{ models: ProviderModelV2[] }` from the provider's live model catalog (issue #107); `409 operation_unsupported` if the provider exposes none |
 | `POST /v2/sessions`                     |   `201` | Validate and rate-limit a fresh session request; raw native continuation IDs are rejected |
 | `GET /v2/sessions`                      |   `200` | Return one cursor-paginated page of durable session snapshots                             |
 | `GET /v2/sessions/:sessionId`           |   `200` | Return the current or retained `AgentSessionV2` snapshot                                  |

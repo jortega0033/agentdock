@@ -74,6 +74,20 @@ export interface ProviderDetectionOptions {
   signal?: AbortSignal;
   /** Explicitly permits a bounded, read-only native probe for account/model launch evidence. */
   includeLaunchScopeEvidence?: boolean;
+  /**
+   * Caller-selected model to pin during launch scope evidence collection, instead of the
+   * provider's own catalog default. Ignored unless `includeLaunchScopeEvidence` is also set.
+   * Validated against the provider's live model catalog by the same mechanism that resolves the
+   * default (e.g. Codex app-server's `resolveCodexSelectedModel`); an invalid pin fails the probe.
+   */
+  requestedModel?: string;
+}
+
+/** One provider-native selectable model, as returned by a live catalog probe. */
+export interface ProviderModelCatalogEntry {
+  id: string;
+  displayName: string;
+  isDefault: boolean;
 }
 
 /** Bounded, non-secret facts a provider may project onto the public session status. */
@@ -242,6 +256,15 @@ export interface AgentProvider {
   readonly name: string;
   detect(options?: ProviderDetectionOptions): Promise<ProviderStatus>;
   startSession(options: StartSessionOptions): ProviderSessionHandle;
+  /**
+   * Optional live model catalog, for providers that can enumerate selectable models without
+   * starting a real session. Absent providers fail closed with `operation_unsupported` on the
+   * `GET /v2/providers/:providerId/models` route.
+   */
+  fetchModelCatalog?(options: {
+    cwd: string;
+    signal?: AbortSignal;
+  }): Promise<readonly ProviderModelCatalogEntry[]>;
   /** Optional rich-transport manifest. Undefined keeps the provider on the legacy v1 bridge. */
   getV2Support?(status: ProviderStatus): ProviderV2Support | undefined;
   /** Optional rich-transport factory. Real Claude/Codex adapters remain one-shot until #8. */

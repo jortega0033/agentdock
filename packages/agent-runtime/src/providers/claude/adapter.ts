@@ -273,6 +273,7 @@ export class ClaudeProvider implements AgentProvider {
       trustState: 'trusted',
       daemonConfigRoot: options.providerStateDirectory,
       sessionId: options.sessionId,
+      ...(options.model ? { model: options.model } : {}),
     });
     const managedProcessSpawner = this.dependencies.createManagedSpawner({
       executable: executable.path,

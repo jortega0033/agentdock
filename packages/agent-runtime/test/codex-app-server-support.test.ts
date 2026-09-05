@@ -17,7 +17,7 @@ import {
   resolveCodexTransportMode,
   resolveCodexV2Support,
 } from '../src/providers/codex/app-server-support.js';
-import type { ProviderStatus } from '@agent-dock/shared';
+import { capabilitySupportRecordSchema, type ProviderStatus } from '@agent-dock/shared';
 
 const status = (version: string | undefined): ProviderStatus => ({
   id: 'codex',
@@ -89,7 +89,13 @@ describe('Codex app-server compatibility selection', () => {
     }
     expect(support!.capabilities.map((record) => record.id)).toContain('content.plans');
     expect(support!.capabilities.map((record) => record.id)).not.toContain('content.thinking');
-    expect(support!.capabilities.map((record) => record.id)).not.toContain('model.catalog');
+    const modelCatalog = support!.capabilities.find((record) => record.id === 'model.catalog');
+    expect(modelCatalog).toMatchObject({
+      support: 'supported',
+      kind: 'operation',
+      owner: 'provider',
+      constraints: { kind: 'catalog', pageSize: 100 },
+    });
     expect(
       support!.capabilities.every((record) =>
         record.evidence.some(
@@ -101,6 +107,18 @@ describe('Codex app-server compatibility selection', () => {
     const approvals = support!.capabilities.find((record) => record.id === 'interaction.approval');
     expect(approvals).toMatchObject({ effectsComplete: false });
     expect(approvals?.possibleEffects).toContain('network');
+  });
+
+  it('produces every capability record as real, schema-valid wire data (issue #107 regression)', () => {
+    // `toMatchObject` above only checks the fields it names; a record can pass every one of those
+    // and still fail the real runtime schema (e.g. a constraint field out of its declared bounds)
+    // -- which negotiateCapabilities() then rejects wholesale as an "invalid manifest" for every
+    // capability, not just the malformed one. Parsing each record here is what would have caught
+    // model.catalog's pageSize once shipping past its 100-item schema bound.
+    const support = resolveCodexV2Support(status('0.147.0'), 'app-server');
+    for (const record of support!.capabilities) {
+      expect(() => capabilitySupportRecordSchema.parse(record)).not.toThrow();
+    }
   });
 
   it('advertises input.image/output.structured with real, session-scoped constraints (issue #59)', () => {

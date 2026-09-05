@@ -432,6 +432,85 @@ describe('v2 discovery and authorization', () => {
   });
 });
 
+describe('GET /v2/providers/:providerId/models (issue #107)', () => {
+  it('rejects an unknown provider id', async () => {
+    const { app } = setup();
+    const response = await app.inject({
+      method: 'GET',
+      url: `/v2/providers/not-a-provider/models?cwd=${encodeURIComponent(cwd)}`,
+      headers: auth(),
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().code).toBe('invalid_provider_id');
+  });
+
+  it('fails closed for a provider that exposes no live model catalog', async () => {
+    const { app } = setup();
+    const response = await app.inject({
+      method: 'GET',
+      url: `/v2/providers/claude/models?cwd=${encodeURIComponent(cwd)}`,
+      headers: auth(),
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.json().code).toBe('operation_unsupported');
+  });
+
+  it('rejects a missing or nonexistent working directory', async () => {
+    const { app } = setup();
+    expect(
+      (await app.inject({ method: 'GET', url: '/v2/providers/claude/models', headers: auth() }))
+        .statusCode,
+    ).toBe(400);
+    const response = await app.inject({
+      method: 'GET',
+      url: `/v2/providers/claude/models?cwd=${encodeURIComponent(join(cwd, 'does-not-exist'))}`,
+      headers: auth(),
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().code).toBe('invalid_working_directory');
+  });
+
+  it('serves a provider-supplied live model catalog', async () => {
+    const { app, provider } = setup();
+    (provider as unknown as { fetchModelCatalog: AgentProvider['fetchModelCatalog'] }).fetchModelCatalog =
+      async () => [{ id: 'fake-model', displayName: 'Fake model', isDefault: true }];
+
+    const response = await app.inject({
+      method: 'GET',
+      url: `/v2/providers/claude/models?cwd=${encodeURIComponent(cwd)}`,
+      headers: auth(),
+    });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json()).toEqual({
+      models: [{ id: 'fake-model', displayName: 'Fake model', isDefault: true }],
+    });
+  });
+});
+
+describe('POST /v2/sessions caller-selected model (issue #107)', () => {
+  it('threads a caller-selected model into the started provider session', async () => {
+    const { app, provider } = setupInteractive('multi-input');
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: {
+        provider: 'claude',
+        cwd,
+        prompt: 'pick a model',
+        model: 'claude-opus-5',
+        capabilities: {
+          required: [{ id: 'session.input.follow_up' }],
+          optional: [],
+          allowExperimental: false,
+        },
+      },
+    });
+    expect(response.statusCode, response.body).toBe(201);
+    expect(provider.interactiveStartedOptions[0]?.model).toBe('claude-opus-5');
+  });
+});
+
 describe('POST /v2/sessions capability negotiation', () => {
   it('uses parent-addressed resume and fork routes with immutable lineage', async () => {
     const status: ProviderStatus = {

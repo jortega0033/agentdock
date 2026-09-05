@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent, RefObject } from 'react';
 import type { ApprovalDecisionV2, WorkspaceTrustViewV2 } from '@agent-dock/shared';
 import type {
@@ -20,7 +20,10 @@ function focusableElements(dialog: HTMLElement | null): HTMLElement[] {
 }
 
 function useDialogFocus(dialogRef: RefObject<HTMLElement | null>, focusKey?: string) {
-  useEffect(() => {
+  // Layout effect, not a passive one: focus must land before the browser paints, both to avoid a
+  // visible flash of the wrong element focused and because React (as of 19) no longer guarantees
+  // passive effects flush synchronously within the same commit.
+  useLayoutEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const dialog = dialogRef.current;
     const initial =

@@ -593,8 +593,12 @@ describe('App security flow', () => {
     fireEvent.change(screen.getByPlaceholderText(/describe the task/i), {
       target: { value: 'continue please' },
     });
-    expect(resumeButton).toBeEnabled();
-    expect(forkButton).toBeEnabled();
+    // The enabled state also depends on the async-loaded provider capability list settling, not
+    // just this synchronous input change, so poll rather than asserting immediately.
+    await waitFor(() => {
+      expect(resumeButton).toBeEnabled();
+      expect(forkButton).toBeEnabled();
+    });
   });
 
   it('sends dirty-worktree sharing consent only after explicit opt-in', async () => {

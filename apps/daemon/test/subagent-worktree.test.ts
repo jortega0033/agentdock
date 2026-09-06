@@ -191,4 +191,29 @@ describe('owned worktree manager', () => {
     expect(cleaned.status).toBe('missing');
     expect(await run('git', ['branch', '--list', 'feature-x'], { cwd: repo })).toBe('');
   }, 15_000);
+
+  it('queues concurrent create() calls against the same source repo instead of throwing worktree_busy (issue #118)', async () => {
+    const [first, second] = await Promise.all([
+      manager.create({ cwd: repo, name: 'concurrent-a', confirmIncludeCopy: true }),
+      manager.create({ cwd: repo, name: 'concurrent-b', confirmIncludeCopy: true }),
+    ]);
+    expect(first.status).toBe('ready');
+    expect(second.status).toBe('ready');
+    expect(first.id).not.toBe(second.id);
+    const ids = (await manager.list()).map((entry) => entry.id);
+    expect(ids).toEqual(expect.arrayContaining([first.id, second.id]));
+  }, 20_000);
+
+  it('queues concurrent cleanup() calls against the same source repo instead of throwing worktree_busy (issue #118)', async () => {
+    const [a, b] = await Promise.all([
+      manager.create({ cwd: repo, name: 'concurrent-cleanup-a', confirmIncludeCopy: true }),
+      manager.create({ cwd: repo, name: 'concurrent-cleanup-b', confirmIncludeCopy: true }),
+    ]);
+    const [cleanedA, cleanedB] = await Promise.all([
+      manager.cleanup(a.id),
+      manager.cleanup(b.id),
+    ]);
+    expect(cleanedA.status).toBe('missing');
+    expect(cleanedB.status).toBe('missing');
+  }, 20_000);
 });

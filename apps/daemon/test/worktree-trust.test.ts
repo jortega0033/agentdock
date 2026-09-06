@@ -253,4 +253,45 @@ describe('worktree trust gating', () => {
     expect(dirtyCheckCalls).toBe(2); // sanity: cleanup() did reach its own dirty-check call
     expect(calls.some((call) => call[0] === 'worktree' && call[1] === 'remove')).toBe(false);
   }, 15_000);
+
+  it('serializes concurrent create() calls against the same source repo instead of throwing worktree_busy (issue #118)', async () => {
+    const base = await temporaryDirectory();
+    const repo = join(base, 'repo');
+    await initRepo(repo);
+    const trustStore = new WorkspaceTrustStore(join(base, 'trust.json'));
+    await trustStore.setTrusted(await resolveWorkspaceIdentity(repo));
+
+    let active = 0;
+    let maxActive = 0;
+    const serializedGit: WorktreeGitRunner = async (args, cwd) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      try {
+        // Widens the window a real concurrent caller would race into, so two overlapping create()
+        // calls that were NOT actually serialized would very likely both be "active" here at once.
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
+        return await realGit(args, cwd);
+      } finally {
+        active -= 1;
+      }
+    };
+    const manager = new OwnedWorktreeManager(
+      join(base, 'owned'),
+      join(base, 'worktrees.json'),
+      serializedGit,
+      trustStore,
+    );
+    await manager.load();
+
+    const [first, second] = await Promise.all([
+      manager.create({ cwd: repo, name: 'concurrent-a', confirmIncludeCopy: true }),
+      manager.create({ cwd: repo, name: 'concurrent-b', confirmIncludeCopy: true }),
+    ]);
+    expect(first.status).toBe('ready');
+    expect(second.status).toBe('ready');
+    expect(first.id).not.toBe(second.id);
+    // The real proof this queues rather than merely not-throwing: at no point did this repo's two
+    // create() calls have a Git command in flight at the same time.
+    expect(maxActive).toBe(1);
+  }, 20_000);
 });

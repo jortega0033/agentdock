@@ -156,4 +156,39 @@ describe('owned worktree manager', () => {
     } satisfies Partial<WorktreeManagerError>);
     expect((await recovered.list()).find((item) => item.id === created.id)?.status).toBe('dirty');
   }, 10_000);
+
+  it('refuses an untracked-only worktree by default, but removes it with deleteUntracked (issue #117)', async () => {
+    const untracked = await manager.create({
+      cwd: repo,
+      name: 'untracked',
+      confirmIncludeCopy: true,
+    });
+    const state = JSON.parse(await readFile(join(base, 'worktrees.json'), 'utf8')) as {
+      worktrees: Array<{ id: string; targetPath: string }>;
+    };
+    const untrackedTarget = state.worktrees.find((entry) => entry.id === untracked.id)!.targetPath;
+    await writeFile(join(untrackedTarget, 'build-output.tmp'), 'not committed');
+
+    await expect(manager.cleanup(untracked.id)).rejects.toMatchObject({
+      code: 'worktree_dirty',
+    } satisfies Partial<WorktreeManagerError>);
+
+    const cleaned = await manager.cleanup(untracked.id, { deleteUntracked: true });
+    expect(cleaned.status).toBe('missing');
+  }, 15_000);
+
+  it('deletes the worktree branch when deleteBranch is set (issue #117)', async () => {
+    await run('git', ['branch', 'feature-x'], { cwd: repo });
+    const branched = await manager.create({
+      cwd: repo,
+      name: 'branched',
+      ref: 'feature-x',
+      confirmIncludeCopy: true,
+    });
+    expect(branched.branch).toBe('feature-x');
+
+    const cleaned = await manager.cleanup(branched.id, { deleteBranch: true });
+    expect(cleaned.status).toBe('missing');
+    expect(await run('git', ['branch', '--list', 'feature-x'], { cwd: repo })).toBe('');
+  }, 15_000);
 });

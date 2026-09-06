@@ -46,7 +46,18 @@ export function registerV2AgentWorktreeRoutes(app: FastifyInstance, subagents?: 
     app.post('/v2/worktrees/cleanup', async (req, reply) => {
       const parsed = worktreeCleanupRequestV2Schema.safeParse(req.body);
       if (!parsed.success) return fail(reply, 400, 'invalid_worktree_request', 'Invalid worktree cleanup request');
-      try { reply.send(ownedWorktreeV2Schema.parse(await worktrees.cleanup(parsed.data.worktreeId))); } catch (error) { worktreeFailure(reply, error); }
+      try {
+        reply.send(
+          ownedWorktreeV2Schema.parse(
+            await worktrees.cleanup(parsed.data.worktreeId, {
+              deleteUntracked: parsed.data.deleteUntracked,
+              deleteBranch: parsed.data.deleteBranch,
+            }),
+          ),
+        );
+      } catch (error) {
+        worktreeFailure(reply, error);
+      }
     });
   }
 }

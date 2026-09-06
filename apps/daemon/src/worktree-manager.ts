@@ -4,6 +4,7 @@ import { copyFile, lstat, mkdir, readFile, realpath, rename, writeFile } from 'n
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type {
   OwnedWorktreeV2,
+  WorktreeCleanupOptionsV2,
   WorktreeCreateRequestV2,
   WorktreePreviewRequestV2,
   WorktreePreviewV2,
@@ -290,7 +291,7 @@ export class OwnedWorktreeManager {
     return [...this.#records.values()].map((record) => this.public(record));
   }
 
-  async cleanup(id: string): Promise<OwnedWorktreeV2> {
+  async cleanup(id: string, options: WorktreeCleanupOptionsV2 = {}): Promise<OwnedWorktreeV2> {
     const record = this.#records.get(id);
     if (!record)
       throw new WorktreeManagerError('worktree_not_found', 'Owned worktree was not found');
@@ -353,7 +354,21 @@ export class OwnedWorktreeManager {
           record.targetPath,
         )
       ).trim();
-      if (gitDirty || (await this.includesChanged(record))) {
+      const dirtyLines = gitDirty.length > 0 ? gitDirty.split(/\r?\n/) : [];
+      // `??` is porcelain-v1 for "untracked" -- anything else (staged or unstaged changes to a
+      // tracked file, including deletions) is real work that could be lost, and stays refused
+      // unconditionally. Only an untracked-only worktree is ever eligible for `deleteUntracked`.
+      const hasTrackedChanges = dirtyLines.some((line) => !line.startsWith('??'));
+      const hasUntrackedOnly = dirtyLines.length > 0 && !hasTrackedChanges;
+      if (hasTrackedChanges || (await this.includesChanged(record))) {
+        record.status = 'dirty';
+        await this.persist();
+        throw new WorktreeManagerError(
+          'worktree_dirty',
+          'Dirty worktrees are never removed automatically',
+        );
+      }
+      if (hasUntrackedOnly && !options.deleteUntracked) {
         record.status = 'dirty';
         await this.persist();
         throw new WorktreeManagerError(
@@ -362,9 +377,23 @@ export class OwnedWorktreeManager {
         );
       }
       await this.revalidateTrusted(sourceIdentity); // checkpoint: immediately before the Git mutation
-      await this.#runGit(['worktree', 'remove', record.targetPath], record.sourcePath);
+      await this.#runGit(
+        // `--force` here only ever overrides the untracked-files check `hasUntrackedOnly` already
+        // proved is the sole source of dirtiness -- a real tracked-file change would have thrown
+        // above regardless of this flag, so this can never silently discard tracked work.
+        ['worktree', 'remove', ...(hasUntrackedOnly ? ['--force'] : []), record.targetPath],
+        record.sourcePath,
+      );
       record.status = 'missing';
       await this.persist();
+      if (options.deleteBranch && record.branch) {
+        // Best-effort: the worktree is already gone by this point, so a failure here (branch
+        // already deleted, not actually a local branch, checked out elsewhere) does not undo the
+        // cleanup that already succeeded.
+        await this.#runGit(['branch', '-D', '--', record.branch], record.sourcePath).catch(
+          () => undefined,
+        );
+      }
       return this.public(record);
     } finally {
       this.#leases.delete(record.workspaceId);

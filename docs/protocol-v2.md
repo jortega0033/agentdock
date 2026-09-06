@@ -222,7 +222,7 @@ The Claude Agent SDK transport is selected only with a verified trusted workspac
 restricted tool policy. The legacy bridge retains the documented v1 boundary and must not be
 presented as sandboxed execution.
 
-## The 52 core capability constraints
+## The 53 core capability constraints
 
 Known core IDs accept exactly their mapped constraint discriminant. They reject `kind: 'opaque'`.
 
@@ -235,7 +235,7 @@ Known core IDs accept exactly their mapped constraint discriminant. They reject 
 | `content`                           | `content.streaming`, `content.plans`, `content.thinking`, `content.artifacts`, `integration.hooks.observe`, `agents.subagents.observe`                                                                                                                                           |
 | `effects`                           | `content.tools`, `integration.mcp.tool.invoke`                                                                                                                                                                                                                                   |
 | `invocation`                        | `integration.skills.invoke`, `integration.commands.invoke`, `integration.agents.invoke`                                                                                                                                                                                          |
-| `usage`                             | `content.usage.tokens`                                                                                                                                                                                                                                                           |
+| `usage`                             | `content.usage.tokens`, `content.usage.rate_limits`                                                                                                                                                                                                                              |
 | `cost`                              | `content.usage.cost`                                                                                                                                                                                                                                                             |
 | `catalog`                           | `model.catalog`, `integration.mcp.catalog.tools`, `integration.mcp.catalog.resources`, `integration.mcp.catalog.prompts`, `integration.skills.inspect`, `integration.plugins.inspect`, `integration.hooks.inspect`, `integration.commands.inspect`, `integration.agents.inspect` |
 | `mcp_server`                        | `integration.mcp.server.inspect`                                                                                                                                                                                                                                                 |
@@ -383,7 +383,7 @@ monotonic `sequence`, and an ISO-8601 `timestamp`. Turn-bound variants also requ
 | Tools               | `tool.started`, `tool.completed`                                                                                       |
 | Approvals           | `approval.requested`, `approval.resolved`                                                                              |
 | Questions           | `question.requested`, `question.resolved`, `question.cancelled`                                                        |
-| Accounting          | `usage.tokens`, `usage.cost`                                                                                           |
+| Accounting          | `usage.tokens`, `usage.cost`, `usage.rate_limits`                                                                      |
 | Problems/extensions | `error`, `extension.summary`                                                                                           |
 
 Provider-native type names are data, never normalized core discriminants. A client that receives

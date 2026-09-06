@@ -160,6 +160,7 @@ const CAPABILITY_METHODS = {
   'content.tools': ['item/started', 'item/completed'],
   'content.plans': ['turn/plan/updated'],
   'content.usage.tokens': ['thread/tokenUsage/updated', 'turn/completed'],
+  'content.usage.rate_limits': ['account/rateLimits/updated'],
   // First slice only (issue #59): PNG/JPEG local images delivered as `localImage` turn input, and
   // the final agentMessage's text parsed/AJV-validated against a negotiated JSON Schema. Both are
   // real, evidenced by the pinned vendored schema's `TurnStartParams.input[].localImage` and
@@ -234,6 +235,9 @@ function constraintsFor<I extends SupportedCapabilityId>(id: I): CapabilityConst
       } as unknown as CapabilityConstraintById[I];
     case 'content.usage.tokens':
       return { kind: 'usage', scopes: ['turn'] } as unknown as CapabilityConstraintById[I];
+    case 'content.usage.rate_limits':
+      // Account-level, not turn-scoped -- Codex's own notification carries no turn/thread id.
+      return { kind: 'usage', scopes: ['session'] } as unknown as CapabilityConstraintById[I];
     case 'input.image':
       // AttachmentStore's MIME-sniffing allowlist is broader than this (it also recognizes GIF,
       // PDF, JSON, and plain text -- see apps/daemon/src/attachment-store.ts's sniffMime()); this

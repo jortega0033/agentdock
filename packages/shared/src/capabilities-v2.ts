@@ -141,6 +141,7 @@ export const CORE_CAPABILITY_IDS = [
   'content.plans',
   'content.usage.tokens',
   'content.usage.cost',
+  'content.usage.rate_limits',
   'content.thinking',
   'content.artifacts',
   'model.catalog',
@@ -198,6 +199,7 @@ export interface CapabilityConstraintById {
   'content.plans': ContentConstraints;
   'content.usage.tokens': UsageConstraints;
   'content.usage.cost': CostConstraints;
+  'content.usage.rate_limits': UsageConstraints;
   'content.thinking': ContentConstraints;
   'content.artifacts': ContentConstraints;
   'model.catalog': CatalogConstraints;
@@ -262,6 +264,7 @@ export const CAPABILITY_CATALOG = {
   'content.plans': { kind: 'observation', owner: 'provider' },
   'content.usage.tokens': { kind: 'observation', owner: 'provider' },
   'content.usage.cost': { kind: 'observation', owner: 'provider' },
+  'content.usage.rate_limits': { kind: 'observation', owner: 'provider' },
   'content.thinking': { kind: 'observation', owner: 'provider' },
   'content.artifacts': { kind: 'observation', owner: 'provider' },
   'model.catalog': { kind: 'operation', owner: 'provider' },
@@ -702,6 +705,7 @@ export const capabilityConstraintSchemaById = {
   'content.plans': contentConstraintsSchema,
   'content.usage.tokens': usageConstraintsSchema,
   'content.usage.cost': costConstraintsSchema,
+  'content.usage.rate_limits': usageConstraintsSchema,
   'content.thinking': contentConstraintsSchema,
   'content.artifacts': contentConstraintsSchema,
   'model.catalog': catalogConstraintsSchema,

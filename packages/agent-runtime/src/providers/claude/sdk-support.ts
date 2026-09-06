@@ -45,6 +45,7 @@ const TRUSTED_CAPABILITIES = [
   ...COMMON_CAPABILITIES,
   'interaction.approval',
   'content.tools',
+  'model.catalog',
 ] as const satisfies readonly CoreCapabilityId[];
 
 type ClaudeCapabilityId = (typeof TRUSTED_CAPABILITIES)[number];
@@ -58,17 +59,10 @@ type ClaudeCapabilityId = (typeof TRUSTED_CAPABILITIES)[number];
 // launder it into a safe "account identity," it just obscures a value that still shouldn't be
 // derived from. Any such probe also needs its own compatibility fixture set, the same as every
 // other adapter-tested claim in this file (CLAUDE_AGENT_SDK_FIXTURE_SET).
-// model.catalog (issue #107): the vendor SDK's `Query.supportedModels()`/`initializationResult()`
-// can only be called on an already-started query, so listing models live means spinning up a
-// probe session with the same auth/spawn machinery `startInteractiveSession()` uses for a real
-// one -- deliberately not built here yet. `StartSessionOptions.model` is still honored: an
-// invalid caller-supplied model surfaces as a real provider error at first turn instead of a
-// pre-flight catalog check.
 const EXPLICITLY_UNSUPPORTED_CAPABILITIES = [
   'session.resume',
   'session.fork',
   'integration.mcp.oauth',
-  'model.catalog',
 ] as const satisfies readonly CoreCapabilityId[];
 
 type ClaudeUnsupportedCapabilityId = (typeof EXPLICITLY_UNSUPPORTED_CAPABILITIES)[number];
@@ -118,6 +112,11 @@ function constraintsFor<I extends ClaudeCapabilityId>(id: I): CapabilityConstrai
         currencies: ['USD'],
         acceptsEstimates: true,
       } as CapabilityConstraintById[I];
+    case 'model.catalog':
+      // The Agent SDK's own catalog (Query.supportedModels()) is realistically a handful of
+      // entries; unlike Codex's app-server this isn't a paginated RPC with its own declared limit,
+      // so this is a conservative cap rather than a mirrored protocol value.
+      return { kind: 'catalog', pageSize: 64 } as CapabilityConstraintById[I];
   }
 }
 
@@ -230,15 +229,10 @@ function unsupportedRecord<I extends ClaudeUnsupportedCapabilityId>(
     effectsComplete: true,
     constraints: continuation
       ? ({ kind: 'continuation', native: true } as CapabilityConstraintById[I])
-      : id === 'model.catalog'
-        // catalogConstraintsSchema requires pageSize >= 1 even for an unsupported record.
-        ? ({ kind: 'catalog', pageSize: 1 } as CapabilityConstraintById[I])
-        : ({ kind: 'none' } as CapabilityConstraintById[I]),
+      : ({ kind: 'none' } as CapabilityConstraintById[I]),
     reason: continuation
       ? 'Provider session identity cannot yet be bound to a non-secret account and model scope'
-      : id === 'model.catalog'
-        ? 'Claude Agent SDK exposes no live model catalog probe yet'
-        : 'Claude Agent SDK transport disables MCP servers and OAuth flows',
+      : 'Claude Agent SDK transport disables MCP servers and OAuth flows',
   } as CapabilitySupportRecord;
 }
 

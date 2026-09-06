@@ -3,6 +3,7 @@ import type {
   AgentProvider,
   InteractiveProviderSessionHandle,
   ProviderDetectionOptions,
+  ProviderModelCatalogEntry,
   ProviderSessionHandle,
   ProviderV2Support,
   StartInteractiveSessionOptions,
@@ -16,7 +17,7 @@ import { superviseInteractiveSession } from '../common/session-supervisor.js';
 import { buildClaudeArgs } from './build-args.js';
 import { detectClaude } from './detect.js';
 import { parseClaudeLine } from './parser.js';
-import { createClaudeAgentSdkTransport } from './sdk/index.js';
+import { createClaudeAgentSdkTransport, probeClaudeModelCatalog } from './sdk/index.js';
 import { resolveClaudeSdkAuth } from './sdk-auth.js';
 import {
   resolveClaudeSdkExecutable,
@@ -42,6 +43,7 @@ export interface ClaudeProviderDependencies {
   probeSdkVersion(executable: string): Promise<string | undefined>;
   createSdkTransport: typeof createClaudeAgentSdkTransport;
   createManagedSpawner: typeof createClaudeSdkManagedProcessSpawner;
+  probeModelCatalog: typeof probeClaudeModelCatalog;
 }
 
 export function parseClaudeSdkVersion(output: string): string | undefined {
@@ -98,6 +100,7 @@ export class ClaudeProvider implements AgentProvider {
       probeSdkVersion: probeClaudeSdkVersion,
       createSdkTransport: createClaudeAgentSdkTransport,
       createManagedSpawner: createClaudeSdkManagedProcessSpawner,
+      probeModelCatalog: probeClaudeModelCatalog,
       ...dependencies,
     };
   }
@@ -151,6 +154,39 @@ export class ClaudeProvider implements AgentProvider {
       runtimePlatform: platform,
       sdkAssetAvailable: assetMatches,
       sdkClaudeCodeVersion: assetMatches ? status.version : undefined,
+    });
+  }
+
+  async fetchModelCatalog(options: {
+    cwd: string;
+    signal?: AbortSignal;
+  }): Promise<readonly ProviderModelCatalogEntry[]> {
+    const env = this.dependencies.env();
+    const auth = resolveClaudeSdkAuth(env);
+    const executable = this.dependencies.resolveSdkExecutable();
+    const platform = this.dependencies.runtimePlatform();
+    if (!auth.eligible || !executable.ok || platform !== 'win32') {
+      throw new ProviderTransportStartupError(
+        'claude_sdk_launch_unverified',
+        'not_delivered',
+        'Claude Agent SDK requires an eligible authenticated executable to list models',
+      );
+    }
+    const version = await this.dependencies.probeSdkVersion(executable.path);
+    if (version !== CLAUDE_AGENT_SDK_CLAUDE_CODE_VERSION) {
+      throw new ProviderTransportStartupError(
+        'claude_sdk_version_unsupported',
+        'not_delivered',
+        'Detected Claude Agent SDK executable version is not validated',
+      );
+    }
+    return this.dependencies.probeModelCatalog({
+      executable: executable.path,
+      cwd: options.cwd,
+      env,
+      auth,
+      signal: options.signal,
+      runtimePlatform: platform,
     });
   }
 

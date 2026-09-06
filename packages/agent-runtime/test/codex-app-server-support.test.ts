@@ -96,6 +96,15 @@ describe('Codex app-server compatibility selection', () => {
       owner: 'provider',
       constraints: { kind: 'catalog', pageSize: 100 },
     });
+    const rateLimits = support!.capabilities.find(
+      (record) => record.id === 'content.usage.rate_limits',
+    );
+    expect(rateLimits).toMatchObject({
+      support: 'supported',
+      kind: 'observation',
+      owner: 'provider',
+      constraints: { kind: 'usage', scopes: ['session'] },
+    });
     expect(
       support!.capabilities.every((record) =>
         record.evidence.some(

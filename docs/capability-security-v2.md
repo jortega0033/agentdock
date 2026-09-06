@@ -230,6 +230,7 @@ type CapabilityConstraintById = {
   'content.plans': ContentConstraints;
   'content.usage.tokens': UsageConstraints;
   'content.usage.cost': CostConstraints;
+  'content.usage.rate_limits': UsageConstraints;
   'content.thinking': ContentConstraints;
   'content.artifacts': ContentConstraints;
   'model.catalog': CatalogConstraints;
@@ -436,6 +437,7 @@ errors, and exactly one terminal event. Those baseline semantics are not optiona
 | `content.plans`                        | Observe a provider-public plan and step state                         | `observation` | `provider`  | Stable       | Stable content IDs; public data                                   | Display only                             |
 | `content.usage.tokens`                 | Report authoritative token usage and scope                            | `observation` | `provider`  | Stable       | Token units; turn/session scope                                   | Display and aggregate                    |
 | `content.usage.cost`                   | Report authoritative or labeled estimated cost                        | `observation` | `provider`  | Stable       | Currency; scope; estimate flag                                    | Display; never invent                    |
+| `content.usage.rate_limits`            | Report Codex account-level rate-limit window usage (Codex-only)       | `observation` | `provider`  | Stable       | Session scope; sparse rolling update                              | Display headroom; never invent           |
 | `content.thinking`                     | Show provider-public reasoning summaries                              | `observation` | `provider`  | Stable       | Public output; no hidden-reasoning reconstruction                 | Live only by default                     |
 | `content.artifacts`                    | Show bounded file, diff, or artifact metadata/output                  | `observation` | `provider`  | Stable       | Safe block; size/path policy; explicit export                     | Summary until opened                     |
 | `model.catalog`                        | Query models and model-scoped modalities                              | `operation`   | `provider`  | Stable       | Versioned native discovery                                        | Read-only inspection                     |

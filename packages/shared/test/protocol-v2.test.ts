@@ -573,6 +573,13 @@ describe('protocol v2 event envelope schema', () => {
         currency: 'USD',
         estimated: false,
       },
+      {
+        ...meta,
+        type: 'usage.rate_limits',
+        scope: 'session',
+        limitId: 'codex',
+        primary: { usedPercent: 42, windowDurationMins: 300, resetsAt: 1_700_000_000 },
+      },
       { ...meta, turnId, type: 'error', code: 'oops', message: 'oops', recoverable: true },
       {
         ...meta,

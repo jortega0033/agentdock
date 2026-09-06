@@ -722,6 +722,36 @@ describe('Codex app-server transport', () => {
     ).not.toThrow();
   });
 
+  it('normalizes account/rateLimits/updated into a usage.rate_limits event instead of discarding it (issue #116)', () => {
+    const events: AgentEventV2[] = [];
+    const normalizer = new CodexAppServerNormalizer((event) => events.push(event));
+    normalizer.startSession('native-thread', CODEX_APP_SERVER_TRANSPORT.id, SELECTION);
+    events.length = 0;
+
+    // A sparse update carrying no window data yet has nothing new to report.
+    normalizer.notification('account/rateLimits/updated', { rateLimits: {} });
+    expect(events).toHaveLength(0);
+
+    normalizer.notification('account/rateLimits/updated', {
+      rateLimits: {
+        limitId: 'codex',
+        limitName: '5h window',
+        primary: { usedPercent: 42, windowDurationMins: 300, resetsAt: 1_700_000_000 },
+        secondary: { usedPercent: 7 },
+      },
+    });
+    expect(events).toEqual([
+      {
+        type: 'usage.rate_limits',
+        scope: 'session',
+        limitId: 'codex',
+        limitName: '5h window',
+        primary: { usedPercent: 42, windowDurationMins: 300, resetsAt: 1_700_000_000 },
+        secondary: { usedPercent: 7 },
+      },
+    ]);
+  });
+
   it('correlates concurrent client responses out of order and clears pending requests on shutdown', async () => {
     const writes: Buffer[] = [];
     const fatals: Error[] = [];

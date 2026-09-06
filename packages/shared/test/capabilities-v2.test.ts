@@ -58,7 +58,9 @@ function constraintsFor(id: CoreCapabilityId): CapabilityConstraints {
   if (id === 'content.tools' || id === 'integration.mcp.tool.invoke') {
     return { kind: 'effects', allowedEffects: ['read', 'filesystem_write'] };
   }
-  if (id === 'content.usage.tokens') return { kind: 'usage', scopes: ['turn', 'session'] };
+  if (id === 'content.usage.tokens' || id === 'content.usage.rate_limits') {
+    return { kind: 'usage', scopes: ['turn', 'session'] };
+  }
   if (id === 'content.usage.cost') {
     return {
       kind: 'cost',
@@ -150,9 +152,9 @@ function supportRecord(id: CoreCapabilityId, overrides: Record<string, unknown> 
 }
 
 describe('protocol v2 capability schemas', () => {
-  it('contains exactly the 52 documented core ID-to-constraint pairs', () => {
-    expect(CORE_CAPABILITY_IDS).toHaveLength(52);
-    expect(new Set(CORE_CAPABILITY_IDS).size).toBe(52);
+  it('contains exactly the 53 documented core ID-to-constraint pairs', () => {
+    expect(CORE_CAPABILITY_IDS).toHaveLength(53);
+    expect(new Set(CORE_CAPABILITY_IDS).size).toBe(53);
     expect(Object.keys(capabilityConstraintSchemaById).sort()).toEqual(
       [...CORE_CAPABILITY_IDS].sort(),
     );

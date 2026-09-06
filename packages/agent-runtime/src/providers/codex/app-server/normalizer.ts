@@ -89,6 +89,29 @@ function safeCount(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
+interface RateLimitWindow {
+  usedPercent: number;
+  windowDurationMins?: number;
+  resetsAt?: number;
+}
+
+/** `null`/`undefined` means this window is absent from a sparse rolling update, not malformed. */
+function rateLimitWindow(value: unknown, label: string): RateLimitWindow | undefined {
+  if (value === undefined || value === null) return undefined;
+  const window = object(value, label);
+  const usedPercent = safeCount(window.usedPercent);
+  if (usedPercent === undefined) {
+    throw new CodexAppServerProtocolError('frame_invalid', `Invalid ${label}`);
+  }
+  const windowDurationMins = safeCount(window.windowDurationMins);
+  const resetsAt = safeCount(window.resetsAt);
+  return {
+    usedPercent,
+    ...(windowDurationMins === undefined ? {} : { windowDurationMins }),
+    ...(resetsAt === undefined ? {} : { resetsAt }),
+  };
+}
+
 function toolDescriptor(item: JsonObject):
   | {
       name: string;
@@ -247,7 +270,7 @@ export class CodexAppServerNormalizer {
         this.mcpServerStartupStatus(params);
         return;
       case 'account/rateLimits/updated':
-        object(params.rateLimits, 'rate-limit snapshot');
+        this.rateLimitsUpdated(params);
         return;
       case 'thread/started':
         this.threadStarted(params);
@@ -757,6 +780,31 @@ export class CodexAppServerNormalizer {
       ...(inputTokens === undefined ? {} : { inputTokens }),
       ...(outputTokens === undefined ? {} : { outputTokens }),
       ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
+    });
+  }
+
+  /**
+   * A sparse rolling update (see the vendored schema's AccountRateLimitsUpdatedNotification):
+   * a notification carrying no window data yet has nothing new to report, so it emits nothing
+   * rather than a shell event -- consumers keep merging into their own last-observed snapshot,
+   * same as the vendor doc tells native clients to do.
+   */
+  private rateLimitsUpdated(params: JsonObject): void {
+    const snapshot = object(params.rateLimits, 'rate-limit snapshot');
+    const primary = rateLimitWindow(snapshot.primary, 'primary rate-limit window');
+    const secondary = rateLimitWindow(snapshot.secondary, 'secondary rate-limit window');
+    if (!primary && !secondary) return;
+    this.emit({
+      type: 'usage.rate_limits',
+      scope: 'session',
+      ...(typeof snapshot.limitId === 'string' && snapshot.limitId.length > 0
+        ? { limitId: safeDisplay(snapshot.limitId, 256, '') }
+        : {}),
+      ...(typeof snapshot.limitName === 'string' && snapshot.limitName.length > 0
+        ? { limitName: safeDisplay(snapshot.limitName, 256, '') }
+        : {}),
+      ...(primary ? { primary } : {}),
+      ...(secondary ? { secondary } : {}),
     });
   }
 

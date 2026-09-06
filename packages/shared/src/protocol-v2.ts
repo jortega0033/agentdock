@@ -826,6 +826,25 @@ const usageCostEventSchema = z
     estimated: z.boolean(),
   })
   .strict();
+const rateLimitWindowV2Schema = z
+  .object({
+    usedPercent: z.number().int().finite().nonnegative(),
+    windowDurationMins: z.number().int().finite().nonnegative().optional(),
+    resetsAt: z.number().int().finite().nonnegative().optional(),
+  })
+  .strict();
+/** Account-level, not turn-scoped -- Codex's own notification carries no turn/thread id. */
+const usageRateLimitsEventSchema = z
+  .object({
+    ...eventMetaShape,
+    type: z.literal('usage.rate_limits'),
+    scope: z.literal('session'),
+    limitId: nonemptyWireStringSchema.optional(),
+    limitName: nonemptyWireStringSchema.optional(),
+    primary: rateLimitWindowV2Schema.optional(),
+    secondary: rateLimitWindowV2Schema.optional(),
+  })
+  .strict();
 const errorEventSchema = z
   .object({
     ...eventMetaShape,
@@ -871,6 +890,7 @@ const agentEventV2EnvelopeUnionSchema = z.union([
   questionCancelledEventSchema,
   usageTokensEventSchema,
   usageCostEventSchema,
+  usageRateLimitsEventSchema,
   errorEventSchema,
   extensionSummaryEventSchema,
 ]);
@@ -931,6 +951,7 @@ export const AGENT_EVENT_V2_TYPES = [
   'question.cancelled',
   'usage.tokens',
   'usage.cost',
+  'usage.rate_limits',
   'error',
   'extension.summary',
 ] as const;

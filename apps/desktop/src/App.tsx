@@ -60,6 +60,7 @@ const INTERACTIVE_CAPABILITIES: CapabilityRequest = {
     { id: 'content.plans' },
     { id: 'content.usage.tokens' },
     { id: 'content.usage.cost' },
+    { id: 'content.usage.rate_limits' },
     { id: 'content.thinking' },
   ],
   allowExperimental: false,

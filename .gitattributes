@@ -1,0 +1,9 @@
+# Force LF line endings on checkout regardless of the checkout machine's `core.autocrlf` (issue
+# #111): Windows runners (GitHub Actions windows-latest, and Git for Windows locally) default
+# core.autocrlf=true, which converts every text file's stored LF endings to CRLF on checkout. That
+# broke apps/daemon/test/docs-claim-check.test.mjs and preflight.test.mjs -- Vitest's SSR module
+# loader throws "SyntaxError: Invalid or unexpected token" when dynamically importing a CRLF-ended
+# .mjs file (scripts/docs-claim-check.mjs, scripts/preflight.mjs), even though Node's own parser
+# and esbuild's own transform() both parse the identical CRLF content without error. `eol=lf` here
+# pins the working-tree line ending independent of any user's or runner's autocrlf setting.
+* text=auto eol=lf

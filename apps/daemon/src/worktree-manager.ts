@@ -91,7 +91,11 @@ function risky(path: string): boolean {
 
 export class OwnedWorktreeManager {
   readonly #records = new Map<string, StoredWorktree>();
-  readonly #leases = new Set<string>();
+  // One workspaceId (source repository) at a time, but never rejects a concurrent caller: each
+  // queues behind whatever is already running for that repository instead of throwing
+  // worktree_busy (issue #118). A distinct workspaceId never waits on another's queue -- create()
+  // and cleanup() against different repositories still run fully concurrently.
+  readonly #queues = new Map<string, Promise<void>>();
   readonly #runGit: WorktreeGitRunner;
 
   constructor(
@@ -117,6 +121,30 @@ export class OwnedWorktreeManager {
     if (!this.trustStore) return;
     if (!(await revalidateWorkspaceTrusted(this.trustStore, identity))) {
       throw new WorktreeManagerError('workspace_untrusted', 'Workspace trust changed');
+    }
+  }
+
+  /**
+   * Serializes create()/cleanup() per source repository instead of rejecting a concurrent caller
+   * with worktree_busy (issue #118). `previous` is whatever the last queued caller for this
+   * workspaceId left behind -- chaining `fn` onto it with both a success and a failure handler
+   * means this caller's turn starts the instant that prior operation settles, whether it resolved
+   * or threw. The `marker` stored back into the map always resolves (never rejects) so a queued
+   * caller can never poison the queue for the next one; it exists only to mark "something is still
+   * pending here," and is removed once nothing newer has been queued behind it.
+   */
+  private async withWorkspaceQueue<T>(workspaceId: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.#queues.get(workspaceId) ?? Promise.resolve();
+    const run = previous.then(fn, fn);
+    const marker = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#queues.set(workspaceId, marker);
+    try {
+      return await run;
+    } finally {
+      if (this.#queues.get(workspaceId) === marker) this.#queues.delete(workspaceId);
     }
   }
 
@@ -206,84 +234,87 @@ export class OwnedWorktreeManager {
         'invalid_target',
         'Owned worktree path is too long for reliable Windows Git operations',
       );
-    if (this.#leases.has(identity.workspaceId))
-      throw new WorktreeManagerError(
-        'worktree_busy',
-        'A worktree operation is already active for this repository',
-      );
-    this.#leases.add(identity.workspaceId);
-    try {
-      await this.revalidateTrusted(identity); // checkpoint: after acquiring the repository lease
-      const preview = await this.preview(input);
-      const includeDigests: Record<string, string> = {};
-      let includeBytes = 0;
-      for (const path of preview.includeFiles) {
-        const source = resolve(identity.canonicalPath, path);
-        if (!inside(identity.canonicalPath, source)) continue;
-        const metadata = await lstat(source).catch(() => undefined);
-        if (!metadata?.isFile() || metadata.isSymbolicLink()) continue;
-        includeBytes += metadata.size;
-        if (metadata.size > MAX_INCLUDE_FILE_BYTES || includeBytes > MAX_INCLUDE_TOTAL_BYTES)
-          throw new WorktreeManagerError(
-            'invalid_target',
-            'Worktree include files exceed the safe copy limit',
-          );
-        includeDigests[path] = await digestFile(source);
-      }
-      let commit: string;
+    return this.withWorkspaceQueue(identity.workspaceId, async () => {
       try {
-        commit = (
-          await this.#runGit(
-            ['rev-parse', '--verify', '--end-of-options', `${input.ref ?? 'HEAD'}^{commit}`],
-            identity.canonicalPath,
-          )
-        ).trim();
-      } catch {
-        throw new WorktreeManagerError('invalid_ref', 'Worktree ref does not resolve to a commit');
+        return await this.createLocked(input, identity, target, id);
+      } catch (error) {
+        await this.refreshStatuses().catch(() => undefined);
+        throw error;
       }
-      if (!/^[a-f0-9]{40,64}$/i.test(commit))
-        throw new WorktreeManagerError('invalid_ref', 'Worktree ref resolved to an invalid commit');
-      const record: StoredWorktree = {
-        id,
-        workspaceId: identity.workspaceId,
-        name: input.name,
-        displayPath: input.name,
-        status: 'missing',
-        createdAt: new Date().toISOString(),
-        ...(input.ref ? { branch: input.ref } : {}),
-        sourcePath: identity.canonicalPath,
-        targetPath: target,
-        includeDigests,
-      };
-      this.#records.set(id, record);
-      await this.persist();
-      await this.revalidateTrusted(identity); // checkpoint: immediately before the Git mutation
-      await this.#runGit(['worktree', 'add', '--detach', target, commit], identity.canonicalPath);
-      record.status = 'ready';
-      await this.persist();
-      await this.revalidateTrusted(identity); // checkpoint: immediately before the include-copy phase
-      for (const [path, expectedDigest] of Object.entries(includeDigests)) {
-        const source = resolve(identity.canonicalPath, path);
-        const destination = resolve(target, path);
-        if (!inside(identity.canonicalPath, source) || !inside(target, destination)) continue;
-        const metadata = await lstat(source).catch(() => undefined);
-        if (!metadata?.isFile() || metadata.isSymbolicLink()) continue;
-        await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-        await copyFile(source, destination);
-        if ((await digestFile(destination)) !== expectedDigest)
-          throw new WorktreeManagerError(
-            'worktree_dirty',
-            'A worktree include file changed during copy',
-          );
-      }
-      await this.refreshStatuses();
-      return this.public(record);
-    } catch (error) {
-      await this.refreshStatuses().catch(() => undefined);
-      throw error;
-    } finally {
-      this.#leases.delete(identity.workspaceId);
+    });
+  }
+
+  private async createLocked(
+    input: WorktreeCreateRequestV2,
+    identity: WorkspaceIdentity,
+    target: string,
+    id: string,
+  ): Promise<OwnedWorktreeV2> {
+    await this.revalidateTrusted(identity); // checkpoint: after acquiring the repository lease
+    const preview = await this.preview(input);
+    const includeDigests: Record<string, string> = {};
+    let includeBytes = 0;
+    for (const path of preview.includeFiles) {
+      const source = resolve(identity.canonicalPath, path);
+      if (!inside(identity.canonicalPath, source)) continue;
+      const metadata = await lstat(source).catch(() => undefined);
+      if (!metadata?.isFile() || metadata.isSymbolicLink()) continue;
+      includeBytes += metadata.size;
+      if (metadata.size > MAX_INCLUDE_FILE_BYTES || includeBytes > MAX_INCLUDE_TOTAL_BYTES)
+        throw new WorktreeManagerError(
+          'invalid_target',
+          'Worktree include files exceed the safe copy limit',
+        );
+      includeDigests[path] = await digestFile(source);
     }
+    let commit: string;
+    try {
+      commit = (
+        await this.#runGit(
+          ['rev-parse', '--verify', '--end-of-options', `${input.ref ?? 'HEAD'}^{commit}`],
+          identity.canonicalPath,
+        )
+      ).trim();
+    } catch {
+      throw new WorktreeManagerError('invalid_ref', 'Worktree ref does not resolve to a commit');
+    }
+    if (!/^[a-f0-9]{40,64}$/i.test(commit))
+      throw new WorktreeManagerError('invalid_ref', 'Worktree ref resolved to an invalid commit');
+    const record: StoredWorktree = {
+      id,
+      workspaceId: identity.workspaceId,
+      name: input.name,
+      displayPath: input.name,
+      status: 'missing',
+      createdAt: new Date().toISOString(),
+      ...(input.ref ? { branch: input.ref } : {}),
+      sourcePath: identity.canonicalPath,
+      targetPath: target,
+      includeDigests,
+    };
+    this.#records.set(id, record);
+    await this.persist();
+    await this.revalidateTrusted(identity); // checkpoint: immediately before the Git mutation
+    await this.#runGit(['worktree', 'add', '--detach', target, commit], identity.canonicalPath);
+    record.status = 'ready';
+    await this.persist();
+    await this.revalidateTrusted(identity); // checkpoint: immediately before the include-copy phase
+    for (const [path, expectedDigest] of Object.entries(includeDigests)) {
+      const source = resolve(identity.canonicalPath, path);
+      const destination = resolve(target, path);
+      if (!inside(identity.canonicalPath, source) || !inside(target, destination)) continue;
+      const metadata = await lstat(source).catch(() => undefined);
+      if (!metadata?.isFile() || metadata.isSymbolicLink()) continue;
+      await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+      await copyFile(source, destination);
+      if ((await digestFile(destination)) !== expectedDigest)
+        throw new WorktreeManagerError(
+          'worktree_dirty',
+          'A worktree include file changed during copy',
+        );
+    }
+    await this.refreshStatuses();
+    return this.public(record);
   }
 
   async list(): Promise<OwnedWorktreeV2[]> {
@@ -316,88 +347,85 @@ export class OwnedWorktreeManager {
         'worktree_external',
         'External or redirected worktrees cannot be removed',
       );
-    if (this.#leases.has(record.workspaceId))
-      throw new WorktreeManagerError('worktree_busy', 'Worktree is currently leased');
-    this.#leases.add(record.workspaceId);
-    try {
-      await this.revalidateTrusted(sourceIdentity); // checkpoint: after acquiring the repository lease
-      const porcelain = await this.#runGit(['worktree', 'list', '--porcelain'], record.sourcePath);
-      const lines = porcelain.split(/\r?\n/);
-      const start = lines.findIndex(
-        (line) => line.startsWith('worktree ') && samePath(line.slice(9), record.targetPath),
-      );
-      const end =
-        start < 0
-          ? -1
-          : lines.findIndex((line, index) => index > start && line.startsWith('worktree '));
-      const block =
-        start < 0 ? undefined : lines.slice(start, end < 0 ? undefined : end).join('\n');
-      if (!block) {
-        record.status = 'orphaned';
-        await this.persist();
-        throw new WorktreeManagerError(
-          'worktree_external',
-          'Worktree is no longer registered to its source repository',
-        );
-      }
-      if (/^locked/m.test(block)) {
-        record.status = 'locked';
-        await this.persist();
-        throw new WorktreeManagerError(
-          'worktree_locked',
-          'Locked worktrees are never removed automatically',
-        );
-      }
-      const gitDirty = (
-        await this.#runGit(
-          ['status', '--porcelain=v1', '--untracked-files=all'],
-          record.targetPath,
-        )
-      ).trim();
-      const dirtyLines = gitDirty.length > 0 ? gitDirty.split(/\r?\n/) : [];
-      // `??` is porcelain-v1 for "untracked" -- anything else (staged or unstaged changes to a
-      // tracked file, including deletions) is real work that could be lost, and stays refused
-      // unconditionally. Only an untracked-only worktree is ever eligible for `deleteUntracked`.
-      const hasTrackedChanges = dirtyLines.some((line) => !line.startsWith('??'));
-      const hasUntrackedOnly = dirtyLines.length > 0 && !hasTrackedChanges;
-      if (hasTrackedChanges || (await this.includesChanged(record))) {
-        record.status = 'dirty';
-        await this.persist();
-        throw new WorktreeManagerError(
-          'worktree_dirty',
-          'Dirty worktrees are never removed automatically',
-        );
-      }
-      if (hasUntrackedOnly && !options.deleteUntracked) {
-        record.status = 'dirty';
-        await this.persist();
-        throw new WorktreeManagerError(
-          'worktree_dirty',
-          'Dirty worktrees are never removed automatically',
-        );
-      }
-      await this.revalidateTrusted(sourceIdentity); // checkpoint: immediately before the Git mutation
-      await this.#runGit(
-        // `--force` here only ever overrides the untracked-files check `hasUntrackedOnly` already
-        // proved is the sole source of dirtiness -- a real tracked-file change would have thrown
-        // above regardless of this flag, so this can never silently discard tracked work.
-        ['worktree', 'remove', ...(hasUntrackedOnly ? ['--force'] : []), record.targetPath],
-        record.sourcePath,
-      );
-      record.status = 'missing';
+    return this.withWorkspaceQueue(record.workspaceId, () =>
+      this.cleanupLocked(record, sourceIdentity, options),
+    );
+  }
+
+  private async cleanupLocked(
+    record: StoredWorktree,
+    sourceIdentity: WorkspaceIdentity,
+    options: WorktreeCleanupOptionsV2,
+  ): Promise<OwnedWorktreeV2> {
+    await this.revalidateTrusted(sourceIdentity); // checkpoint: after acquiring the repository lease
+    const porcelain = await this.#runGit(['worktree', 'list', '--porcelain'], record.sourcePath);
+    const lines = porcelain.split(/\r?\n/);
+    const start = lines.findIndex(
+      (line) => line.startsWith('worktree ') && samePath(line.slice(9), record.targetPath),
+    );
+    const end =
+      start < 0 ? -1 : lines.findIndex((line, index) => index > start && line.startsWith('worktree '));
+    const block = start < 0 ? undefined : lines.slice(start, end < 0 ? undefined : end).join('\n');
+    if (!block) {
+      record.status = 'orphaned';
       await this.persist();
-      if (options.deleteBranch && record.branch) {
-        // Best-effort: the worktree is already gone by this point, so a failure here (branch
-        // already deleted, not actually a local branch, checked out elsewhere) does not undo the
-        // cleanup that already succeeded.
-        await this.#runGit(['branch', '-D', '--', record.branch], record.sourcePath).catch(
-          () => undefined,
-        );
-      }
-      return this.public(record);
-    } finally {
-      this.#leases.delete(record.workspaceId);
+      throw new WorktreeManagerError(
+        'worktree_external',
+        'Worktree is no longer registered to its source repository',
+      );
     }
+    if (/^locked/m.test(block)) {
+      record.status = 'locked';
+      await this.persist();
+      throw new WorktreeManagerError(
+        'worktree_locked',
+        'Locked worktrees are never removed automatically',
+      );
+    }
+    const gitDirty = (
+      await this.#runGit(['status', '--porcelain=v1', '--untracked-files=all'], record.targetPath)
+    ).trim();
+    const dirtyLines = gitDirty.length > 0 ? gitDirty.split(/\r?\n/) : [];
+    // `??` is porcelain-v1 for "untracked" -- anything else (staged or unstaged changes to a
+    // tracked file, including deletions) is real work that could be lost, and stays refused
+    // unconditionally. Only an untracked-only worktree is ever eligible for `deleteUntracked`.
+    const hasTrackedChanges = dirtyLines.some((line) => !line.startsWith('??'));
+    const hasUntrackedOnly = dirtyLines.length > 0 && !hasTrackedChanges;
+    if (hasTrackedChanges || (await this.includesChanged(record))) {
+      record.status = 'dirty';
+      await this.persist();
+      throw new WorktreeManagerError(
+        'worktree_dirty',
+        'Dirty worktrees are never removed automatically',
+      );
+    }
+    if (hasUntrackedOnly && !options.deleteUntracked) {
+      record.status = 'dirty';
+      await this.persist();
+      throw new WorktreeManagerError(
+        'worktree_dirty',
+        'Dirty worktrees are never removed automatically',
+      );
+    }
+    await this.revalidateTrusted(sourceIdentity); // checkpoint: immediately before the Git mutation
+    await this.#runGit(
+      // `--force` here only ever overrides the untracked-files check `hasUntrackedOnly` already
+      // proved is the sole source of dirtiness -- a real tracked-file change would have thrown
+      // above regardless of this flag, so this can never silently discard tracked work.
+      ['worktree', 'remove', ...(hasUntrackedOnly ? ['--force'] : []), record.targetPath],
+      record.sourcePath,
+    );
+    record.status = 'missing';
+    await this.persist();
+    if (options.deleteBranch && record.branch) {
+      // Best-effort: the worktree is already gone by this point, so a failure here (branch
+      // already deleted, not actually a local branch, checked out elsewhere) does not undo the
+      // cleanup that already succeeded.
+      await this.#runGit(['branch', '-D', '--', record.branch], record.sourcePath).catch(
+        () => undefined,
+      );
+    }
+    return this.public(record);
   }
 
   private async includeFiles(cwd: string): Promise<string[]> {

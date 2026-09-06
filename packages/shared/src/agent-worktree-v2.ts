@@ -119,4 +119,18 @@ export type OwnedWorktreeV2 = z.infer<typeof ownedWorktreeV2Schema>;
 export const ownedWorktreeListV2Schema = z
   .object({ worktrees: z.array(ownedWorktreeV2Schema).max(2_000) })
   .strict();
-export const worktreeCleanupRequestV2Schema = z.object({ worktreeId: opaqueId }).strict();
+export const worktreeCleanupRequestV2Schema = z
+  .object({
+    worktreeId: opaqueId,
+    // Untracked-only dirtiness (build output, node_modules, ...) is removable; any change to a
+    // tracked file always refuses cleanup regardless of this flag (issue #117).
+    deleteUntracked: z.boolean().optional(),
+    // Opt-in `git branch -D` of the worktree's own ref after a successful removal (issue #117).
+    deleteBranch: z.boolean().optional(),
+  })
+  .strict();
+export type WorktreeCleanupRequestV2 = z.infer<typeof worktreeCleanupRequestV2Schema>;
+export interface WorktreeCleanupOptionsV2 {
+  deleteUntracked?: boolean;
+  deleteBranch?: boolean;
+}

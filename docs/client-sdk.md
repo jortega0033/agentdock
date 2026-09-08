@@ -6,7 +6,7 @@ extension. It owns the HTTP request/response handling, bearer-token auth, increm
 and the protocol-version compatibility check, so a caller never hand-writes daemon URLs, headers,
 or event-stream parsing.
 
-It has no Electron or browser dependency (the workspace requires Node 20+, whose global `fetch` it
+It has no Electron or browser dependency (the workspace requires Node 22+, whose global `fetch` it
 uses), and its
 `package.json` declares an `"exports"` map with only `"."`:
 

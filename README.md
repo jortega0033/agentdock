@@ -67,7 +67,7 @@ vacancy-focused workflow and its own product behavior.
 
 ## Quick start
 
-You need [Node.js](https://nodejs.org/) 20.x or 22.x (the only versions this repo's CI actually
+You need [Node.js](https://nodejs.org/) 22.x (the only version this repo's CI actually
 tests) and the exact pnpm version pinned in `package.json`'s `packageManager` field:
 
 ```bash

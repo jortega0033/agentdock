@@ -23,9 +23,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # package.json's "engines" field declares 20.x-22.x as the actually-tested range (issue
-        # #64) — exercise both edges, not just the minimum.
-        node-version: [20, 22]
+        # package.json's "engines" field declares 22.x as the actually-tested range (issue #64,
+        # #127).
+        node-version: [22]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 

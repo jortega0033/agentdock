@@ -23,7 +23,7 @@ pnpm typecheck
 pnpm test
 ```
 
-Requires Node 20.x or 22.x (the only versions CI tests) and the exact pnpm version pinned in the
+Requires Node 22.x (the only version CI tests) and the exact pnpm version pinned in the
 root `package.json`'s `packageManager` field. `pnpm install` runs a preflight check
 (`scripts/preflight.mjs`) first and fails fast with a fix if either doesn't match -- see
 [README.md#quick-start](README.md#quick-start) for the Corepack-present and Corepack-absent

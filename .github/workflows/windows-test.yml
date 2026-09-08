@@ -1,8 +1,8 @@
 name: Windows Test Suite
 
 # Proves the full test suite (not just the packaging-smoke subset in package-windows.yml) is
-# actually green on Windows, on both ends of the supported Node range — Core CI's build-and-test
-# job only runs on ubuntu-latest, so this was previously unverified in CI at all (issue #60).
+# actually green on Windows — Core CI's build-and-test job only runs on ubuntu-latest, so this was
+# previously unverified in CI at all (issue #60).
 #
 # `stress-flaky-files` separately hammers the two files that were observed exceeding their timeout
 # under Windows' real parallel-worker CPU/IO contention (apps/daemon/test/subagent-worktree.test.ts,
@@ -30,9 +30,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # package.json declares "engines": { "node": ">=20" } with no upper bound — 20 is the
-        # minimum, 22 is the newest Active LTS line, matching "minimum and newest supported."
-        node-version: [20, 22]
+        # package.json declares "engines": { "node": ">=22 <23" } (issue #127) — 22 is both the
+        # minimum and only supported major today.
+        node-version: [22]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -60,7 +60,7 @@ jobs:
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
 
       - name: Install dependencies

@@ -49,7 +49,7 @@ body:
     attributes:
       label: Environment
       description: OS, architecture, Node.js version, pnpm version, and relevant provider CLI version.
-      placeholder: Windows 11 x64; Node 20.x; pnpm 10.29.2; Codex CLI ...
+      placeholder: Windows 11 x64; Node 22.x; pnpm 10.29.2; Codex CLI ...
     validations:
       required: true
 

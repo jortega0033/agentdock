@@ -11,7 +11,7 @@ const packageJsonPath = join(scriptDir, '..', 'package.json');
 
 /** The only Node major versions this repo's CI actually exercises (ci.yml's matrix; a separate
  * windows-test.yml matrixes the same range on Windows, see issue #60). */
-export const SUPPORTED_NODE_RANGE = Object.freeze({ minMajor: 20, maxMajorExclusive: 23 });
+export const SUPPORTED_NODE_RANGE = Object.freeze({ minMajor: 22, maxMajorExclusive: 23 });
 
 export function parseSemver(version) {
   const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(String(version ?? '').trim());

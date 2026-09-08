@@ -22,8 +22,8 @@ per-user version manager (nvm, fnm, volta) rather than a system-wide installer.
 Either way, run `pnpm install` afterward. Its first step runs `node scripts/preflight.mjs`
 automatically, which reports your active Node version, active pnpm version, and platform, and fails
 with a specific fix (rather than a generic error later in install) if either doesn't match what
-this repo actually tests. This repo's CI only exercises Node 20.x and 22.x (`package.json`'s
-`engines` field); an unsupported Node major is the most common cause of `preflight.mjs` failing --
+this repo actually tests. This repo's CI only exercises Node 22.x (`package.json`'s `engines`
+field); an unsupported Node major is the most common cause of `preflight.mjs` failing --
 see [README.md#quick-start](../README.md#quick-start).
 
 ## Claude transport mode is unavailable

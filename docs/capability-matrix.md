@@ -17,7 +17,7 @@ view of it.
 | Transport                                    | Provider | Exact pinned/tested version                                                   | Auth modes                                        | Platform    |
 | --------------------------------------------- | -------- | ------------------------------------------------------------------------------- | --------------------------------------------------- | ----------- |
 | Claude CLI one-shot compatibility transport   | Claude   | Claude Code 2.1.228                                                              | Any `claude auth login` state the CLI itself accepts | Any         |
-| Claude Agent SDK                              | Claude   | SDK `0.3.251`, embedded Claude executable `2.1.251`                             | `ANTHROPIC_API_KEY`, Bedrock, Vertex, or Foundry only (never subscription OAuth) | Windows only |
+| Claude Agent SDK                              | Claude   | SDK `0.3.260`, embedded Claude executable `2.1.260`                             | `ANTHROPIC_API_KEY`, Bedrock, Vertex, or Foundry only (never subscription OAuth) | Windows only |
 | Codex CLI one-shot compatibility transport    | Codex    | codex-cli `0.147.0`                                                              | Any `codex login` state the CLI itself accepts       | Any         |
 | Codex app-server                              | Codex    | codex-cli `0.147.0` (exact validated build)                                     | Authenticated, trusted-workspace only                | Any         |
 

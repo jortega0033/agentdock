@@ -84,8 +84,8 @@ try {
   const sdkVersion = await run(PACKAGED_CLAUDE_SDK_BINARY, ['--version']);
   assert(sdkVersion.code === 0, 'packaged Claude Agent SDK executable version probe failed');
   assert(
-    /(?:^|\D)2\.1\.251(?:$|\D)/u.test(`${sdkVersion.stdout}\n${sdkVersion.stderr}`),
-    'packaged Claude Agent SDK executable version is not 2.1.251',
+    /(?:^|\D)2\.1\.260(?:$|\D)/u.test(`${sdkVersion.stdout}\n${sdkVersion.stderr}`),
+    'packaged Claude Agent SDK executable version is not 2.1.260',
   );
   const sdkNotice = await readFile(PACKAGED_CLAUDE_SDK_NOTICE, 'utf8');
   assert(sdkNotice.includes('Claude Agent'), 'packaged SDK branding notice is missing');

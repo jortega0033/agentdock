@@ -141,7 +141,7 @@ function createTransport(harness: FakeHarness, overrides: Record<string, unknown
       authenticated: 'authenticated',
       authSource: 'api_key',
       capabilities: {},
-      version: '2.1.251',
+      version: '2.1.260',
     },
     sdkOptions: {
       cwd,
@@ -172,7 +172,7 @@ function initMessage(sessionId = randomUUID(), tools: string[] = ['Read', 'AskUs
     session_id: sessionId,
     cwd: resolve('.'),
     model: 'claude-test',
-    claude_code_version: '2.1.251',
+    claude_code_version: '2.1.260',
     permissionMode: 'default',
     apiKeySource: 'ANTHROPIC_API_KEY',
     tools,

@@ -59,7 +59,7 @@ afterEach(() => {
   else process.env.AGENT_DOCK_CODEX_TRANSPORT = originalMode;
 });
 
-describe.sequential('CodexProvider app-server admission', () => {
+describe('CodexProvider app-server admission', () => {
   it('keeps forced exec on the unchanged legacy bridge', () => {
     process.env.AGENT_DOCK_CODEX_TRANSPORT = 'exec';
     expect(new CodexProvider().getV2Support(status)).toBeUndefined();

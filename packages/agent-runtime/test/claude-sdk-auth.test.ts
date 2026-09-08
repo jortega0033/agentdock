@@ -87,7 +87,7 @@ describe('buildClaudeSdkEnvironment', () => {
       CLAUDE_CONFIG_DIR: '/daemon/session-config',
       CLAUDE_SECURESTORAGE_CONFIG_DIR: '/daemon/session-config',
       CLAUDE_CODE_ENTRYPOINT: 'sdk-ts',
-      CLAUDE_AGENT_SDK_VERSION: '0.3.251',
+      CLAUDE_AGENT_SDK_VERSION: '0.3.260',
       CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1',
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
     });

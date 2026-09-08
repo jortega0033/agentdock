@@ -30,7 +30,7 @@ see [README.md#quick-start](../README.md#quick-start).
 
 `AGENT_DOCK_CLAUDE_TRANSPORT` must be exactly `auto`, `sdk`, or `cli`; it defaults to `auto`.
 `cli` uses the unchanged Claude CLI compatibility path. SDK mode requires Windows' packaged pinned
-SDK asset (SDK `0.3.251`, embedded Claude executable `2.1.251`), a trusted workspace, and exactly
+SDK asset (SDK `0.3.260`, embedded Claude executable `2.1.260`), a trusted workspace, and exactly
 one eligible auth source: `ANTHROPIC_API_KEY`, Bedrock, Vertex, or Foundry. Claude.ai/subscription
 OAuth and `CLAUDE_CODE_OAUTH_TOKEN` are never eligible. In `auto`, an SDK eligibility miss selects
 the Claude CLI compatibility transport before any SDK work is accepted; there is no cross-auth

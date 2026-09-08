@@ -33,6 +33,8 @@ import {
   removeClaudeSdkConfigDirectory,
   resolveClaudeSdkConfigDir,
 } from '../sdk-options.js';
+import { CLAUDE_AGENT_SDK_FIXTURE_SET } from '../sdk-support.js';
+import { CLAUDE_AGENT_SDK_VERSION } from '../sdk-version.js';
 
 const INTERACTION_TIMEOUT_MS = 300_000;
 const CLOSE_TIMEOUT_MS = 2_500;
@@ -323,8 +325,8 @@ export class ClaudeAgentSdkTransport implements InteractiveProviderTransport {
     this.accepted = this.acceptedPromise;
     this.runtimeMetadata = Object.freeze({
       ...(options.providerStatus?.version ? { cliVersion: options.providerStatus.version } : {}),
-      schemaVersion: '0.3.251',
-      fixtureSet: 'claude-agent-sdk-0.3.251-v1',
+      schemaVersion: CLAUDE_AGENT_SDK_VERSION,
+      fixtureSet: CLAUDE_AGENT_SDK_FIXTURE_SET,
       requestedTransportMode: options.requestedTransportMode ?? 'sdk',
     });
     void this.start();

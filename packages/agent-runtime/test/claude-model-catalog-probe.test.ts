@@ -33,7 +33,7 @@ function initMessage(model: string): SDKMessage {
     session_id: 'session-1',
     cwd: resolve('.'),
     model,
-    claude_code_version: '2.1.251',
+    claude_code_version: '2.1.260',
     permissionMode: 'default',
     apiKeySource: 'ANTHROPIC_API_KEY',
     tools: [],

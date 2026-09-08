@@ -212,8 +212,8 @@ one supported Bedrock, Vertex, or Foundry configuration. Claude.ai/subscription 
 transport when an SDK eligibility gate fails before transport selection; `sdk` fails closed. Once
 the SDK transport is selected, import, startup, or query failure does not fall back to the CLI.
 
-The SDK and its Windows executable are pinned to `@anthropic-ai/claude-agent-sdk` **0.3.251** and
-the embedded Claude executable **2.1.251**. Windows packaging stages the executable and notices
+The SDK and its Windows executable are pinned to `@anthropic-ai/claude-agent-sdk` **0.3.260** and
+the embedded Claude executable **2.1.260**. Windows packaging stages the executable and notices
 outside Electron's ASAR archive and passes its absolute path to the SDK; it never substitutes a
 PATH-discovered CLI binary.
 

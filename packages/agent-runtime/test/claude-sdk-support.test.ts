@@ -18,7 +18,7 @@ const status: ProviderStatus = {
 const runtime = {
   runtimePlatform: 'win32',
   sdkAssetAvailable: true,
-  sdkClaudeCodeVersion: '2.1.251',
+  sdkClaudeCodeVersion: '2.1.260',
 } as const;
 
 describe('resolveClaudeSdkV2Support', () => {

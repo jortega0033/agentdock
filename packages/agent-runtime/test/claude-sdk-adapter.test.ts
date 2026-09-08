@@ -26,7 +26,7 @@ const sdkStatus: ProviderStatus = {
   authenticated: 'authenticated',
   authSource: 'api_key',
   executablePath: executable,
-  version: '2.1.251',
+  version: '2.1.260',
   capabilities: {},
 };
 
@@ -43,7 +43,7 @@ function selection(): CapabilitySelection {
   const support = resolveClaudeSdkV2Support(sdkStatus, 'sdk', env, {
     runtimePlatform: 'win32',
     sdkAssetAvailable: true,
-    sdkClaudeCodeVersion: '2.1.251',
+    sdkClaudeCodeVersion: '2.1.260',
   });
   if (!support) throw new Error('SDK support fixture missing');
   return {
@@ -61,7 +61,7 @@ function sdkTransportSpec() {
   const support = resolveClaudeSdkV2Support(sdkStatus, 'sdk', env, {
     runtimePlatform: 'win32',
     sdkAssetAvailable: true,
-    sdkClaudeCodeVersion: '2.1.251',
+    sdkClaudeCodeVersion: '2.1.260',
   });
   if (!support?.transports[0]) throw new Error('SDK transport fixture missing');
   return support.transports[0];
@@ -116,7 +116,7 @@ function dependencies(
     runtimePlatform: () => 'win32',
     detectCli: vi.fn(async () => cliStatus()),
     resolveSdkExecutable: () => ({ ok: true, path: executable, source: 'packaged-resource' }),
-    probeSdkVersion: vi.fn(async () => '2.1.251'),
+    probeSdkVersion: vi.fn(async () => '2.1.260'),
     createSdkTransport: vi.fn(() => transport()) as never,
     createManagedSpawner: vi.fn(() => () => {
       const stream = new PassThrough();

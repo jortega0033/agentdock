@@ -525,7 +525,7 @@ OAuth, elicitation, or approval capabilities.
 | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | Claude CLI one-shot compatibility transport | Claude Code 2.1.228 through `legacy-one-shot`                                                                                    | Sanitized replay fixtures and shared provider-contract tests                                              |
 | Codex CLI one-shot compatibility transport  | codex-cli 0.147.0 through `legacy-one-shot`                                                                                      | Sanitized replay fixtures and shared provider-contract tests                                              |
-| Claude Agent SDK  | SDK 0.3.251 with embedded Claude Code 2.1.251, Windows x64, trusted workspace, eligible API/cloud auth; settings/extras disabled | Pinned package/binary versions, fixture-set metadata, and SDK adapter/options/process/transport tests     |
+| Claude Agent SDK  | SDK 0.3.260 with embedded Claude Code 2.1.260, Windows x64, trusted workspace, eligible API/cloud auth; settings/extras disabled | Pinned package/binary versions, fixture-set metadata, and SDK adapter/options/process/transport tests     |
 | Codex app-server  | codex-cli 0.147.0, authenticated provider, trusted workspace; exact stable method allowlist                                      | Checked-in generated schema and hash, compatibility manifest, scope tests, and live fake JSON-RPC harness |
 | Fake interactive  | Deterministic test-only transport                                                                                                | Sanitized interactive replay fixtures and supervisor/route tests                                          |
 
@@ -601,7 +601,7 @@ suppress the disallowed scopes above, it cannot run an untrusted workspace.
 For Claude SDK sessions, the restricted profile requires `settingSources: []`,
 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`, `strictMcpConfig: true`, an isolated or relocated
 `CLAUDE_CONFIG_DIR`, and no configured plugins, skills, hooks, agents, or MCP servers. It pins an
-exact embedded Claude Code version (`CLAUDE_AGENT_SDK_CLAUDE_CODE_VERSION`, currently `2.1.251`) --
+exact embedded Claude Code version (`CLAUDE_AGENT_SDK_CLAUDE_CODE_VERSION`, currently `2.1.260`) --
 not a minimum -- and rejects any other version outright as an SDK executable mismatch, rather than
 running with reduced confidence. 2.1.246 was the version that introduced source exclusion also
 ignoring the excluded source's sandbox filesystem and Edit/Read permission entries; the pinned

@@ -10,8 +10,8 @@ import { PROVIDER_DISPLAY_NAMES } from '@agent-dock/shared';
  * menu), but must not present this integration as "Claude Code" or "Claude Code Agent".
  * See https://code.claude.com/docs/en/agent-sdk/overview before changing release packaging.
  */
-export const CLAUDE_AGENT_SDK_VERSION = '0.3.251';
-export const CLAUDE_AGENT_SDK_CLAUDE_CODE_VERSION = '2.1.251';
+export const CLAUDE_AGENT_SDK_VERSION = '0.3.260';
+export const CLAUDE_AGENT_SDK_CLAUDE_CODE_VERSION = '2.1.260';
 export const CLAUDE_AGENT_SDK_WINDOWS_X64_BINARY_PACKAGE =
   '@anthropic-ai/claude-agent-sdk-win32-x64';
 export const CLAUDE_AGENT_SDK_WINDOWS_X64_BINARY_VERSION = CLAUDE_AGENT_SDK_VERSION;

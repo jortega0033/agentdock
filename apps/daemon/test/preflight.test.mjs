@@ -28,12 +28,12 @@ describe('parseSemver', () => {
 
 describe('isNodeVersionSupported', () => {
   it('accepts every major in the declared range, using the module default', () => {
-    expect(isNodeVersionSupported('v20.0.0')).toBe(true);
-    expect(isNodeVersionSupported('v20.19.4')).toBe(true);
+    expect(isNodeVersionSupported('v22.0.0')).toBe(true);
     expect(isNodeVersionSupported('v22.11.0')).toBe(true);
   });
 
   it('rejects a major below the range', () => {
+    expect(isNodeVersionSupported('v20.19.4')).toBe(false);
     expect(isNodeVersionSupported('v18.20.0')).toBe(false);
   });
 
@@ -51,7 +51,7 @@ describe('isNodeVersionSupported', () => {
   });
 
   it('exposes the exact range the rest of the module defaults to', () => {
-    expect(SUPPORTED_NODE_RANGE).toEqual({ minMajor: 20, maxMajorExclusive: 23 });
+    expect(SUPPORTED_NODE_RANGE).toEqual({ minMajor: 22, maxMajorExclusive: 23 });
   });
 });
 
@@ -93,8 +93,8 @@ describe('pnpmVersionMatches', () => {
 describe('buildReport', () => {
   it('reports ok and no fixes when Node and pnpm both match', () => {
     const report = buildReport({
-      nodeVersion: 'v20.11.0',
-      userAgent: 'pnpm/10.29.2 npm/? node/v20.11.0 linux x64',
+      nodeVersion: 'v22.11.0',
+      userAgent: 'pnpm/10.29.2 npm/? node/v22.11.0 linux x64',
       declaredPnpmField: 'pnpm@10.29.2',
       platform: 'linux',
       arch: 'x64',

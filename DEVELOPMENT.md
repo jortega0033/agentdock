@@ -5,7 +5,7 @@ is the map of how the pieces fit together; this file is the walkthrough for maki
 
 ## Prerequisites
 
-- Node 20.x or 22.x (the only versions CI tests -- see the `engines` field in the root
+- Node 22.x (the only version CI tests -- see the `engines` field in the root
   [package.json](package.json)) and the exact pnpm version pinned in `packageManager` there. `pnpm
 install` runs `scripts/preflight.mjs` first and fails fast with a fix if either doesn't match; see
   [README.md#quick-start](README.md#quick-start) for the Corepack-present and Corepack-absent

@@ -22,6 +22,10 @@ export class McpTransportError extends Error {
      * Callers must classify on this, never on `message` text -- a server's error message is
      * free-form prose, not a stable API (issue #139). */
     readonly jsonRpcCode?: number,
+    /** The server's JSON-RPC `error.data`, e.g. `UnsupportedProtocolVersionError`'s
+     * `{ supported, requested }` (issue #139). Untrusted, unvalidated wire data -- callers must
+     * narrow its shape themselves before trusting any field on it. */
+    readonly jsonRpcData?: unknown,
   ) {
     super(message);
     this.name = 'McpTransportError';
@@ -142,7 +146,9 @@ export class StdioJsonRpcTransport {
     clearTimeout(pending.timer);
     if (frame.error) {
       const jsonRpcCode = typeof frame.error.code === 'number' ? frame.error.code : undefined;
-      pending.reject(new McpTransportError('protocol_error', frame.error.message, jsonRpcCode));
+      pending.reject(
+        new McpTransportError('protocol_error', frame.error.message, jsonRpcCode, frame.error.data),
+      );
       return;
     }
     pending.resolve(frame.result);

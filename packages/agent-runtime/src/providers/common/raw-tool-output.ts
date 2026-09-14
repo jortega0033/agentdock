@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { ATTACHMENT_LIMITS_V2 } from '@agent-dock/shared';
 import type { RawToolOutputV2 } from '../../types.js';
-import { boundedUtf8 } from './safe-display.js';
+import { boundedUtf8FromBytes } from './safe-display.js';
 
 /**
  * Issue #132: bounding/hashing logic shared by every provider's raw-tool-output side channel --
@@ -32,16 +32,17 @@ export function buildRawToolOutput(
   identity: RawToolOutputIdentity,
 ): RawToolOutputV2 | undefined {
   if (!content) return undefined;
+  // Encode once: the size-cap check and the preview both work from these bytes, rather than each
+  // separately re-encoding the (potentially 25MB) source string from scratch.
   const bytes = Buffer.from(content.text, 'utf8');
   if (bytes.byteLength > MAX_RAW_TOOL_OUTPUT_BYTES) return undefined;
-  const preview = boundedUtf8(content.text, RAW_TOOL_OUTPUT_PREVIEW_MAX_BYTES);
   return {
     contentBlockId: identity.contentBlockId,
     toolCallId: identity.toolCallId,
     mimeType: content.mimeType,
     bytes,
-    preview,
-    previewTruncated: Buffer.byteLength(preview, 'utf8') < bytes.byteLength,
+    preview: boundedUtf8FromBytes(bytes, RAW_TOOL_OUTPUT_PREVIEW_MAX_BYTES),
+    previewTruncated: bytes.byteLength > RAW_TOOL_OUTPUT_PREVIEW_MAX_BYTES,
     byteCount: bytes.byteLength,
     sha256: createHash('sha256').update(bytes).digest('hex'),
   };

@@ -471,7 +471,7 @@ describe('Codex app-server transport', () => {
         byteCount: 3,
         sha256: createHash('sha256').update('hi\n').digest('hex'),
       });
-      expect(rawOutputs[0].bytes.toString('utf8')).toBe('hi\n');
+      expect(rawOutputs[0]!.bytes.toString('utf8')).toBe('hi\n');
     });
 
     it('captures fileChange diffs joined across every changed file as raw output', () => {
@@ -492,8 +492,8 @@ describe('Codex app-server transport', () => {
       });
       expect(events.some((event) => event.type === 'tool.completed')).toBe(true);
       expect(rawOutputs).toHaveLength(1);
-      expect(rawOutputs[0].mimeType).toBe('text/plain');
-      expect(rawOutputs[0].bytes.toString('utf8')).toBe(
+      expect(rawOutputs[0]!.mimeType).toBe('text/plain');
+      expect(rawOutputs[0]!.bytes.toString('utf8')).toBe(
         '--- update a.txt ---\n-old\n+new\n\n\n--- add b.txt ---\n+created\n',
       );
     });
@@ -521,9 +521,9 @@ describe('Codex app-server transport', () => {
           },
         });
         expect(rawOutputs).toHaveLength(1);
-        expect(rawOutputs[0].previewTruncated).toBe(expectTruncated);
-        expect(Buffer.byteLength(rawOutputs[0].preview, 'utf8')).toBeLessThanOrEqual(4_096);
-        expect(rawOutputs[0].byteCount).toBe(length);
+        expect(rawOutputs[0]!.previewTruncated).toBe(expectTruncated);
+        expect(Buffer.byteLength(rawOutputs[0]!.preview, 'utf8')).toBeLessThanOrEqual(4_096);
+        expect(rawOutputs[0]!.byteCount).toBe(length);
       }
     });
 
@@ -1087,8 +1087,8 @@ describe('Codex app-server transport', () => {
     const toolOutputs: RawToolOutputV2[] = [];
     if (instance.toolOutputs) for await (const payload of instance.toolOutputs) toolOutputs.push(payload);
     expect(toolOutputs).toHaveLength(1);
-    expect(toolOutputs[0].mimeType).toBe('text/plain');
-    expect(toolOutputs[0].bytes.toString('utf8')).toContain('secret-diff');
+    expect(toolOutputs[0]!.mimeType).toBe('text/plain');
+    expect(toolOutputs[0]!.bytes.toString('utf8')).toContain('secret-diff');
     expect(instance.reaped).toBe(true);
   });
 

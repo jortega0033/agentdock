@@ -13,7 +13,12 @@ import {
   type SpawnedProcess,
   type UserDialogResult,
 } from '@anthropic-ai/claude-agent-sdk';
-import type { AgentCommandV2, AgentEventV2, Effect } from '@agent-dock/shared';
+import {
+  ATTACHMENT_LIMITS_V2,
+  type AgentCommandV2,
+  type AgentEventV2,
+  type Effect,
+} from '@agent-dock/shared';
 import {
   ProviderCommandRejectedError,
   ProviderTransportStartupError,
@@ -22,8 +27,10 @@ import {
   type ProviderDeliveryState,
   type ProviderInteractionResolution,
   type ProviderRuntimeMetadata,
+  type RawToolOutputV2,
   type StartInteractiveSessionOptions,
 } from '../../../types.js';
+import { FailableChannel } from '../../common/channel.js';
 import { ClaudeSdkEventChannel, ClaudeSdkInputChannel } from './channel.js';
 import { boundedDisplay, ClaudeAgentSdkProtocolError, object } from './errors.js';
 import { ClaudeAgentSdkNormalizer } from './normalizer.js';
@@ -38,6 +45,12 @@ import { CLAUDE_AGENT_SDK_VERSION } from '../sdk-version.js';
 
 const INTERACTION_TIMEOUT_MS = 300_000;
 const CLOSE_TIMEOUT_MS = 2_500;
+// Raw tool output (issue #132) travels on its own channel, sized to the daemon attachment store's
+// own per-file cap rather than the normalizer's much smaller AgentEventV2 stream -- that is the
+// entire point of the side channel. A handful of buffered values is plenty: the daemon drains this
+// channel continuously and only ever needs to be a little ahead of the matching `tool.completed`.
+const MAX_BUFFERED_TOOL_OUTPUTS = 64;
+const MAX_BUFFERED_TOOL_OUTPUT_BYTES = ATTACHMENT_LIMITS_V2.maxFileBytes;
 
 type ControlledOption =
   | 'abortController'
@@ -259,6 +272,11 @@ function emptyStream(): AsyncGenerator<unknown, void, void> {
 export class ClaudeAgentSdkTransport implements InteractiveProviderTransport {
   private readonly factory: ClaudeAgentSdkFactory;
   private readonly eventsChannel = new ClaudeSdkEventChannel<unknown>();
+  private readonly toolOutputChannel = new FailableChannel<RawToolOutputV2>(
+    MAX_BUFFERED_TOOL_OUTPUTS,
+    MAX_BUFFERED_TOOL_OUTPUT_BYTES,
+    (payload) => payload.bytes.byteLength,
+  );
   private readonly inputChannel = new ClaudeSdkInputChannel<SDKUserMessage>();
   private readonly abortController = new AbortController();
   private readonly interactions = new Map<string, PendingInteraction>();
@@ -281,6 +299,7 @@ export class ClaudeAgentSdkTransport implements InteractiveProviderTransport {
   private reapedValue = false;
 
   readonly events = this.eventsChannel.stream();
+  readonly toolOutputs = this.toolOutputChannel[Symbol.asyncIterator]();
   readonly stderr = emptyStream();
   readonly started: Promise<void>;
   readonly accepted: Promise<AcceptedWorkState>;
@@ -313,6 +332,7 @@ export class ClaudeAgentSdkTransport implements InteractiveProviderTransport {
           options.sdkOptions.plugins.length === 0,
       },
       (event) => this.eventsChannel.push(event),
+      (payload) => this.emitRawToolOutput(payload),
     );
     this.startedPromise = new Promise<void>((resolve, reject) => {
       this.resolveStarted = resolve;
@@ -444,6 +464,7 @@ export class ClaudeAgentSdkTransport implements InteractiveProviderTransport {
     }
     await this.removeConfigDirectory();
     this.eventsChannel.close();
+    this.toolOutputChannel.close();
   }
 
   async forceClose(): Promise<void> {
@@ -462,6 +483,7 @@ export class ClaudeAgentSdkTransport implements InteractiveProviderTransport {
     }
     await this.removeConfigDirectory();
     this.eventsChannel.close();
+    this.toolOutputChannel.close();
   }
 
   private async start(): Promise<void> {
@@ -500,6 +522,7 @@ export class ClaudeAgentSdkTransport implements InteractiveProviderTransport {
       );
       this.rejectStarted(startupError);
       this.eventsChannel.fail(startupError);
+      this.toolOutputChannel.fail(startupError);
       this.abortController.abort();
       this.warmQuery?.close();
       this.queryValue?.close();
@@ -604,6 +627,7 @@ export class ClaudeAgentSdkTransport implements InteractiveProviderTransport {
           );
         }
         this.eventsChannel.fail(safeError);
+        this.toolOutputChannel.fail(safeError);
       }
     } finally {
       if (!this.closing) this.inputChannel.close(new Error('Claude SDK input disconnected'));
@@ -894,6 +918,13 @@ export class ClaudeAgentSdkTransport implements InteractiveProviderTransport {
     const reaped = await boundedBoolean(proof, CLOSE_TIMEOUT_MS);
     if (reaped) this.reapedValue = true;
     return reaped;
+  }
+
+  /** Best-effort: unlike the events channel, a dropped raw output never fails the session -- it
+   * just leaves the paired `tool.completed` event with its existing synthetic summary and no
+   * attachment reference (issue #132's required graceful degradation). */
+  private emitRawToolOutput(payload: RawToolOutputV2): void {
+    this.toolOutputChannel.push(payload);
   }
 
   private async removeConfigDirectory(): Promise<void> {

@@ -1,7 +1,15 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
-import type { AgentEventV2, AuthSource, CapabilitySelection, Effect } from '@agent-dock/shared';
+import {
+  ATTACHMENT_LIMITS_V2,
+  type AgentEventV2,
+  type AuthSource,
+  type CapabilitySelection,
+  type Effect,
+} from '@agent-dock/shared';
+import type { RawToolOutputV2 } from '../../../types.js';
 import { boundedDisplay, ClaudeAgentSdkProtocolError, nativeId, object } from './errors.js';
+import { boundedUtf8 } from '../../common/safe-display.js';
 import { CLAUDE_AGENT_SDK_CLAUDE_CODE_VERSION } from '../sdk-version.js';
 
 interface ToolIdentity {
@@ -29,6 +37,40 @@ export interface ClaudeSdkInitExpectation {
 
 const MAX_CONTENT_BYTES = 256 * 1024;
 const MAX_TRACKED_ITEMS = 10_000;
+// Issue #132: a `tool_result` block's native `content` (the tool's real output text, or an array
+// of content blocks for multi-part results) is the full output this normalizer has always
+// discarded down to a synthetic "Claude tool completed"/"Claude tool failed" summary. Bounded to
+// the daemon attachment store's own per-file cap -- above that, the raw output is dropped at the
+// source rather than partially staged, leaving the existing synthetic summary as the only record
+// (graceful degradation, matching Codex's identical side channel for issue #132).
+const MAX_RAW_TOOL_OUTPUT_BYTES = ATTACHMENT_LIMITS_V2.maxFileBytes;
+const TOOL_OUTPUT_PREVIEW_MAX_BYTES = 4_096;
+
+/**
+ * Issue #132: `tool_result.content` is `string | Array<{type:'text',text} | ...other blocks>` per
+ * the Anthropic Messages API (ToolResultBlockParam). Only the plain-text shapes carry output worth
+ * preserving -- image/document/search-result/tool-reference/browser-state blocks are left for a
+ * follow-up, mirroring Codex's own scoped-to-two-item-types cut for the same issue.
+ */
+function rawToolOutputContent(
+  content: unknown,
+): { mimeType: 'text/plain'; text: string } | undefined {
+  if (typeof content === 'string') {
+    return content.length > 0 ? { mimeType: 'text/plain', text: content } : undefined;
+  }
+  if (!Array.isArray(content)) return undefined;
+  const sections = content
+    .filter(
+      (block): block is { type: 'text'; text: string } =>
+        !!block &&
+        typeof block === 'object' &&
+        (block as Record<string, unknown>).type === 'text' &&
+        typeof (block as Record<string, unknown>).text === 'string' &&
+        (block as Record<string, unknown>).text !== '',
+    )
+    .map((block) => block.text);
+  return sections.length > 0 ? { mimeType: 'text/plain', text: sections.join('\n\n') } : undefined;
+}
 
 function safeCount(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
@@ -75,6 +117,10 @@ export class ClaudeAgentSdkNormalizer {
   constructor(
     private readonly expectation: ClaudeSdkInitExpectation,
     private readonly emit: (event: AgentEventV2) => void,
+    /** Optional (issue #132): absent for callers that don't want the raw-output side channel
+     * (e.g. tests exercising only the AgentEventV2 stream). Never required for correctness of
+     * `emit()` itself -- a missing callback just means raw output is silently not captured. */
+    private readonly emitRawToolOutput?: (payload: RawToolOutputV2) => void,
   ) {}
 
   get providerSessionId(): string | undefined {
@@ -379,6 +425,7 @@ export class ClaudeAgentSdkNormalizer {
         );
       }
       identity.completed = true;
+      this.emitRawOutputIfPresent(block, identity);
       this.emit({
         type: 'tool.completed',
         turnId,
@@ -389,6 +436,25 @@ export class ClaudeAgentSdkNormalizer {
         summary: block.is_error === true ? 'Claude tool failed' : 'Claude tool completed',
       });
     }
+  }
+
+  private emitRawOutputIfPresent(block: Record<string, unknown>, identity: ToolIdentity): void {
+    if (!this.emitRawToolOutput) return;
+    const content = rawToolOutputContent(block.content);
+    if (!content) return;
+    const bytes = Buffer.from(content.text, 'utf8');
+    if (bytes.byteLength > MAX_RAW_TOOL_OUTPUT_BYTES) return;
+    const preview = boundedUtf8(content.text, TOOL_OUTPUT_PREVIEW_MAX_BYTES);
+    this.emitRawToolOutput({
+      contentBlockId: identity.contentBlockId,
+      toolCallId: identity.toolCallId,
+      mimeType: content.mimeType,
+      bytes,
+      preview,
+      previewTruncated: Buffer.byteLength(preview, 'utf8') < bytes.byteLength,
+      byteCount: bytes.byteLength,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+    });
   }
 
   private result(message: Record<string, unknown>): void {

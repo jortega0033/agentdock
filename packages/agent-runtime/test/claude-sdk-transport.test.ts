@@ -12,6 +12,7 @@ import {
   type ClaudeAgentSdkQuery,
 } from '../src/providers/claude/sdk/index.js';
 import { resolveClaudeSdkConfigDir } from '../src/providers/claude/sdk-options.js';
+import type { RawToolOutputV2 } from '../src/types.js';
 
 const testConfigRoot = mkdtempSync(join(tmpdir(), 'agent-dock-claude-sdk-test-'));
 const packageRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -688,6 +689,50 @@ describe('ClaudeAgentSdkTransport', () => {
     queryValue!.push(initMessage());
     await transport.started;
     await transport.close();
+    expect(transport.reaped).toBe(true);
+  });
+
+  it('flows a tool_result content block through the raw tool output side channel end-to-end (issue #132)', async () => {
+    const harness = fakeHarness();
+    const transport = createTransport(harness);
+    await vi.waitFor(() => expect(harness.startup).toHaveBeenCalledOnce());
+    expect(await transport.accepted).toBe('accepted');
+    harness.query().push(initMessage());
+    await transport.started;
+    await nextType(transport, 'turn.started');
+    harness.query().push({
+      type: 'assistant',
+      parent_tool_use_id: null,
+      message: {
+        id: randomUUID(),
+        content: [{ type: 'tool_use', id: 'native-tool-e2e', name: 'Read', input: {} }],
+      },
+    });
+    await nextType(transport, 'tool.started');
+    harness.query().push({
+      type: 'user',
+      parent_tool_use_id: null,
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'native-tool-e2e',
+            is_error: false,
+            content: 'end-to-end-secret-output',
+          },
+        ],
+      },
+    });
+    await nextType(transport, 'tool.completed');
+    await transport.close();
+
+    const toolOutputs: RawToolOutputV2[] = [];
+    if (transport.toolOutputs)
+      for await (const payload of transport.toolOutputs) toolOutputs.push(payload);
+    expect(toolOutputs).toHaveLength(1);
+    expect(toolOutputs[0]!.mimeType).toBe('text/plain');
+    expect(toolOutputs[0]!.bytes.toString('utf8')).toBe('end-to-end-secret-output');
     expect(transport.reaped).toBe(true);
   });
 });

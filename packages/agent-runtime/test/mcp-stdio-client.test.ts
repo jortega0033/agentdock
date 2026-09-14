@@ -261,6 +261,89 @@ describe('StdioMcpConnection', () => {
   });
 });
 
+describe('StdioMcpConnection protocol era negotiation (issue #139)', () => {
+  it('speaks modern 2026-07-28 to a server/discover-answering server, with no initialize handshake', async () => {
+    const cwd = await tempCwd();
+    const connection = new StdioMcpConnection(spawnFixture('modern'), cwd, FAST);
+    try {
+      const items = await connection.listCatalog();
+      // The fixture only serves tools/list when it sees the modern _meta.protocolVersion on the
+      // dispatch request -- a successful catalog proves _meta was actually threaded through, not
+      // just that discover succeeded.
+      expect(items.some((item) => item.kind === 'tool' && item.id === 'echo')).toBe(true);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it('fails closed when a modern server does not support this client\'s protocol version, without falling back to legacy', async () => {
+    const cwd = await tempCwd();
+    const connection = new StdioMcpConnection(spawnFixture('modern_unsupported_version'), cwd, FAST);
+    try {
+      await expect(connection.listCatalog()).rejects.toThrow(/does not support a compatible protocol version/);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it('falls back to legacy when the discover probe times out (no response, not an error)', async () => {
+    const cwd = await tempCwd();
+    const connection = new StdioMcpConnection(spawnFixture('discover_hangs'), cwd, { ...FAST, connectMs: 300 });
+    try {
+      const items = await connection.listCatalog();
+      expect(items.some((item) => item.kind === 'tool' && item.id === 'echo')).toBe(true);
+    } finally {
+      await connection.close();
+    }
+  }, 10_000);
+
+  it('falls back to legacy when discover responds with something that is not a real DiscoverResult', async () => {
+    const cwd = await tempCwd();
+    const connection = new StdioMcpConnection(spawnFixture('discover_malformed'), cwd, FAST);
+    try {
+      const items = await connection.listCatalog();
+      expect(items.some((item) => item.kind === 'tool' && item.id === 'echo')).toBe(true);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it('accepts a legacy server counter-offering a different supported revision this client also understands', async () => {
+    const cwd = await tempCwd();
+    const connection = new StdioMcpConnection(spawnFixture('legacy_counteroffer'), cwd, FAST);
+    try {
+      const items = await connection.listCatalog();
+      expect(items.some((item) => item.kind === 'tool' && item.id === 'echo')).toBe(true);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it('disconnects instead of proceeding when a legacy server counter-offers a revision this client does not understand', async () => {
+    const cwd = await tempCwd();
+    const connection = new StdioMcpConnection(spawnFixture('legacy_unsupported_counteroffer'), cwd, FAST);
+    try {
+      await expect(connection.listCatalog()).rejects.toThrow(/unsupported legacy protocol version/);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it('never sends a legacy initialize request once a server has already been proven modern', async () => {
+    const cwd = await tempCwd();
+    const connection = new StdioMcpConnection(spawnFixture('modern'), cwd, FAST);
+    try {
+      // Two independent dispatches -- listCatalog() then callTool() -- must both reuse the same
+      // settled era rather than re-probing or ever falling back mid-session.
+      await connection.listCatalog();
+      const result = await connection.callTool('echo', { value: 1 });
+      expect(result.status).toBe('completed');
+    } finally {
+      await connection.close();
+    }
+  });
+});
+
 describe('StdioConnectionManager', () => {
   it('reuses one live connection across a catalog fetch followed by an invocation', async () => {
     const cwd = await tempCwd();

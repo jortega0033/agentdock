@@ -17,8 +17,8 @@ function respond(id, result) {
   send({ jsonrpc: '2.0', id, result });
 }
 
-function respondError(id, message, code = -32000) {
-  send({ jsonrpc: '2.0', id, error: { code, message } });
+function respondError(id, message, code = -32000, data) {
+  send({ jsonrpc: '2.0', id, error: { code, message, ...(data !== undefined ? { data } : {}) } });
 }
 
 const JSON_RPC_METHOD_NOT_FOUND = -32601;
@@ -56,8 +56,39 @@ rl.on('line', (line) => {
     return;
   }
 
+  const JSON_RPC_UNSUPPORTED_PROTOCOL_VERSION = -32022;
+  const MODERN_META_PROTOCOL_VERSION = 'io.modelcontextprotocol/protocolVersion';
+
+  if (method === 'server/discover') {
+    if (mode === 'modern') {
+      return respond(id, {
+        resultType: 'complete',
+        supportedVersions: ['2026-07-28'],
+        capabilities: { tools: {} },
+        _meta: { 'io.modelcontextprotocol/serverInfo': { name: 'agentdock-fixture-modern', version: '1' } },
+      });
+    }
+    if (mode === 'modern_unsupported_version') {
+      return respondError(id, 'Unsupported protocol version', JSON_RPC_UNSUPPORTED_PROTOCOL_VERSION, {
+        supported: ['2099-01-01'],
+        requested: '2026-07-28',
+      });
+    }
+    if (mode === 'discover_hangs') return; // never responds -- exercises connect timeout -> legacy fallback
+    if (mode === 'discover_malformed') return respond(id, { ok: true }); // no supportedVersions -> legacy
+    // Everything else (including the default legacy fixture modes) falls through to the generic
+    // "unknown method" handler below, exactly like a real legacy server that has never heard of
+    // server/discover -- the fallback must not be keyed to one specific error code.
+  }
+
   if (method === 'initialize') {
     if (mode === 'slow_init') return; // never responds -- exercises connect timeout
+    if (mode === 'legacy_counteroffer') {
+      return respond(id, { protocolVersion: '2025-11-25', capabilities: { tools: {} }, serverInfo: { name: 'agentdock-fixture', version: '1' } });
+    }
+    if (mode === 'legacy_unsupported_counteroffer') {
+      return respond(id, { protocolVersion: '2020-01-01', capabilities: { tools: {} }, serverInfo: { name: 'agentdock-fixture', version: '1' } });
+    }
     respond(id, { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'agentdock-fixture', version: '1' } });
     return;
   }
@@ -65,6 +96,9 @@ rl.on('line', (line) => {
     if (mode === 'no_optional_methods')
       return respondError(id, 'Method not found', JSON_RPC_METHOD_NOT_FOUND);
     if (mode === 'list_server_error') return respondError(id, 'internal fixture failure', -32000);
+    if (mode === 'modern' && params?._meta?.[MODERN_META_PROTOCOL_VERSION] !== '2026-07-28') {
+      return respondError(id, 'missing or wrong modern _meta on dispatch', -32000);
+    }
     respond(id, { tools: TOOLS });
     return;
   }

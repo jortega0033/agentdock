@@ -31,6 +31,7 @@ import {
   workflowPanelStatus,
 } from './panel-status.js';
 import { ActivityTimeline } from './components/activity/ActivityTimeline.js';
+import { SessionSearchPanel } from './components/SessionSearchPanel.js';
 import { RendererInteractionTimelineProjector } from './components/activity/interaction-timeline.js';
 import { AgentDockMark } from './components/AgentDockMark.js';
 import { InteractionDialog, WorkspaceTrustDialog } from './components/SecurityDialogs.js';
@@ -96,6 +97,7 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
   const [revokingTrust, setRevokingTrust] = useState(false);
   const [creating, setCreating] = useState(false);
   const [catalogLoaded, setCatalogLoaded] = useState(false);
+  const [searchFocus, setSearchFocus] = useState<{ sessionId: string; sequence: number }>();
   const [workspace, dispatchWorkspace] = useReducer(
     sessionWorkspaceReducer,
     undefined,
@@ -327,6 +329,11 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
       ? projectedSessionStatus(selectedEntry.session.status)
       : 'idle';
 
+  const handleOpenSearchResult = useCallback((sessionId: string, sequence: number) => {
+    dispatchWorkspace({ type: 'select', sessionId });
+    setSearchFocus({ sessionId, sequence });
+  }, []);
+
   const handleCancel = useCallback(async (sessionId?: string) => {
     const target = sessionId ?? workspaceRef.current.selectedSessionId;
     if (!target) return;
@@ -552,6 +559,7 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
               </div>
               <span className="section-count">{workspace.order.length}</span>
             </div>
+            <SessionSearchPanel onOpenResult={handleOpenSearchResult} />
             <div className="session-list">
               {workspace.order.map((sessionId) => {
                 const entry = workspace.entries[sessionId];
@@ -777,6 +785,11 @@ export function App({ demoMode = false, onEnterDemo = NOOP, onExitDemo = NOOP }:
               events={selectedEntry?.activity.events ?? []}
               omittedEventCount={selectedEntry?.activity.omittedEventCount ?? 0}
               focusBlockingCards={!selectedInteraction}
+              focusSequence={
+                searchFocus?.sessionId === selectedEntry?.session.id
+                  ? searchFocus?.sequence
+                  : undefined
+              }
             />
             {selectedEntry && (
               <div className="row session-actions">

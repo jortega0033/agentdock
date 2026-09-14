@@ -9,6 +9,8 @@ import {
   cancelSessionV2ResponseSchema,
   commandAcknowledgementV2Schema,
   createSessionV2RequestSchema,
+  eventHistorySearchV2PageSchema,
+  eventHistorySearchV2QuerySchema,
   providersV2ResponseSchema,
   sessionContinuationInputV2Schema,
   sessionEventHistoryV2PageSchema,
@@ -58,6 +60,8 @@ import {
   type CommandAcknowledgementV2,
   type CreateSessionV2Request,
   type Effect,
+  type EventHistorySearchV2Page,
+  type EventHistorySearchV2Query,
   type ProviderId,
   type ProviderStatus,
   type ProviderStatusV2,
@@ -172,6 +176,7 @@ export interface AgentDockBridge {
     sessionId: string,
     options?: SessionEventHistoryV2Query,
   ): Promise<SessionEventHistoryV2Page>;
+  searchInteractiveSessionHistory(options: EventHistorySearchV2Query): Promise<EventHistorySearchV2Page>;
   reconnectInteractiveSession(sessionId: string): Promise<AgentSessionV2>;
   resumeInteractiveSession(
     sessionId: string,
@@ -763,6 +768,16 @@ const api: AgentDockBridge = {
     return {
       ...page,
       events: page.events.filter((event) => !INTERACTION_EVENT_TYPES.has(event.type)),
+    };
+  },
+  async searchInteractiveSessionHistory(options) {
+    const query = eventHistorySearchV2QuerySchema.parse(options);
+    const page = eventHistorySearchV2PageSchema.parse(
+      await ipcRenderer.invoke('daemon:search-interactive-session-history', query),
+    );
+    return {
+      ...page,
+      matches: page.matches.filter((match) => !INTERACTION_EVENT_TYPES.has(match.type)),
     };
   },
   async reconnectInteractiveSession(sessionId) {

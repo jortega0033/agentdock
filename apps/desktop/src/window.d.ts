@@ -13,6 +13,8 @@ import type {
   ProviderStatus,
   ProviderStatusV2,
   SessionContinuationInputV2,
+  EventHistorySearchV2Page,
+  EventHistorySearchV2Query,
   SessionEventHistoryV2Page,
   SessionEventHistoryV2Query,
   SessionListV2Page,
@@ -113,6 +115,7 @@ export interface AgentDockBridge {
     sessionId: string,
     options?: SessionEventHistoryV2Query,
   ): Promise<SessionEventHistoryV2Page>;
+  searchInteractiveSessionHistory(options: EventHistorySearchV2Query): Promise<EventHistorySearchV2Page>;
   reconnectInteractiveSession(sessionId: string): Promise<AgentSessionV2>;
   resumeInteractiveSession(
     sessionId: string,

@@ -18,6 +18,10 @@ export class McpTransportError extends Error {
       | 'overflow'
       | 'protocol_error',
     message: string,
+    /** The server's numeric JSON-RPC `error.code`, present only when `code === 'protocol_error'`.
+     * Callers must classify on this, never on `message` text -- a server's error message is
+     * free-form prose, not a stable API (issue #139). */
+    readonly jsonRpcCode?: number,
   ) {
     super(message);
     this.name = 'McpTransportError';
@@ -137,7 +141,8 @@ export class StdioJsonRpcTransport {
     this.pending.delete(key);
     clearTimeout(pending.timer);
     if (frame.error) {
-      pending.reject(new McpTransportError('protocol_error', frame.error.message));
+      const jsonRpcCode = typeof frame.error.code === 'number' ? frame.error.code : undefined;
+      pending.reject(new McpTransportError('protocol_error', frame.error.message, jsonRpcCode));
       return;
     }
     pending.resolve(frame.result);

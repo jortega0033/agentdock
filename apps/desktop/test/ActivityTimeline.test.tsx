@@ -364,6 +364,28 @@ describe('ActivityTimeline', () => {
     expect(screen.queryByText(/attachmentId/)).not.toBeInTheDocument();
   });
 
+  it("falls back to the generic details dump for a malformed output reference instead of silently dropping it (issue #132 review finding)", () => {
+    render(
+      <ActivityTimeline
+        events={[
+          event('tool.completed', 0, {
+            toolCallId: '123e4567-e89b-42d3-a456-426614174023',
+            contentBlockId: '123e4567-e89b-42d3-a456-426614174024',
+            toolName: 'command',
+            status: 'completed',
+            summary: 'Command completed with exit code 0',
+            // Missing byteCount/sha256/preview/previewTruncated -- toolOutputValue() must reject
+            // this, but it must not vanish from the timeline entirely.
+            output: { attachmentId: '123e4567-e89b-42d3-a456-426614174025' },
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.queryByLabelText('Tool output')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Command details')).toHaveTextContent('attachmentId');
+  });
+
   it('labels denied, cancelled, and resolved interactions by their terminal states', () => {
     const approvalRequestId = '123e4567-e89b-42d3-a456-426614174020';
     const cancelledQuestionId = '123e4567-e89b-42d3-a456-426614174021';

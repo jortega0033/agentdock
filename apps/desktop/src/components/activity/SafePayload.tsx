@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 
-const MAX_RENDERED_CHARACTERS = 16_384;
+export const MAX_RENDERED_CHARACTERS = 16_384;
 const MAX_RENDERED_ITEMS = 200;
 const MAX_RENDERED_DEPTH = 8;
 

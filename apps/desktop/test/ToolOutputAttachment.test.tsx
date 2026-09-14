@@ -4,6 +4,7 @@ import {
   ToolOutputAttachment,
   type ToolOutputRef,
 } from '../src/components/activity/ToolOutputAttachment.js';
+import { MAX_RENDERED_CHARACTERS } from '../src/components/activity/SafePayload.js';
 import { clearBridgeOverride, setBridgeOverride } from '../src/bridge.js';
 import type { AgentDockBridge } from '../src/window.js';
 
@@ -63,6 +64,22 @@ describe('ToolOutputAttachment (issue #132)', () => {
     );
     expect(download).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('button', { name: 'Load full output' })).not.toBeInTheDocument();
+  });
+
+  it('still shows the truncation marker for a load whose content exceeds the render bound', async () => {
+    const huge = 'y'.repeat(MAX_RENDERED_CHARACTERS + 5_000);
+    installDownloadBridge(() => ({
+      fileName: 'x.txt',
+      mimeType: 'text/plain',
+      bytes: new TextEncoder().encode(huge),
+    }));
+    render(<ToolOutputAttachment output={OUTPUT} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load full output' }));
+
+    await waitFor(() => expect(screen.getByText('Truncated')).toBeInTheDocument());
+    const rendered = document.querySelector('.activity-payload__content')?.textContent ?? '';
+    expect(rendered.length).toBeLessThan(MAX_RENDERED_CHARACTERS + 100);
   });
 
   it('surfaces a load failure as an alert without losing the visible preview', async () => {

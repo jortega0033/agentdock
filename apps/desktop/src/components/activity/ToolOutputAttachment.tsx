@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { getBridge } from '../../bridge.js';
-import { SafePayload } from './SafePayload.js';
+import { MAX_RENDERED_CHARACTERS, SafePayload } from './SafePayload.js';
 
 export interface ToolOutputRef {
   attachmentId: string;
@@ -27,7 +27,17 @@ export function ToolOutputAttachment({ output }: { output: ToolOutputRef }) {
     setState({ phase: 'loading' });
     try {
       const content = await getBridge().downloadAttachmentContent(output.attachmentId);
-      setState({ phase: 'loaded', text: new TextDecoder().decode(content.bytes) });
+      const decoded = new TextDecoder().decode(content.bytes);
+      // A staged attachment can be up to the daemon's 25 MiB attachment cap; SafePayload already
+      // bounds what it *renders* (MAX_RENDERED_CHARACTERS) but not what's held in this component's
+      // own state. Cap it here too -- one character over the threshold so SafePayload's own
+      // truncation marker/badge still applies exactly as it would for the untrimmed string,
+      // instead of silently hiding that this view is itself truncated.
+      const text =
+        decoded.length > MAX_RENDERED_CHARACTERS
+          ? decoded.slice(0, MAX_RENDERED_CHARACTERS + 1)
+          : decoded;
+      setState({ phase: 'loaded', text });
     } catch (failure) {
       setState({
         phase: 'error',

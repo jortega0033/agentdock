@@ -382,7 +382,10 @@ function CoreContent({ item }: { item: ActivityTimelineItem }) {
       data?.diff !== undefined ||
       data?.patch !== undefined;
     const output = toolOutputValue(data);
-    const remaining = itemDataWithout(item, ['output']);
+    // Only hide the raw `output` key once it actually rendered through the dedicated view above --
+    // a malformed one (toolOutputValue() returning undefined) must still be visible in the generic
+    // dump rather than silently vanishing from both places.
+    const remaining = itemDataWithout(item, output ? ['output'] : []);
     return (
       <>
         {output ? <ToolOutputAttachment output={output} /> : null}

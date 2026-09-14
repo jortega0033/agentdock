@@ -92,6 +92,84 @@ describe('provider component inspection', () => {
   });
 });
 
+describe('canonical Claude plugin manifest (.claude-plugin/plugin.json) -- issue #16 follow-up', () => {
+  it('reads the real declared name/description/dependencies from the canonical manifest, not the directory name', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'agent-dock-components-plugin-canonical-'));
+    const pluginDir = join(cwd, '.claude', 'plugins', 'my-plugin');
+    await mkdir(join(pluginDir, '.claude-plugin'), { recursive: true });
+    await writeFile(
+      join(pluginDir, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({
+        name: 'Real Plugin Name',
+        description: 'Declared in the canonical manifest',
+        dependencies: ['left-pad', 'is-odd'],
+      }),
+    );
+    const control = new FilesystemProviderComponentControlPlane('claude');
+    const result = await control.list(
+      { provider: 'claude', cwd, kind: 'plugin' },
+      { cwd, workspaceTrust: TRUSTED },
+    );
+    const item = result.items.find((entry) => entry.kind === 'plugin');
+    expect(item).toMatchObject({
+      name: 'Real Plugin Name',
+      description: 'Declared in the canonical manifest',
+      dependencies: ['left-pad', 'is-odd'],
+    });
+    expect(item?.loadError).toBeUndefined();
+  });
+
+  it('reports an inspectable loadError for a malformed canonical manifest instead of silently falling back to empty metadata', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'agent-dock-components-plugin-malformed-'));
+    const pluginDir = join(cwd, '.claude', 'plugins', 'broken-plugin');
+    await mkdir(join(pluginDir, '.claude-plugin'), { recursive: true });
+    await writeFile(join(pluginDir, '.claude-plugin', 'plugin.json'), 'not { valid json');
+    const control = new FilesystemProviderComponentControlPlane('claude');
+    const result = await control.list(
+      { provider: 'claude', cwd, kind: 'plugin' },
+      { cwd, workspaceTrust: TRUSTED },
+    );
+    const item = result.items.find((entry) => entry.kind === 'plugin');
+    expect(item?.name).toBe('broken-plugin');
+    expect(item?.loadError).toMatchObject({ code: 'manifest_invalid' });
+  });
+
+  it('still falls back to the legacy plugin.json/manifest.json/README.md chain when no canonical manifest is present', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'agent-dock-components-plugin-legacy-'));
+    const pluginDir = join(cwd, '.claude', 'plugins', 'legacy-plugin');
+    await mkdir(pluginDir, { recursive: true });
+    await writeFile(
+      join(pluginDir, 'plugin.json'),
+      '---\nname: Legacy Plugin\ndescription: No canonical manifest here\n---\n',
+    );
+    const control = new FilesystemProviderComponentControlPlane('claude');
+    const result = await control.list(
+      { provider: 'claude', cwd, kind: 'plugin' },
+      { cwd, workspaceTrust: TRUSTED },
+    );
+    const item = result.items.find((entry) => entry.kind === 'plugin');
+    expect(item).toMatchObject({ name: 'Legacy Plugin', description: 'No canonical manifest here' });
+    expect(item?.loadError).toBeUndefined();
+  });
+
+  it('does not apply canonical Claude plugin-manifest parsing to a Codex plugin', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'agent-dock-components-plugin-codex-'));
+    const pluginDir = join(cwd, '.codex', 'plugins', 'codex-plugin');
+    await mkdir(join(pluginDir, '.claude-plugin'), { recursive: true });
+    await writeFile(
+      join(pluginDir, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'Should be ignored for Codex' }),
+    );
+    const control = new FilesystemProviderComponentControlPlane('codex');
+    const result = await control.list(
+      { provider: 'codex', cwd, kind: 'plugin' },
+      { cwd, workspaceTrust: TRUSTED },
+    );
+    const item = result.items.find((entry) => entry.kind === 'plugin');
+    expect(item?.name).toBe('codex-plugin');
+  });
+});
+
 describe('Claude hook management (the one real provider-native operation)', () => {
   async function settingsFixture(hooks: Record<string, unknown>): Promise<string> {
     const cwd = await mkdtemp(join(tmpdir(), 'agent-dock-hooks-'));

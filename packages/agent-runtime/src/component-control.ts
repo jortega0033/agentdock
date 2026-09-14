@@ -130,6 +130,78 @@ function preview(text: string): ProviderComponentDescriptorV2['manifestPreview']
   };
 }
 
+const MAX_CANONICAL_PLUGIN_MANIFEST_BYTES = 256 * 1024;
+
+interface CanonicalPluginManifest {
+  name?: string;
+  description?: string;
+  dependencies: string[];
+  contents: string;
+  loadError?: { code: string; summary: string };
+}
+
+/**
+ * Anthropic's Claude Code plugin structure documents `.claude-plugin/plugin.json` as the
+ * required canonical manifest location -- JSON, not the YAML-style frontmatter the root-level
+ * plugin.json/manifest.json/README.md fallback below expects. Without this, a canonical plugin
+ * silently fell back to directory-name/empty metadata instead of its real declared name,
+ * description, and dependencies (issue #16 follow-up, prerequisite for #130's risk findings).
+ * Returns undefined only when no canonical manifest exists here at all, so the caller's legacy
+ * fallback chain still applies to non-canonical/community plugin layouts unchanged.
+ */
+async function readCanonicalClaudePluginManifest(
+  componentDir: string,
+): Promise<CanonicalPluginManifest | undefined> {
+  const manifestPath = join(componentDir, '.claude-plugin', 'plugin.json');
+  if (!(await within(componentDir, manifestPath))) return undefined;
+  let raw: string;
+  try {
+    raw = await readFile(manifestPath, 'utf8');
+  } catch {
+    return undefined;
+  }
+  if (Buffer.byteLength(raw, 'utf8') > MAX_CANONICAL_PLUGIN_MANIFEST_BYTES) {
+    return {
+      dependencies: [],
+      contents: '',
+      loadError: {
+        code: 'manifest_invalid',
+        summary: 'Canonical plugin manifest exceeds the maximum allowed size',
+      },
+    };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {
+      dependencies: [],
+      contents: '',
+      loadError: { code: 'manifest_invalid', summary: 'Canonical plugin manifest is not valid JSON' },
+    };
+  }
+  const manifest = record(parsed);
+  if (!manifest) {
+    return {
+      dependencies: [],
+      contents: '',
+      loadError: {
+        code: 'manifest_invalid',
+        summary: 'Canonical plugin manifest must be a JSON object',
+      },
+    };
+  }
+  return {
+    name: typeof manifest.name === 'string' ? manifest.name.slice(0, 256) : undefined,
+    description:
+      typeof manifest.description === 'string' ? manifest.description.slice(0, 4_096) : undefined,
+    dependencies: Array.isArray(manifest.dependencies)
+      ? manifest.dependencies.filter((item): item is string => typeof item === 'string').slice(0, 256)
+      : [],
+    contents: raw,
+  };
+}
+
 async function within(root: string, candidate: string): Promise<boolean> {
   try {
     const [canonicalRoot, canonicalCandidate] = await Promise.all([
@@ -162,14 +234,24 @@ async function scanRoot(
       : join(root.directory, entry.name);
     if (!(await within(root.directory, candidate))) continue;
     let contents = '';
+    let canonical: CanonicalPluginManifest | undefined;
     try {
       if (entry.isDirectory() && !root.fileName) {
-        for (const manifest of ['plugin.json', 'manifest.json', 'README.md']) {
-          try {
-            contents = await readFile(join(candidate, manifest), 'utf8');
-            break;
-          } catch {
-            /* bounded fallback */
+        if (root.kind === 'plugin' && provider === 'claude') {
+          canonical = await readCanonicalClaudePluginManifest(candidate);
+          if (canonical) contents = canonical.contents;
+        }
+        // No canonical manifest was found here (or this isn't a Claude plugin root) -- fall back
+        // to the legacy chain. A malformed/oversized canonical manifest reports loadError instead
+        // of silently trying another file, so a real problem doesn't masquerade as empty metadata.
+        if (!canonical) {
+          for (const manifest of ['plugin.json', 'manifest.json', 'README.md']) {
+            try {
+              contents = await readFile(join(candidate, manifest), 'utf8');
+              break;
+            } catch {
+              /* bounded fallback */
+            }
           }
         }
       } else {
@@ -180,26 +262,33 @@ async function scanRoot(
     }
     if (Buffer.byteLength(contents, 'utf8') > 1_000_000) continue;
     const metadata = frontmatter(contents);
-    const name = (metadata.name || entry.name.replace(/\.md$/i, '')).slice(0, 256);
+    const name = (canonical?.name || metadata.name || entry.name.replace(/\.md$/i, '')).slice(
+      0,
+      256,
+    );
+    const description = canonical?.description ?? metadata.description?.slice(0, 4_096);
+    const dependencies =
+      canonical?.dependencies ??
+      (metadata.dependencies
+        ? metadata.dependencies
+            .split(',')
+            .map((item) => item.trim())
+            .filter(Boolean)
+            .slice(0, 256)
+        : []);
     const explicitInvoke = metadata['user-invocable'] === 'true';
     items.push({
       id: `${root.scope}/${root.kind}/${entry.name}`,
       provider,
       kind: root.kind,
       name,
-      ...(metadata.description ? { description: metadata.description.slice(0, 4_096) } : {}),
+      ...(description ? { description } : {}),
       scope: root.scope,
       source: 'filesystem',
       displayPath: `${root.marker}/${entry.name}${root.fileName ? `/${root.fileName}` : ''}`,
       enabled: root.scope === 'user' || trusted,
       trusted: root.scope === 'user' || trusted,
-      dependencies: metadata.dependencies
-        ? metadata.dependencies
-            .split(',')
-            .map((item) => item.trim())
-            .filter(Boolean)
-            .slice(0, 256)
-        : [],
+      dependencies,
       // The filesystem layout can declare provider-native invocation support, but this
       // inspector has no provider invocation transport. Keep the declaration visible
       // without advertising an operation that will always fail.
@@ -207,6 +296,7 @@ async function scanRoot(
       supportsDirectInvoke: false,
       supportsManage: false,
       manifestPreview: preview(contents),
+      ...(canonical?.loadError ? { loadError: canonical.loadError } : {}),
     });
   }
   return items;

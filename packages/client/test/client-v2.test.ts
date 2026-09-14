@@ -167,6 +167,17 @@ const SESSION_HISTORY_PAGE_V2 = {
   events: [extensionSummaryEvent(0)],
   nextCursor: 'page_2',
 };
+const SEARCH_PAGE_V2 = {
+  matches: [
+    {
+      sessionId: SESSION_ID,
+      executionId: '123e4567-e89b-42d3-a456-426614174001',
+      sequence: 0,
+      type: 'error',
+      excerpt: 'connection reset by peer',
+    },
+  ],
+};
 
 describe('AgentDockClient.v2 protocol discovery', () => {
   it('uses v2 when it is the highest shared protocol', async () => {
@@ -332,6 +343,34 @@ describe('AgentDockClient.v2 response validation', () => {
     expect(fetchImpl.mock.calls.some(([url]) => String(url).includes('providerSessionId'))).toBe(
       false,
     );
+  });
+
+  it('searches retained normalized event history on the versioned route (issue #131)', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      if (url.endsWith('/v2/sessions/search') && init?.method === 'POST')
+        return jsonResponse(200, SEARCH_PAGE_V2);
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const client = makeClient(fetchImpl);
+
+    await expect(
+      client.v2.sessions.search({ query: 'connection reset', provider: 'claude' }),
+    ).resolves.toEqual(SEARCH_PAGE_V2);
+
+    const searchCall = fetchImpl.mock.calls.find(([url]) =>
+      String(url).endsWith('/v2/sessions/search'),
+    );
+    expect(searchCall?.[1]).toMatchObject({
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(JSON.parse((searchCall?.[1] as RequestInit).body as string)).toEqual({
+      query: 'connection reset',
+      provider: 'claude',
+    });
+
+    await expect(client.v2.sessions.search({ query: '' })).rejects.toThrow();
   });
 
   it('sends a validated command on the authenticated versioned route', async () => {

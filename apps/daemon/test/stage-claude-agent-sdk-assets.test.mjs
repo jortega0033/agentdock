@@ -30,7 +30,7 @@ describe('stageClaudeAgentSdkAssets', () => {
       return;
     }
     expect(staged.executablePath).toBe(join(root, 'claude.exe'));
-    expect(staged).toMatchObject({ sdkVersion: '0.3.260', claudeCodeVersion: '2.1.260' });
+    expect(staged).toMatchObject({ sdkVersion: '0.3.268', claudeCodeVersion: '2.1.268' });
     expect((await stat(staged.executablePath)).isFile()).toBe(true);
     await Promise.all([
       access(join(root, 'LICENSE.sdk.md')),

@@ -23,6 +23,9 @@ import {
   PROVIDER_IDS,
   agentEventV2EnvelopeSchema,
   agentSessionV2Schema,
+  eventHistorySearchV2MatchSchema,
+  eventHistorySearchV2PageSchema,
+  eventHistorySearchV2QuerySchema,
   providerSessionIdV2Schema,
   sessionEventHistoryV2PageSchema,
   sessionEventHistoryV2QuerySchema,
@@ -30,6 +33,9 @@ import {
   sessionListV2QuerySchema,
   type AgentEventV2Envelope,
   type AgentSessionV2,
+  type EventHistorySearchV2Match,
+  type EventHistorySearchV2Page,
+  type EventHistorySearchV2Query,
   type ProviderId,
   type SessionEventHistoryV2Page,
   type SessionEventHistoryV2Query,
@@ -42,6 +48,22 @@ const CURRENT_SCHEMA_VERSION = 1;
 const DEFAULT_PAGE_SIZE = 50;
 const DEFAULT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 const DEFAULT_MAX_RECORDS = 500;
+/** issue #131: bounds on a single search request's work, independent of the match-count limit --
+ * a rare/absent literal must not force one request to scan the entire retained history. */
+const MAX_SEARCH_SESSIONS_PER_REQUEST = 200;
+const MAX_SEARCH_EVENTS_PER_REQUEST = 5_000;
+const MAX_SEARCH_EXCERPT_LENGTH = 240;
+const SEARCH_EXCERPT_RADIUS = 100;
+const SEARCH_META_KEYS = new Set([
+  'sessionId',
+  'executionId',
+  'parentExecutionId',
+  'turnId',
+  'sequence',
+  'timestamp',
+  'type',
+  'requestId',
+]);
 const DEFAULT_MAX_BYTES = 250 * 1024 * 1024;
 const TERMINAL_STATUSES = new Set<AgentSessionV2['status']>([
   'completed',
@@ -162,6 +184,7 @@ export interface ExecutionGraphStore {
   get(id: string): DurableExecutionRecord | undefined;
   list(query?: SessionListV2Query): SessionListV2Page;
   history(id: string, query?: SessionEventHistoryV2Query): SessionEventHistoryV2Page | undefined;
+  search(query: EventHistorySearchV2Query): EventHistorySearchV2Page;
   appendEvent(id: string, event: AgentEventV2Envelope): void;
   deleteLineage(id: string): boolean;
   acquireContinuation(provider: ProviderId, nativeId: string, leaseId: string): void;
@@ -182,10 +205,13 @@ export interface ExecutionGraphStoreOptions {
 
 interface CursorPayload {
   version: 1;
-  kind: 'history' | 'list';
+  kind: 'history' | 'list' | 'search';
   after?: string;
   sessionId?: string;
   nextSequence?: number;
+  /** 'search' only: how many sessions (in the same newest-first order `list()` uses) to skip
+   * before resuming a cross-session scan. */
+  sessionIndex?: number;
 }
 
 function storeError(code: ExecutionGraphStoreErrorCode, message: string): never {
@@ -369,7 +395,9 @@ function decodeCursor(cursor: string | undefined, kind: CursorPayload['kind']): 
       (parsed.after !== undefined && typeof parsed.after !== 'string') ||
       (parsed.sessionId !== undefined && typeof parsed.sessionId !== 'string') ||
       (parsed.nextSequence !== undefined &&
-        (!Number.isSafeInteger(parsed.nextSequence) || parsed.nextSequence < 0))
+        (!Number.isSafeInteger(parsed.nextSequence) || parsed.nextSequence < 0)) ||
+      (parsed.sessionIndex !== undefined &&
+        (!Number.isSafeInteger(parsed.sessionIndex) || parsed.sessionIndex < 0))
     ) {
       storeError('invalid_cursor', 'invalid execution graph cursor');
     }
@@ -378,6 +406,41 @@ function decodeCursor(cursor: string | undefined, kind: CursorPayload['kind']): 
     if (error instanceof ExecutionGraphStoreError) throw error;
     throw new ExecutionGraphStoreError('invalid_cursor', 'invalid execution graph cursor');
   }
+}
+
+function searchExcerpt(text: string, matchIndex: number, matchLength: number): string {
+  const start = Math.max(0, matchIndex - SEARCH_EXCERPT_RADIUS);
+  const end = Math.min(text.length, matchIndex + matchLength + SEARCH_EXCERPT_RADIUS);
+  const prefix = start > 0 ? '…' : '';
+  const suffix = end < text.length ? '…' : '';
+  return `${prefix}${text.slice(start, end)}${suffix}`.slice(0, MAX_SEARCH_EXCERPT_LENGTH);
+}
+
+/** Depth-bounded, case-insensitive literal substring search over an already-validated event's
+ * own safe fields -- the same "everything except identifiers/meta" allowlist the reference
+ * desktop's generic activity renderer uses, so this never touches fields the client wouldn't
+ * already be allowed to display. Returns the first match's excerpt, or undefined. */
+function searchValue(value: unknown, needle: string, depth: number): string | undefined {
+  if (depth > 4) return undefined;
+  if (typeof value === 'string') {
+    const index = value.toLowerCase().indexOf(needle);
+    return index < 0 ? undefined : searchExcerpt(value, index, needle.length);
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const excerpt = searchValue(item, needle, depth + 1);
+      if (excerpt !== undefined) return excerpt;
+    }
+    return undefined;
+  }
+  if (value !== null && typeof value === 'object') {
+    for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+      if (depth === 0 && SEARCH_META_KEYS.has(key)) continue;
+      const excerpt = searchValue(nested, needle, depth + 1);
+      if (excerpt !== undefined) return excerpt;
+    }
+  }
+  return undefined;
 }
 
 function validateLease(provider: ProviderId, nativeId: string, leaseId: string): void {
@@ -515,6 +578,104 @@ export class MemoryExecutionGraphStore implements ExecutionGraphStore {
           }
         : {}),
     }) as SessionEventHistoryV2Page;
+  }
+
+  /**
+   * A bounded, read-only progressive scan across already-retained normalized event history
+   * (issue #131) -- not a permanent index, and never a whole-store grep in one request. Sessions
+   * are visited newest-first (the same order `list()` uses); each request's own scan work is
+   * capped independently of the match-count `limit`, and a `nextCursor` is returned whenever
+   * either cap is hit so a rare/absent query can never force one request to hold the whole
+   * retained history in flight.
+   */
+  search(query: EventHistorySearchV2Query): EventHistorySearchV2Page {
+    let parsed: EventHistorySearchV2Query;
+    try {
+      parsed = eventHistorySearchV2QuerySchema.parse(query);
+    } catch {
+      storeError('invalid_cursor', 'invalid event search query');
+    }
+    const cursor = decodeCursor(parsed.cursor, 'search');
+    const needle = parsed.query.toLowerCase();
+    const limit = parsed.limit ?? DEFAULT_PAGE_SIZE;
+    const sessions = [...this.recordsById.values()]
+      .map((record) => record.session)
+      .filter((session) => parsed.provider === undefined || session.provider === parsed.provider)
+      .filter((session) => parsed.cwd === undefined || session.cwd === parsed.cwd)
+      .sort((left, right) => {
+        const timeOrder = right.startedAt.localeCompare(left.startedAt);
+        return timeOrder === 0 ? left.id.localeCompare(right.id) : timeOrder;
+      });
+
+    let sessionIndex = cursor.sessionIndex ?? 0;
+    // A stale cursor pointing past the current (possibly since-shrunk) retained session list is
+    // simply "no more results," not an error -- retention naturally evicts old sessions between
+    // paged requests, unlike history()'s single-session cursor, which does treat that as invalid.
+    if (
+      cursor.sessionId !== undefined &&
+      sessionIndex < sessions.length &&
+      sessions[sessionIndex]?.id !== cursor.sessionId
+    ) {
+      storeError('invalid_cursor', 'search cursor no longer matches the retained session order');
+    }
+
+    const matches: EventHistorySearchV2Match[] = [];
+    let sessionsScanned = 0;
+    let eventsScanned = 0;
+
+    const cursorAt = (index: number, sessionId?: string, nextSequence?: number): string =>
+      encodeCursor({ version: 1, kind: 'search', sessionIndex: index, sessionId, nextSequence });
+
+    for (; sessionIndex < sessions.length; sessionIndex += 1) {
+      if (sessionsScanned >= MAX_SEARCH_SESSIONS_PER_REQUEST) {
+        return eventHistorySearchV2PageSchema.parse({
+          matches,
+          nextCursor: cursorAt(sessionIndex),
+        }) as EventHistorySearchV2Page;
+      }
+      const session = sessions[sessionIndex]!;
+      const events = this.eventsById.get(session.id) ?? [];
+      const resumeSequence = sessionIndex === (cursor.sessionIndex ?? 0) ? cursor.nextSequence : undefined;
+      const startIndex =
+        resumeSequence === undefined
+          ? 0
+          : events.findIndex((event) => event.sequence >= resumeSequence);
+      let eventIndex = startIndex < 0 ? events.length : startIndex;
+      for (; eventIndex < events.length; eventIndex += 1) {
+        if (eventsScanned >= MAX_SEARCH_EVENTS_PER_REQUEST) {
+          return eventHistorySearchV2PageSchema.parse({
+            matches,
+            nextCursor: cursorAt(sessionIndex, session.id, events[eventIndex]!.sequence),
+          }) as EventHistorySearchV2Page;
+        }
+        eventsScanned += 1;
+        const event = events[eventIndex]!;
+        const excerpt = searchValue(event, needle, 0);
+        if (excerpt !== undefined) {
+          matches.push(
+            eventHistorySearchV2MatchSchema.parse({
+              sessionId: session.id,
+              executionId: session.executionId,
+              sequence: event.sequence,
+              type: event.type,
+              ...(event.timestamp ? { timestamp: event.timestamp } : {}),
+              excerpt,
+            }) as EventHistorySearchV2Match,
+          );
+        }
+        if (matches.length >= limit) {
+          const next = events[eventIndex + 1];
+          return eventHistorySearchV2PageSchema.parse({
+            matches,
+            nextCursor: next
+              ? cursorAt(sessionIndex, session.id, next.sequence)
+              : cursorAt(sessionIndex + 1),
+          }) as EventHistorySearchV2Page;
+        }
+      }
+      sessionsScanned += 1;
+    }
+    return eventHistorySearchV2PageSchema.parse({ matches }) as EventHistorySearchV2Page;
   }
 
   appendEvent(id: string, input: AgentEventV2Envelope): void {

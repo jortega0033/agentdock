@@ -763,9 +763,17 @@ export class SessionManager {
       sessionId,
       stream: singleChunkStream(payload.bytes),
     });
+    // The store independently MIME-sniffs the actual bytes and may disagree with the normalizer's
+    // always-text/plain declaration (e.g. output that happens to start with `{`/`[`); prefer the
+    // sniffed value whenever it is one of this ref's two supported types so the wire event and the
+    // `Content-Type` the download route actually serves never disagree.
+    const mimeType =
+      attachment.mimeType === 'text/plain' || attachment.mimeType === 'application/json'
+        ? attachment.mimeType
+        : payload.mimeType;
     return {
       attachmentId: attachment.id,
-      mimeType: payload.mimeType,
+      mimeType,
       byteCount: payload.byteCount,
       sha256: payload.sha256,
       preview: payload.preview,
@@ -773,8 +781,12 @@ export class SessionManager {
     };
   }
 
-  /** Bounded wait for the cold-start race documented on `PENDING_TOOL_OUTPUT_WAIT_MS`; see there. */
+  /** Bounded wait for the cold-start/reordering race documented on `PENDING_TOOL_OUTPUT_WAIT_MS`;
+   * see there. A miss after the wait is logged (not just silently dropped) since it would mean
+   * that documented ordering assumption was actually violated -- worth knowing about, not just
+   * quietly serving one fewer attachment reference. */
   private async pendingToolOutput(
+    id: string,
     runtime: InteractiveRuntimeState,
     contentBlockId: string,
   ): Promise<ToolOutputRefV2 | undefined> {
@@ -782,6 +794,12 @@ export class SessionManager {
     if (!pending) {
       await new Promise((resolve) => setTimeout(resolve, PENDING_TOOL_OUTPUT_WAIT_MS));
       pending = runtime.pendingToolOutputs.get(contentBlockId);
+      if (!pending) {
+        this.logger.warn('tool.completed had no matching raw output after the fallback wait', {
+          sessionId: id,
+          contentBlockId,
+        });
+      }
     }
     if (!pending) return undefined;
     runtime.pendingToolOutputs.delete(contentBlockId);
@@ -866,7 +884,7 @@ export class SessionManager {
       // Issue #132: joins this event back to whatever `consumeToolOutputs()` staged for the same
       // `contentBlockId`, if anything. No match (nothing to preserve, staging failed, or MIME
       // unsupported) is not an error -- the event is forwarded unchanged, exactly as it always was.
-      const output = await this.pendingToolOutput(runtime, event.contentBlockId);
+      const output = await this.pendingToolOutput(id, runtime, event.contentBlockId);
       if (output) return { ...event, output };
     }
     return event;

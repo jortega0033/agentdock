@@ -3104,6 +3104,38 @@ describe('SessionManager — raw tool output staging (issue #132)', () => {
     await tick();
   });
 
+  it("prefers the attachment store's own sniffed mimeType over the normalizer's declared one when they disagree", async () => {
+    // The normalizer always declares 'text/plain' (see rawToolOutputContent() in the Codex
+    // normalizer), but the store independently sniffs actual bytes and calls JSON-shaped output
+    // 'application/json' -- the wire ref must reflect what GET .../content actually serves.
+    const attachmentStore = await newAttachmentStore();
+    const { interactive, sessionManager, session } = await setupInteractive({}, { attachmentStore });
+    const received: AgentEventV2[] = [];
+    sessionManager.subscribeInteractive(session.id, 0, (_i, event) => received.push(event));
+
+    const contentBlockId = uuid(9);
+    const toolCallId = uuid(10);
+    const json = '{"exitCode":0}';
+    interactive.pushToolOutput({
+      contentBlockId,
+      toolCallId,
+      mimeType: 'text/plain',
+      bytes: Buffer.from(json),
+      preview: json,
+      previewTruncated: false,
+      byteCount: Buffer.byteLength(json),
+      sha256: 'deadbeef-json',
+    });
+    interactive.push(toolCompleted(toolCallId, contentBlockId));
+
+    const event = await waitForEvent(received, (candidate) => candidate.type === 'tool.completed');
+    expect(event).toMatchObject({ output: { mimeType: 'application/json' } });
+
+    interactive.push({ type: 'session.completed' });
+    interactive.finish();
+    await tick();
+  });
+
   it('forwards tool.completed without an output reference when no attachment store is configured', async () => {
     const { interactive, sessionManager, session } = await setupInteractive();
     const received: AgentEventV2[] = [];
@@ -3142,6 +3174,39 @@ describe('SessionManager — raw tool output staging (issue #132)', () => {
     const event = await waitForEvent(received, (candidate) => candidate.type === 'tool.completed');
     expect((event as { output?: unknown }).output).toBeUndefined();
     expect(attachmentStore.list()).toHaveLength(0);
+
+    interactive.push({ type: 'session.completed' });
+    interactive.finish();
+    await tick();
+  });
+
+  it('still attaches the output reference when tool.completed arrives before its matching raw output (reordered delivery)', async () => {
+    // Exercises PENDING_TOOL_OUTPUT_WAIT_MS's fallback wait directly: the two channels are
+    // independent, so nothing guarantees the raw-output side is drained first in every case.
+    const attachmentStore = await newAttachmentStore();
+    const { interactive, sessionManager, session } = await setupInteractive({}, { attachmentStore });
+    const received: AgentEventV2[] = [];
+    sessionManager.subscribeInteractive(session.id, 0, (_i, event) => received.push(event));
+
+    const contentBlockId = uuid(7);
+    const toolCallId = uuid(8);
+    interactive.push(toolCompleted(toolCallId, contentBlockId));
+    await tick(5);
+    interactive.pushToolOutput({
+      contentBlockId,
+      toolCallId,
+      mimeType: 'text/plain',
+      bytes: Buffer.from('late arrival\n'),
+      preview: 'late arrival\n',
+      previewTruncated: false,
+      byteCount: 13,
+      sha256: 'deadbeef-late',
+    });
+
+    const event = await waitForEvent(received, (candidate) => candidate.type === 'tool.completed');
+    expect(event).toMatchObject({
+      output: { byteCount: 13, sha256: 'deadbeef-late', preview: 'late arrival\n' },
+    });
 
     interactive.push({ type: 'session.completed' });
     interactive.finish();

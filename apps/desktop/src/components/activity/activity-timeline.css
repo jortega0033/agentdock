@@ -245,6 +245,28 @@
   font-family: 'Cascadia Code', 'SFMono-Regular', Consolas, monospace;
 }
 
+.tool-output-attachment {
+  min-width: 0;
+  margin-top: 12px;
+  overflow: hidden;
+  border: 1px solid #d8e1ed;
+  border-radius: 9px;
+  background: #0b1020;
+  color: #dbeafe;
+}
+
+.tool-output-attachment__meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 9px;
+  border-top: 1px solid #26334a;
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .activity-plan {
   display: grid;
   gap: 8px;

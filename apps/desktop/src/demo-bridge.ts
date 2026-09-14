@@ -92,6 +92,11 @@ export function createDemoBridge(): AgentDockBridge {
       createdAt: '2026-01-01T00:00:00.000Z',
     }),
     selectAndUploadAttachments: async () => [],
+    downloadAttachmentContent: async () => ({
+      fileName: 'demo-output.txt',
+      mimeType: 'text/plain',
+      bytes: new TextEncoder().encode('Demo mode has no real attachment store.'),
+    }),
     validateStructuredOutput: async (input) => ({ valid: true, normalizedOutput: input.output, errors: [] }),
     createSession: async () => {
       window.setTimeout(() => {

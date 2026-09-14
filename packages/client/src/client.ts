@@ -91,6 +91,7 @@ import {
   type WorktreePreviewRequestV2,
   type WorktreePreviewV2,
   ATTACHMENT_LIMITS_V2,
+  attachmentIdV2Schema,
   attachmentListV2Schema,
   attachmentMetadataV2Schema,
   attachmentReferenceRequestV2Schema,
@@ -101,6 +102,7 @@ import {
   type StructuredWorkflowResultV2,
 } from '@agent-dock/shared';
 import {
+  AttachmentNotFoundError,
   DaemonError,
   DaemonUnavailableError,
   ProtocolMismatchError,
@@ -150,6 +152,13 @@ export interface AttachmentUploadInput {
   size: number;
   stream: unknown;
   sessionId?: string;
+}
+
+/** The full bytes behind an attachment, e.g. a `ToolOutputRefV2.attachmentId` (issue #132). */
+export interface AttachmentContentV2 {
+  fileName: string;
+  mimeType: string;
+  bytes: Uint8Array;
 }
 
 export type SessionListV2Options = SessionListV2Query;
@@ -278,6 +287,7 @@ export class AgentDockClient {
       upload: (input: AttachmentUploadInput): Promise<AttachmentMetadataV2> => this.uploadAttachmentV2(input),
       list: (): Promise<AttachmentMetadataV2[]> => this.listAttachmentsV2(),
       reference: (attachmentIds: string[], sessionId: string): Promise<AttachmentMetadataV2[]> => this.referenceAttachmentsV2(attachmentIds, sessionId),
+      content: (attachmentId: string): Promise<AttachmentContentV2> => this.downloadAttachmentV2(attachmentId),
     },
     structured: {
       validate: (input: StructuredWorkflowRequestV2): Promise<StructuredWorkflowResultV2> => this.validateStructuredWorkflowV2(input),
@@ -709,6 +719,24 @@ export class AgentDockClient {
 
   private async listAttachmentsV2(): Promise<AttachmentMetadataV2[]> {
     return (await this.requestV2('/v2/attachments', attachmentListV2Schema, 'protocol-v2 attachments', {}, { expectedStatus: 200 })).attachments;
+  }
+
+  private async downloadAttachmentV2(attachmentId: string): Promise<AttachmentContentV2> {
+    const id = validateInput(attachmentIdV2Schema, attachmentId, 'protocol-v2 attachment id');
+    const res = await this.fetchAuthenticated(
+      PROTOCOL_V2,
+      `/v2/attachments/${encodeURIComponent(id)}/content`,
+      {},
+      { notFound: () => new AttachmentNotFoundError(id), notFoundCode: 'attachment_not_found' },
+    );
+    // The daemon route strips '"' from the filename before quoting it (v2-multimodal.ts), so it
+    // never needs escaping here -- a plain non-greedy match is exact, not a heuristic.
+    const fileNameMatch = /filename="([^"]*)"/.exec(res.headers.get('content-disposition') ?? '');
+    return {
+      fileName: fileNameMatch?.[1] || id,
+      mimeType: res.headers.get('content-type') ?? 'application/octet-stream',
+      bytes: new Uint8Array(await res.arrayBuffer()),
+    };
   }
 
   private async referenceAttachmentsV2(attachmentIds: string[], sessionId: string): Promise<AttachmentMetadataV2[]> {

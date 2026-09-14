@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { projectActivityTimeline } from './model.js';
 import { SafePayload } from './SafePayload.js';
+import { ToolOutputAttachment, type ToolOutputRef } from './ToolOutputAttachment.js';
 import type { ActivityTimelineItem, SafeActivityValue, TimelineEventInput } from './types.js';
 import emptyEventsIllustration from '../../../assets/illustrations/empty-events.svg';
 import './activity-timeline.css';
@@ -24,6 +25,25 @@ function numberValue(record: SafeRecord | undefined, key: string): number | unde
 function arrayValue(record: SafeRecord | undefined, key: string): readonly SafeActivityValue[] {
   const value = record?.[key];
   return Array.isArray(value) ? value : [];
+}
+
+/** Narrows `tool.completed`'s bounded `output` field (issue #132) out of the generic sanitized
+ * data blob. Never trusts it structurally beyond what's needed to render safely -- a malformed or
+ * missing field just means the dedicated attachment UI doesn't render, not a crash. */
+function toolOutputValue(record: SafeRecord | undefined): ToolOutputRef | undefined {
+  const value = record?.output;
+  if (!isRecord(value)) return undefined;
+  const { attachmentId, mimeType, byteCount, sha256, preview, previewTruncated } = value;
+  if (
+    typeof attachmentId !== 'string' ||
+    typeof mimeType !== 'string' ||
+    typeof byteCount !== 'number' ||
+    typeof sha256 !== 'string' ||
+    typeof preview !== 'string' ||
+    typeof previewTruncated !== 'boolean'
+  )
+    return undefined;
+  return { attachmentId, mimeType, byteCount, sha256, preview, previewTruncated };
 }
 
 function humanStatus(state: ActivityTimelineItem['state']): string {
@@ -361,13 +381,23 @@ function CoreContent({ item }: { item: ActivityTimelineItem }) {
       /(?:diff|patch|file.?change|edit)/iu.test(toolName) ||
       data?.diff !== undefined ||
       data?.patch !== undefined;
-    return item.data === undefined ? null : (
-      <SafePayload
-        value={item.data}
-        label={isDiff ? 'File changes' : isCommand ? 'Command details' : 'Tool details'}
-        filename={isDiff ? 'activity.diff' : isCommand ? 'command-output.txt' : 'tool-details.json'}
-        code={isDiff || isCommand}
-      />
+    const output = toolOutputValue(data);
+    // Only hide the raw `output` key once it actually rendered through the dedicated view above --
+    // a malformed one (toolOutputValue() returning undefined) must still be visible in the generic
+    // dump rather than silently vanishing from both places.
+    const remaining = itemDataWithout(item, output ? ['output'] : []);
+    return (
+      <>
+        {output ? <ToolOutputAttachment output={output} /> : null}
+        {remaining === undefined ? null : (
+          <SafePayload
+            value={remaining}
+            label={isDiff ? 'File changes' : isCommand ? 'Command details' : 'Tool details'}
+            filename={isDiff ? 'activity.diff' : isCommand ? 'command-output.txt' : 'tool-details.json'}
+            code={isDiff || isCommand}
+          />
+        )}
+      </>
     );
   }
 

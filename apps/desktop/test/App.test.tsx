@@ -156,6 +156,11 @@ function installBridge(overrides: Partial<AgentDockBridge> = {}): {
       createdAt: '2026-01-01T00:00:00.000Z',
     }),
     selectAndUploadAttachments: vi.fn().mockResolvedValue([]),
+    downloadAttachmentContent: vi.fn().mockResolvedValue({
+      fileName: 'tool-output.txt',
+      mimeType: 'text/plain',
+      bytes: new TextEncoder().encode('full output'),
+    }),
     validateStructuredOutput: vi.fn().mockImplementation(async (input) => ({
       valid: true,
       normalizedOutput: input.output,

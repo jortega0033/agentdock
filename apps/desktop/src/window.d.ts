@@ -105,6 +105,11 @@ export interface AgentDockBridge {
   listWorktrees(): Promise<OwnedWorktreeV2[]>;
   cleanupWorktree(worktreeId: string): Promise<OwnedWorktreeV2>;
   selectAndUploadAttachments(sessionId?: string): Promise<AttachmentMetadataV2[]>;
+  downloadAttachmentContent(attachmentId: string): Promise<{
+    fileName: string;
+    mimeType: string;
+    bytes: Uint8Array;
+  }>;
   validateStructuredOutput(input: StructuredWorkflowRequestV2): Promise<StructuredWorkflowResultV2>;
   createSession(input: CreateSessionInput): Promise<AgentSession>;
   cancelSession(sessionId: string): Promise<void>;

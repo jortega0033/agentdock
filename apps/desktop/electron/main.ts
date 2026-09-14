@@ -7,6 +7,7 @@ import { basename, join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   agentCommandV2Schema,
+  attachmentIdV2Schema,
   createSessionRequestSchema,
   createSessionV2RequestSchema,
   eventHistorySearchV2QuerySchema,
@@ -811,6 +812,15 @@ handle('daemon:read-interactive-session-history', async (_event, input: unknown)
 handle('daemon:search-interactive-session-history', async (_event, input: unknown) => {
   if (!client) throw new Error('daemon is not ready yet');
   return client.v2.sessions.search(eventHistorySearchV2QuerySchema.parse(input));
+});
+
+// Issue #132: the operator-retrieval path for a tool.completed event's `output` reference --
+// fetches the full bytes the daemon staged, never a filesystem path.
+handle('daemon:download-attachment-content', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  const attachmentId = attachmentIdV2Schema.parse(input);
+  const content = await client.v2.attachments.content(attachmentId);
+  return { fileName: content.fileName, mimeType: content.mimeType, bytes: content.bytes };
 });
 
 handle('daemon:reconnect-interactive-session', async (_event, input: unknown) => {

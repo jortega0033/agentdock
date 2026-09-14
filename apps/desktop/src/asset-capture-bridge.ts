@@ -50,6 +50,9 @@ export function installAssetCaptureBridge(): void {
     listWorktrees: async () => [],
     cleanupWorktree: async (worktreeId) => ({ id: worktreeId, workspaceId: 'a'.repeat(64), name: 'worktree', displayPath: 'worktree', status: 'missing', createdAt: '2026-01-01T00:00:00.000Z' }),
     selectAndUploadAttachments: async () => [],
+    downloadAttachmentContent: async () => {
+      throw new Error('asset capture has no attachment store');
+    },
     validateStructuredOutput: async (input) => ({ valid: true, normalizedOutput: input.output, errors: [] }),
     createSession: async () => {
       window.setTimeout(() => {

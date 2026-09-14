@@ -794,12 +794,12 @@ export class ClaudeAgentSdkTransport implements InteractiveProviderTransport {
       // correlation, so fail the provider stream and let the supervisor publish its safe
       // disconnect resolution without sending a second native response.
       if (this.options.interactionOwner === 'daemon') {
-        this.eventsChannel.fail(
-          new ClaudeAgentSdkProtocolError(
-            'claude_sdk_interaction_cancelled',
-            'Claude cancelled a published interaction',
-          ),
+        const cancelledError = new ClaudeAgentSdkProtocolError(
+          'claude_sdk_interaction_cancelled',
+          'Claude cancelled a published interaction',
         );
+        this.eventsChannel.fail(cancelledError);
+        this.toolOutputChannel.fail(cancelledError);
         return;
       }
       this.eventsChannel.push(

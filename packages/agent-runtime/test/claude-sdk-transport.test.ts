@@ -545,10 +545,16 @@ describe('ClaudeAgentSdkTransport', () => {
       { type: 'approval.requested' }
     >;
     const failure = transport.events.next();
+    const toolOutputFailure = transport.toolOutputs?.next();
     controller.abort();
     await expect(permission).resolves.toMatchObject({ behavior: 'deny' });
     expect(settleCount).toBe(1);
     await expect(failure).rejects.toMatchObject({ code: 'claude_sdk_interaction_cancelled' });
+    // Issue #132 regression: a daemon-owned interaction cancellation must fail toolOutputChannel
+    // alongside eventsChannel, or a consumer draining `transport.toolOutputs` hangs forever.
+    await expect(toolOutputFailure).rejects.toMatchObject({
+      code: 'claude_sdk_interaction_cancelled',
+    });
     await expect(
       transport.send({
         type: 'approval.respond',

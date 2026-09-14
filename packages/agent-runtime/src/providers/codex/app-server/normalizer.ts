@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { ATTACHMENT_LIMITS_V2, type AgentEventV2, type BoundedJson, type Effect } from '@agent-dock/shared';
+import type { AgentEventV2, BoundedJson, Effect } from '@agent-dock/shared';
 import { validateStructuredOutput } from '../../../structured-output.js';
 import type { RawToolOutputV2 } from '../../../types.js';
+import { buildRawToolOutput } from '../../common/raw-tool-output.js';
 import { CodexAppServerProtocolError, boundedUtf8, safeDisplay } from './errors.js';
 
 type JsonObject = Record<string, unknown>;
@@ -48,13 +49,6 @@ const MAX_TRACKED_SUBAGENTS = 10_000;
 const SUBAGENT_ACTIVITY_KINDS = new Set(['started', 'interacted', 'interrupted']);
 const MAX_CONTENT_BLOCK_BYTES = 256 * 1024;
 const MAX_NATIVE_CORRELATION_ID_BYTES = 1_024;
-// Issue #132: commandExecution's native `aggregatedOutput` and fileChange's native `changes[].diff`
-// are the full, real tool output Codex has always discarded down to a synthetic summary string.
-// Bounded to the daemon attachment store's own per-file cap -- above that, the raw output is
-// dropped at the source rather than partially staged, leaving the existing synthetic summary as
-// the only record (graceful degradation, matching every other size cap in this normalizer).
-const MAX_RAW_TOOL_OUTPUT_BYTES = ATTACHMENT_LIMITS_V2.maxFileBytes;
-const TOOL_OUTPUT_PREVIEW_MAX_BYTES = 4_096;
 
 function object(value: unknown, label: string): JsonObject {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -191,7 +185,9 @@ function completedToolSummary(item: JsonObject): string {
  * never read. Only these two item types are covered; `mcpToolCall`/`dynamicToolCall`/
  * `collabAgentToolCall` have no confirmed equivalent full-output field and are left for a follow-up.
  */
-function rawToolOutputContent(item: JsonObject): { mimeType: 'text/plain'; text: string } | undefined {
+function rawToolOutputContent(
+  item: JsonObject,
+): { mimeType: 'text/plain'; text: string } | undefined {
   if (item.type === 'commandExecution') {
     return typeof item.aggregatedOutput === 'string' && item.aggregatedOutput.length > 0
       ? { mimeType: 'text/plain', text: item.aggregatedOutput }
@@ -209,7 +205,9 @@ function rawToolOutputContent(item: JsonObject): { mimeType: 'text/plain'; text:
           (change as JsonObject).diff !== '',
       )
       .map((change) => `--- ${change.kind} ${change.path} ---\n${change.diff}`);
-    return sections.length > 0 ? { mimeType: 'text/plain', text: sections.join('\n\n') } : undefined;
+    return sections.length > 0
+      ? { mimeType: 'text/plain', text: sections.join('\n\n') }
+      : undefined;
   }
   return undefined;
 }
@@ -487,7 +485,11 @@ export class CodexAppServerNormalizer {
    */
   private closeOpenSubagents(turnId: string, parentTurnStatus: string): void {
     const status =
-      parentTurnStatus === 'failed' ? 'failed' : parentTurnStatus === 'interrupted' ? 'cancelled' : 'completed';
+      parentTurnStatus === 'failed'
+        ? 'failed'
+        : parentTurnStatus === 'interrupted'
+          ? 'cancelled'
+          : 'completed';
     for (const nativeChildId of [...this.openSubagents]) {
       const agentId = this.subagentIds.get(nativeChildId);
       const name = this.subagentNames.get(nativeChildId);
@@ -514,14 +516,18 @@ export class CodexAppServerNormalizer {
     let agentId = this.subagentIds.get(nativeChildId);
     if (!agentId) {
       if (this.subagentIds.size >= MAX_TRACKED_SUBAGENTS) {
-        throw new CodexAppServerProtocolError('state_invalid', 'Codex exceeded the sub-agent limit');
+        throw new CodexAppServerProtocolError(
+          'state_invalid',
+          'Codex exceeded the sub-agent limit',
+        );
       }
       agentId = randomUUID();
       this.subagentIds.set(nativeChildId, agentId);
     }
     const name = boundedUtf8(agentPath, 256);
     this.subagentNames.set(nativeChildId, name);
-    const status = item.kind === 'interrupted' ? 'cancelled' : item.kind === 'started' ? 'spawning' : 'running';
+    const status =
+      item.kind === 'interrupted' ? 'cancelled' : item.kind === 'started' ? 'spawning' : 'running';
     if (status === 'cancelled') this.openSubagents.delete(nativeChildId);
     else this.openSubagents.add(nativeChildId);
     this.emit({
@@ -757,21 +763,8 @@ export class CodexAppServerNormalizer {
 
   private emitRawOutputIfPresent(item: JsonObject, identity: ItemIdentity): void {
     if (!this.emitRawToolOutput) return;
-    const content = rawToolOutputContent(item);
-    if (!content) return;
-    const bytes = Buffer.from(content.text, 'utf8');
-    if (bytes.byteLength > MAX_RAW_TOOL_OUTPUT_BYTES) return;
-    const preview = boundedUtf8(content.text, TOOL_OUTPUT_PREVIEW_MAX_BYTES);
-    this.emitRawToolOutput({
-      contentBlockId: identity.contentBlockId,
-      toolCallId: identity.toolCallId,
-      mimeType: content.mimeType,
-      bytes,
-      preview,
-      previewTruncated: Buffer.byteLength(preview, 'utf8') < bytes.byteLength,
-      byteCount: bytes.byteLength,
-      sha256: createHash('sha256').update(bytes).digest('hex'),
-    });
+    const payload = buildRawToolOutput(rawToolOutputContent(item), identity);
+    if (payload) this.emitRawToolOutput(payload);
   }
 
   private contentDelta(params: JsonObject, kind: 'message' | 'reasoning'): void {
@@ -913,7 +906,11 @@ export class CodexAppServerNormalizer {
     // Safe: JSON.parse() always returns a JSON-shaped value, and AJV just confirmed it matches
     // the caller's own schema. The wire schema's own bounds (depth/size/node count) are still
     // enforced downstream when this event is validated for the SSE/storage layer.
-    const block = { type: 'structured_data' as const, id: randomUUID(), data: parsed as BoundedJson };
+    const block = {
+      type: 'structured_data' as const,
+      id: randomUUID(),
+      data: parsed as BoundedJson,
+    };
     const encoded = jsonBytes(block);
     if (encoded.byteLength > MAX_CONTENT_BLOCK_BYTES) {
       this.emit({

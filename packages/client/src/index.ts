@@ -1,6 +1,7 @@
 export { AgentDockClient } from './client.js';
 export type {
   AgentDockClientOptions,
+  AttachmentContentV2,
   HealthResponse,
   SessionEventHistoryV2Options,
   SessionEventsOptions,
@@ -9,6 +10,7 @@ export type {
 } from './client.js';
 export {
   AgentDockClientError,
+  AttachmentNotFoundError,
   DaemonError,
   DaemonUnavailableError,
   ProtocolMismatchError,

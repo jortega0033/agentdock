@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { AGENT_DOCK_SUPPORTED_PROTOCOL_VERSIONS } from '@agent-dock/shared';
 import { AgentDockClient } from '../src/client.js';
 import {
+  AttachmentNotFoundError,
   DaemonError,
   DaemonUnavailableError,
   ProtocolMismatchError,
@@ -81,6 +82,16 @@ function invalidJsonResponse(status = 200): Response {
     json: async () => {
       throw new SyntaxError('invalid JSON');
     },
+  } as unknown as Response;
+}
+
+function binaryResponse(status: number, bytes: Uint8Array, headers: Record<string, string> = {}): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: new Headers(headers),
+    json: async () => ({ error: 'not json' }),
+    arrayBuffer: async () => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength),
   } as unknown as Response;
 }
 
@@ -915,6 +926,62 @@ describe('AgentDockClient.v2 security APIs', () => {
     ).rejects.toBeInstanceOf(ValidationError);
     await expect(client.v2.audit.list({ limit: 101 })).rejects.toBeInstanceOf(ValidationError);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
+describe('AgentDockClient.v2 attachments (issue #132)', () => {
+  const ATTACHMENT_ID = '123e4567-e89b-42d3-a456-426614174010';
+
+  it('downloads an attachment, parsing the filename out of Content-Disposition and using Content-Type', async () => {
+    const bytes = new TextEncoder().encode('build succeeded\n');
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      return binaryResponse(200, bytes, {
+        'content-type': 'text/plain',
+        'content-disposition': 'attachment; filename="tool-output-abc.txt"',
+      });
+    });
+    const client = makeClient(fetchImpl);
+
+    const result = await client.v2.attachments.content(ATTACHMENT_ID);
+    expect(result.fileName).toBe('tool-output-abc.txt');
+    expect(result.mimeType).toBe('text/plain');
+    expect(new TextDecoder().decode(result.bytes)).toBe('build succeeded\n');
+
+    const call = fetchImpl.mock.calls.find(([url]) =>
+      String(url).endsWith(`/v2/attachments/${ATTACHMENT_ID}/content`),
+    );
+    expect((call?.[1] as RequestInit).headers).toMatchObject({ Authorization: `Bearer ${TOKEN}` });
+  });
+
+  it('falls back to the attachment id as the filename when Content-Disposition is missing', async () => {
+    const bytes = new Uint8Array([1, 2, 3]);
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      return binaryResponse(200, bytes, { 'content-type': 'application/json' });
+    });
+    const client = makeClient(fetchImpl);
+
+    const result = await client.v2.attachments.content(ATTACHMENT_ID);
+    expect(result.fileName).toBe(ATTACHMENT_ID);
+    expect(result.mimeType).toBe('application/json');
+  });
+
+  it('maps a 404 to AttachmentNotFoundError and rejects a malformed id before any request', async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith('/health')) return healthResponse([1, 2]);
+      return jsonResponse(404, { error: 'not found', code: 'attachment_not_found' });
+    });
+    const client = makeClient(fetchImpl);
+
+    await expect(client.v2.attachments.content(ATTACHMENT_ID)).rejects.toBeInstanceOf(
+      AttachmentNotFoundError,
+    );
+
+    const rejectingClient = makeClient(vi.fn());
+    await expect(rejectingClient.v2.attachments.content('not-a-uuid')).rejects.toBeInstanceOf(
+      ValidationError,
+    );
   });
 });
 

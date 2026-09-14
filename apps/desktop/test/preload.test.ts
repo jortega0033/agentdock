@@ -64,6 +64,7 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
         'listWorktrees',
         'cleanupWorktree',
         'selectAndUploadAttachments',
+        'downloadAttachmentContent',
         'validateStructuredOutput',
         'createSession',
         'cancelSession',
@@ -317,6 +318,37 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
     expect(invoke.mock.calls).toEqual([
       ['daemon:search-interactive-session-history', { query: 'connection' }],
     ]);
+  });
+
+  it('downloads attachment content by id, using only the fixed channel (issue #132)', async () => {
+    const attachmentId = '123e4567-e89b-42d3-a456-426614174010';
+    const bytes = new TextEncoder().encode('full command output');
+    invoke.mockResolvedValueOnce({ fileName: 'tool-output.txt', mimeType: 'text/plain', bytes });
+    const api = await loadPreload();
+    const bridge = api as unknown as AgentDockBridge;
+
+    await expect(bridge.downloadAttachmentContent(attachmentId)).resolves.toEqual({
+      fileName: 'tool-output.txt',
+      mimeType: 'text/plain',
+      bytes,
+    });
+    expect(invoke.mock.calls).toEqual([['daemon:download-attachment-content', attachmentId]]);
+  });
+
+  it('rejects a malformed attachment id before invoking privileged IPC', async () => {
+    const api = await loadPreload();
+    await expect(
+      (api.downloadAttachmentContent as (id: unknown) => Promise<unknown>)('not-a-uuid'),
+    ).rejects.toBeDefined();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it('rejects a malformed attachment content response instead of passing it through', async () => {
+    const attachmentId = '123e4567-e89b-42d3-a456-426614174011';
+    invoke.mockResolvedValueOnce({ fileName: 'x.txt', mimeType: 'text/plain' }); // no bytes
+    const api = await loadPreload();
+    const bridge = api as unknown as AgentDockBridge;
+    await expect(bridge.downloadAttachmentContent(attachmentId)).rejects.toThrow('malformed');
   });
 
   it('rejects an empty search query before invoking privileged IPC', async () => {

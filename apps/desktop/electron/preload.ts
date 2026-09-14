@@ -45,6 +45,7 @@ import {
   worktreeCreateRequestV2Schema,
   worktreePreviewRequestV2Schema,
   worktreePreviewV2Schema,
+  attachmentIdV2Schema,
   attachmentListV2Schema,
   structuredWorkflowRequestV2Schema,
   structuredWorkflowResultV2Schema,
@@ -166,6 +167,11 @@ export interface AgentDockBridge {
   listWorktrees(): Promise<OwnedWorktreeV2[]>;
   cleanupWorktree(worktreeId: string): Promise<OwnedWorktreeV2>;
   selectAndUploadAttachments(sessionId?: string): Promise<AttachmentMetadataV2[]>;
+  downloadAttachmentContent(attachmentId: string): Promise<{
+    fileName: string;
+    mimeType: string;
+    bytes: Uint8Array;
+  }>;
   validateStructuredOutput(input: StructuredWorkflowRequestV2): Promise<StructuredWorkflowResultV2>;
   createSession(input: CreateSessionInput): Promise<AgentSession>;
   cancelSession(sessionId: string): Promise<void>;
@@ -723,6 +729,22 @@ const api: AgentDockBridge = {
     const parsedSessionId = sessionId === undefined ? undefined : sessionIdParamSchema.parse({ sessionId }).sessionId;
     const attachments: unknown = await ipcRenderer.invoke('dialog:select-and-upload-attachments', parsedSessionId ? { sessionId: parsedSessionId } : {});
     return attachmentListV2Schema.parse({ attachments }).attachments;
+  },
+  async downloadAttachmentContent(attachmentId) {
+    const parsedId = attachmentIdV2Schema.parse(attachmentId);
+    const result: unknown = await ipcRenderer.invoke('daemon:download-attachment-content', parsedId);
+    if (
+      !result ||
+      typeof result !== 'object' ||
+      typeof (result as { fileName?: unknown }).fileName !== 'string' ||
+      typeof (result as { mimeType?: unknown }).mimeType !== 'string' ||
+      // ArrayBuffer.isView(), not `instanceof Uint8Array` -- IPC/module-boundary values are not
+      // guaranteed to share this realm's Uint8Array constructor, and isView() is realm-safe.
+      !ArrayBuffer.isView((result as { bytes?: unknown }).bytes)
+    ) {
+      throw new Error('daemon returned a malformed attachment content response');
+    }
+    return result as { fileName: string; mimeType: string; bytes: Uint8Array };
   },
   async validateStructuredOutput(input) {
     const parsed = structuredWorkflowRequestV2Schema.parse(input);

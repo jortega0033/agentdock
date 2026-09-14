@@ -127,6 +127,38 @@ describe('ActivityTimeline', () => {
     expect(screen.getByRole('button', { name: 'Outside' })).toHaveFocus();
   });
 
+  it('scrolls to and focuses the item matching focusSequence, once, when present (issue #131)', async () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const events = [
+      event('session.started', 0, { provider: 'codex', transport: 'fake', selection: {} }),
+      event('session.status', 1, { status: 'active' }),
+      event('session.status', 2, { status: 'active' }),
+    ];
+    const { rerender } = render(<ActivityTimeline events={events} focusSequence={1} />);
+
+    await waitFor(() => {
+      const cards = screen.getAllByRole('article');
+      expect(cards[1]).toHaveFocus();
+    });
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+
+    screen.getAllByRole('article')[0]?.focus();
+    rerender(<ActivityTimeline events={events} focusSequence={1} />);
+    expect(screen.getAllByRole('article')[0]).toHaveFocus();
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+  });
+
+  it('does nothing when focusSequence has no matching retained event', () => {
+    render(
+      <ActivityTimeline
+        events={[event('session.started', 0, { provider: 'codex', transport: 'fake', selection: {} })]}
+        focusSequence={999}
+      />,
+    );
+    expect(document.activeElement).toBe(document.body);
+  });
+
   it('supports arrow, Home, and End navigation between cards', () => {
     render(
       <ActivityTimeline

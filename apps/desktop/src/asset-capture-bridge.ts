@@ -247,6 +247,7 @@ export function installAssetCaptureBridge(): void {
     },
     listInteractiveSessions: async () => ({ sessions: [] }),
     readInteractiveSessionHistory: async () => ({ events: [] }),
+    searchInteractiveSessionHistory: async () => ({ matches: [] }),
     reconnectInteractiveSession: async () => {
       throw new Error('asset capture has no persisted session');
     },

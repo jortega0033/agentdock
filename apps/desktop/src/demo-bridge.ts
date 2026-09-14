@@ -329,6 +329,7 @@ export function createDemoBridge(): AgentDockBridge {
     },
     listInteractiveSessions: async () => ({ sessions: [] }),
     readInteractiveSessionHistory: async () => ({ events: [] }),
+    searchInteractiveSessionHistory: async () => ({ matches: [] }),
     reconnectInteractiveSession: async () => {
       throw new Error('demo mode has no persisted session');
     },

@@ -167,6 +167,7 @@ function installBridge(overrides: Partial<AgentDockBridge> = {}): {
     createInteractiveSession: vi.fn().mockResolvedValue(SESSION),
     listInteractiveSessions: vi.fn().mockResolvedValue({ sessions: [] }),
     readInteractiveSessionHistory: vi.fn().mockResolvedValue({ events: [] }),
+    searchInteractiveSessionHistory: vi.fn().mockResolvedValue({ matches: [] }),
     reconnectInteractiveSession: vi.fn().mockResolvedValue(SESSION),
     resumeInteractiveSession: vi.fn().mockResolvedValue(SESSION),
     forkInteractiveSession: vi.fn().mockResolvedValue(SESSION),
@@ -481,6 +482,58 @@ describe('App security flow', () => {
       /3\s*Archived/,
     );
     expect(bridge.reconnectInteractiveSession).not.toHaveBeenCalled();
+  });
+
+  it('opens a session and focuses the matched event from a search result (issue #131)', async () => {
+    const otherId = '523e4567-e89b-42d3-a456-426614174000';
+    const otherExecutionId = '523e4567-e89b-42d3-a456-426614174001';
+    const otherSession: AgentSessionV2 = {
+      ...SESSION,
+      id: otherId,
+      executionId: otherExecutionId,
+      status: 'completed',
+      completedAt: '2026-08-31T00:01:00.000Z',
+    };
+    const matchedEvent: AgentEventV2Envelope = {
+      ...event(2, { type: 'content.delta', delta: 'a rare needle in this session' }),
+      sessionId: otherId,
+      executionId: otherExecutionId,
+    };
+    const { bridge } = installBridge({
+      listInteractiveSessions: vi.fn().mockResolvedValue({
+        sessions: [{ ...SESSION, status: 'completed' }, otherSession],
+      }),
+      readInteractiveSessionHistory: vi.fn().mockImplementation(async (sessionId: string) => ({
+        events: sessionId === otherId ? [matchedEvent] : [],
+      })),
+      searchInteractiveSessionHistory: vi.fn().mockResolvedValue({
+        matches: [
+          {
+            sessionId: otherId,
+            executionId: otherExecutionId,
+            sequence: 2,
+            type: 'content.delta',
+            excerpt: 'a rare needle in this session',
+          },
+        ],
+      }),
+    });
+
+    render(<App />);
+    await screen.findByRole('button', { name: /claude · 123e4567/i });
+
+    fireEvent.change(screen.getByLabelText('Search session history'), {
+      target: { value: 'rare needle' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    const resultExcerpt = await screen.findByText('a rare needle in this session');
+    expect(bridge.searchInteractiveSessionHistory).toHaveBeenCalledWith({ query: 'rare needle' });
+    fireEvent.click(resultExcerpt);
+
+    await waitFor(() => {
+      const card = screen.getAllByRole('article').find((item) => item.textContent?.includes('a rare needle in this session'));
+      expect(card).toHaveFocus();
+    });
   });
 
   function continuationRecord(

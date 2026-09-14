@@ -71,6 +71,7 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
         'createInteractiveSession',
         'listInteractiveSessions',
         'readInteractiveSessionHistory',
+        'searchInteractiveSessionHistory',
         'reconnectInteractiveSession',
         'resumeInteractiveSession',
         'forkInteractiveSession',
@@ -275,6 +276,57 @@ describe('electron/preload.ts — real bridge (AD-07)', () => {
       ['daemon:fork-interactive-session', { sessionId, input: { prompt: 'branch' } }],
       ['daemon:delete-interactive-session', sessionId],
     ]);
+  });
+
+  it('searches interactive session history and filters out interaction-channel matches (issue #131)', async () => {
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+    invoke.mockResolvedValueOnce({
+      matches: [
+        {
+          sessionId,
+          executionId: '123e4567-e89b-42d3-a456-426614174001',
+          sequence: 0,
+          type: 'error',
+          excerpt: 'connection reset',
+        },
+        {
+          sessionId,
+          executionId: '123e4567-e89b-42d3-a456-426614174001',
+          sequence: 1,
+          type: 'approval.requested',
+          excerpt: 'run this command?',
+        },
+      ],
+    });
+    const api = await loadPreload();
+    const bridge = api as unknown as AgentDockBridge;
+
+    await expect(bridge.searchInteractiveSessionHistory({ query: 'connection' })).resolves.toEqual(
+      {
+        matches: [
+          {
+            sessionId,
+            executionId: '123e4567-e89b-42d3-a456-426614174001',
+            sequence: 0,
+            type: 'error',
+            excerpt: 'connection reset',
+          },
+        ],
+      },
+    );
+    expect(invoke.mock.calls).toEqual([
+      ['daemon:search-interactive-session-history', { query: 'connection' }],
+    ]);
+  });
+
+  it('rejects an empty search query before invoking privileged IPC', async () => {
+    const api = await loadPreload();
+    await expect(
+      (api.searchInteractiveSessionHistory as (input: unknown) => Promise<unknown>)({
+        query: '',
+      }),
+    ).rejects.toBeDefined();
+    expect(invoke).not.toHaveBeenCalled();
   });
 
   it('rejects malformed interactive inputs before invoking privileged IPC', async () => {

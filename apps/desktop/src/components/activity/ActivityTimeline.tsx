@@ -440,14 +440,20 @@ export function ActivityTimeline({
   events,
   focusBlockingCards = true,
   omittedEventCount = 0,
+  focusSequence,
 }: {
   events: readonly TimelineEventInput[];
   focusBlockingCards?: boolean;
   omittedEventCount?: number;
+  /** Scrolls to and focuses the item carrying this normalized event sequence once, when it is
+   * present -- used to jump from a session-history search result to its matched event (issue
+   * #131). A sequence that isn't currently retained/rendered is silently a no-op. */
+  focusSequence?: number;
 }) {
   const projection = useMemo(() => projectActivityTimeline(events), [events]);
   const cardRefs = useRef(new Map<string, HTMLElement>());
   const focusedBlockingIds = useRef(new Set<string>());
+  const lastFocusedSequence = useRef<number | undefined>(undefined);
   const [announcement, setAnnouncement] = useState('');
 
   useEffect(() => {
@@ -467,6 +473,16 @@ export function ActivityTimeline({
     focusedBlockingIds.current.add(pending.id);
     cardRefs.current.get(pending.id)?.focus({ preventScroll: true });
   }, [focusBlockingCards, projection.items]);
+
+  useEffect(() => {
+    if (focusSequence === undefined || lastFocusedSequence.current === focusSequence) return;
+    const target = projection.items.find((item) => item.sequence === focusSequence);
+    if (!target) return;
+    lastFocusedSequence.current = focusSequence;
+    const element = cardRefs.current.get(target.id);
+    element?.scrollIntoView?.({ block: 'center' });
+    element?.focus();
+  }, [focusSequence, projection.items]);
 
   const moveFocus = (event: KeyboardEvent<HTMLElement>) => {
     if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;

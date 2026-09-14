@@ -34,6 +34,7 @@ function realBridge(): AgentDockBridge {
     createInteractiveSession: vi.fn(),
     listInteractiveSessions: vi.fn().mockResolvedValue({ sessions: [] }),
     readInteractiveSessionHistory: vi.fn().mockResolvedValue({ events: [] }),
+    searchInteractiveSessionHistory: vi.fn().mockResolvedValue({ matches: [] }),
     reconnectInteractiveSession: vi.fn(),
     resumeInteractiveSession: vi.fn(),
     forkInteractiveSession: vi.fn(),

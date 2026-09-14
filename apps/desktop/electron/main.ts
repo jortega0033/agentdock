@@ -9,6 +9,7 @@ import {
   agentCommandV2Schema,
   createSessionRequestSchema,
   createSessionV2RequestSchema,
+  eventHistorySearchV2QuerySchema,
   sessionContinuationInputV2Schema,
   sessionEventHistoryV2QuerySchema,
   sessionIdParamSchema,
@@ -805,6 +806,11 @@ handle('daemon:read-interactive-session-history', async (_event, input: unknown)
   const { sessionId } = sessionIdParamSchema.parse({ sessionId: input.sessionId });
   const query = sessionEventHistoryV2QuerySchema.parse(input.query);
   return client.v2.sessions.history(sessionId, query);
+});
+
+handle('daemon:search-interactive-session-history', async (_event, input: unknown) => {
+  if (!client) throw new Error('daemon is not ready yet');
+  return client.v2.sessions.search(eventHistorySearchV2QuerySchema.parse(input));
 });
 
 handle('daemon:reconnect-interactive-session', async (_event, input: unknown) => {

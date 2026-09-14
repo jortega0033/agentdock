@@ -25,7 +25,7 @@ import {
   fetchCodexModelCatalog,
   probeCodexAppServerScope,
 } from '../src/providers/codex/app-server/scope-probe.js';
-import type { ProviderContinuationEvidence } from '../src/types.js';
+import type { ProviderContinuationEvidence, RawToolOutputV2 } from '../src/types.js';
 
 const SESSION_ID = '123e4567-e89b-42d3-a456-426614174200';
 const TURN_ID = '123e4567-e89b-42d3-a456-426614174201';
@@ -421,6 +421,184 @@ describe('Codex app-server transport', () => {
       (event) => event.type === 'content.completed' && (event as { block: { type: string } }).block.type === 'text',
     ) as { block: { text: string } } | undefined;
     expect(text?.block.text).toBe('not valid json');
+  });
+
+  describe('raw tool output capture (issue #132)', () => {
+    function startedNormalizer(
+      rawOutputs: RawToolOutputV2[],
+    ): { events: AgentEventV2[]; normalizer: CodexAppServerNormalizer } {
+      const events: AgentEventV2[] = [];
+      const normalizer = new CodexAppServerNormalizer(
+        (event) => events.push(event),
+        (payload) => rawOutputs.push(payload),
+      );
+      normalizer.startSession('native-thread', CODEX_APP_SERVER_TRANSPORT.id, SELECTION);
+      normalizer.expectTurn(TURN_ID);
+      normalizer.bindTurnResponse('native-turn');
+      normalizer.notification('turn/started', {
+        threadId: 'native-thread',
+        turn: { id: 'native-turn', status: 'inProgress' },
+      });
+      return { events, normalizer };
+    }
+
+    it('captures commandExecution aggregatedOutput as raw output alongside the existing synthetic summary', () => {
+      const rawOutputs: RawToolOutputV2[] = [];
+      const { events, normalizer } = startedNormalizer(rawOutputs);
+      normalizer.notification('item/completed', {
+        threadId: 'native-thread',
+        turnId: 'native-turn',
+        item: {
+          id: 'command-1',
+          type: 'commandExecution',
+          command: 'echo hi',
+          commandActions: [],
+          cwd: '/work',
+          status: 'completed',
+          exitCode: 0,
+          aggregatedOutput: 'hi\n',
+        },
+      });
+      const completed = events.find((event) => event.type === 'tool.completed');
+      expect(completed).toMatchObject({ summary: 'Command completed with exit code 0' });
+      expect(rawOutputs).toHaveLength(1);
+      expect(rawOutputs[0]).toMatchObject({
+        toolCallId: (completed as { toolCallId: string }).toolCallId,
+        contentBlockId: (completed as { contentBlockId: string }).contentBlockId,
+        mimeType: 'text/plain',
+        preview: 'hi\n',
+        previewTruncated: false,
+        byteCount: 3,
+        sha256: createHash('sha256').update('hi\n').digest('hex'),
+      });
+      expect(rawOutputs[0].bytes.toString('utf8')).toBe('hi\n');
+    });
+
+    it('captures fileChange diffs joined across every changed file as raw output', () => {
+      const rawOutputs: RawToolOutputV2[] = [];
+      const { events, normalizer } = startedNormalizer(rawOutputs);
+      normalizer.notification('item/completed', {
+        threadId: 'native-thread',
+        turnId: 'native-turn',
+        item: {
+          id: 'change-1',
+          type: 'fileChange',
+          status: 'completed',
+          changes: [
+            { path: 'a.txt', kind: 'update', diff: '-old\n+new\n' },
+            { path: 'b.txt', kind: 'add', diff: '+created\n' },
+          ],
+        },
+      });
+      expect(events.some((event) => event.type === 'tool.completed')).toBe(true);
+      expect(rawOutputs).toHaveLength(1);
+      expect(rawOutputs[0].mimeType).toBe('text/plain');
+      expect(rawOutputs[0].bytes.toString('utf8')).toBe(
+        '--- update a.txt ---\n-old\n+new\n\n\n--- add b.txt ---\n+created\n',
+      );
+    });
+
+    it('marks the preview truncated only once real content exceeds the 4,096-byte preview bound (exact threshold vs threshold+1)', () => {
+      for (const [length, expectTruncated] of [
+        [4_096, false],
+        [4_097, true],
+      ] as const) {
+        const rawOutputs: RawToolOutputV2[] = [];
+        const { normalizer } = startedNormalizer(rawOutputs);
+        const output = 'x'.repeat(length);
+        normalizer.notification('item/completed', {
+          threadId: 'native-thread',
+          turnId: 'native-turn',
+          item: {
+            id: 'command-threshold',
+            type: 'commandExecution',
+            command: 'echo',
+            commandActions: [],
+            cwd: '/work',
+            status: 'completed',
+            exitCode: 0,
+            aggregatedOutput: output,
+          },
+        });
+        expect(rawOutputs).toHaveLength(1);
+        expect(rawOutputs[0].previewTruncated).toBe(expectTruncated);
+        expect(Buffer.byteLength(rawOutputs[0].preview, 'utf8')).toBeLessThanOrEqual(4_096);
+        expect(rawOutputs[0].byteCount).toBe(length);
+      }
+    });
+
+    it('drops raw output gracefully once content exceeds the attachment store byte cap, leaving the tool.completed event unaffected', () => {
+      const rawOutputs: RawToolOutputV2[] = [];
+      const { events, normalizer } = startedNormalizer(rawOutputs);
+      normalizer.notification('item/completed', {
+        threadId: 'native-thread',
+        turnId: 'native-turn',
+        item: {
+          id: 'command-huge',
+          type: 'commandExecution',
+          command: 'yes',
+          commandActions: [],
+          cwd: '/work',
+          status: 'completed',
+          exitCode: 0,
+          aggregatedOutput: 'x'.repeat(25 * 1024 * 1024 + 1),
+        },
+      });
+      expect(rawOutputs).toHaveLength(0);
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: 'tool.completed', status: 'completed' }),
+      );
+    });
+
+    it('captures nothing when the native item has no aggregatedOutput/changes content', () => {
+      const rawOutputs: RawToolOutputV2[] = [];
+      const { events, normalizer } = startedNormalizer(rawOutputs);
+      normalizer.notification('item/completed', {
+        threadId: 'native-thread',
+        turnId: 'native-turn',
+        item: {
+          id: 'command-empty',
+          type: 'commandExecution',
+          command: 'true',
+          commandActions: [],
+          cwd: '/work',
+          status: 'completed',
+          exitCode: 0,
+          aggregatedOutput: null,
+        },
+      });
+      expect(rawOutputs).toHaveLength(0);
+      expect(events.some((event) => event.type === 'tool.completed')).toBe(true);
+    });
+
+    it('never captures raw output when the caller supplies no emitRawToolOutput callback', () => {
+      const events: AgentEventV2[] = [];
+      const normalizer = new CodexAppServerNormalizer((event) => events.push(event));
+      normalizer.startSession('native-thread', CODEX_APP_SERVER_TRANSPORT.id, SELECTION);
+      normalizer.expectTurn(TURN_ID);
+      normalizer.bindTurnResponse('native-turn');
+      normalizer.notification('turn/started', {
+        threadId: 'native-thread',
+        turn: { id: 'native-turn', status: 'inProgress' },
+      });
+      expect(() =>
+        normalizer.notification('item/completed', {
+          threadId: 'native-thread',
+          turnId: 'native-turn',
+          item: {
+            id: 'command-no-callback',
+            type: 'commandExecution',
+            command: 'echo hi',
+            commandActions: [],
+            cwd: '/work',
+            status: 'completed',
+            exitCode: 0,
+            aggregatedOutput: 'hi\n',
+          },
+        }),
+      ).not.toThrow();
+      expect(events.some((event) => event.type === 'tool.completed')).toBe(true);
+    });
   });
 
   it('maps a real subAgentActivity item into a stable subagent.status node, closing it out when its turn ends with no completed kind', () => {
@@ -901,6 +1079,16 @@ describe('Codex app-server transport', () => {
     expect(serialized).not.toContain('private chain of thought');
     expect(serialized).not.toContain('secret-diff');
     await instance.close();
+    // The fixture's fileChange item (see fake-codex-app-server.mjs) carries a real diff -- proves
+    // the raw-output side channel actually flows end-to-end through the real transport (issue
+    // #132), not just through the normalizer in isolation. Its commandExecution item has no
+    // aggregatedOutput, so it contributes nothing here; that gap is covered directly against the
+    // normalizer above.
+    const toolOutputs: RawToolOutputV2[] = [];
+    if (instance.toolOutputs) for await (const payload of instance.toolOutputs) toolOutputs.push(payload);
+    expect(toolOutputs).toHaveLength(1);
+    expect(toolOutputs[0].mimeType).toBe('text/plain');
+    expect(toolOutputs[0].bytes.toString('utf8')).toContain('secret-diff');
     expect(instance.reaped).toBe(true);
   });
 

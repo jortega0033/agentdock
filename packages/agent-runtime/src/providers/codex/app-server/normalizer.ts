@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { AgentEventV2, BoundedJson, Effect } from '@agent-dock/shared';
+import { ATTACHMENT_LIMITS_V2, type AgentEventV2, type BoundedJson, type Effect } from '@agent-dock/shared';
 import { validateStructuredOutput } from '../../../structured-output.js';
+import type { RawToolOutputV2 } from '../../../types.js';
 import { CodexAppServerProtocolError, boundedUtf8, safeDisplay } from './errors.js';
 
 type JsonObject = Record<string, unknown>;
@@ -47,6 +48,13 @@ const MAX_TRACKED_SUBAGENTS = 10_000;
 const SUBAGENT_ACTIVITY_KINDS = new Set(['started', 'interacted', 'interrupted']);
 const MAX_CONTENT_BLOCK_BYTES = 256 * 1024;
 const MAX_NATIVE_CORRELATION_ID_BYTES = 1_024;
+// Issue #132: commandExecution's native `aggregatedOutput` and fileChange's native `changes[].diff`
+// are the full, real tool output Codex has always discarded down to a synthetic summary string.
+// Bounded to the daemon attachment store's own per-file cap -- above that, the raw output is
+// dropped at the source rather than partially staged, leaving the existing synthetic summary as
+// the only record (graceful degradation, matching every other size cap in this normalizer).
+const MAX_RAW_TOOL_OUTPUT_BYTES = ATTACHMENT_LIMITS_V2.maxFileBytes;
+const TOOL_OUTPUT_PREVIEW_MAX_BYTES = 4_096;
 
 function object(value: unknown, label: string): JsonObject {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -176,6 +184,36 @@ function completedToolSummary(item: JsonObject): string {
   return `Tool call ${completedToolStatus(item)}`;
 }
 
+/**
+ * Issue #132: the real content `completedToolSummary()` never carries. `commandExecution`'s native
+ * `aggregatedOutput` (stdout+stderr) and `fileChange`'s native `changes[].diff` (unified diffs) are
+ * both present on the same completed-item payload this normalizer already has -- they were simply
+ * never read. Only these two item types are covered; `mcpToolCall`/`dynamicToolCall`/
+ * `collabAgentToolCall` have no confirmed equivalent full-output field and are left for a follow-up.
+ */
+function rawToolOutputContent(item: JsonObject): { mimeType: 'text/plain'; text: string } | undefined {
+  if (item.type === 'commandExecution') {
+    return typeof item.aggregatedOutput === 'string' && item.aggregatedOutput.length > 0
+      ? { mimeType: 'text/plain', text: item.aggregatedOutput }
+      : undefined;
+  }
+  if (item.type === 'fileChange' && Array.isArray(item.changes)) {
+    const sections = item.changes
+      .filter(
+        (change): change is { path: string; kind: string; diff: string } =>
+          !!change &&
+          typeof change === 'object' &&
+          typeof (change as JsonObject).path === 'string' &&
+          typeof (change as JsonObject).kind === 'string' &&
+          typeof (change as JsonObject).diff === 'string' &&
+          (change as JsonObject).diff !== '',
+      )
+      .map((change) => `--- ${change.kind} ${change.path} ---\n${change.diff}`);
+    return sections.length > 0 ? { mimeType: 'text/plain', text: sections.join('\n\n') } : undefined;
+  }
+  return undefined;
+}
+
 /** Stateful native-id to AgentDock-id normalizer. Native payloads are never used as identifiers. */
 export class CodexAppServerNormalizer {
   private providerThreadIdValue: string | undefined;
@@ -199,7 +237,13 @@ export class CodexAppServerNormalizer {
   private readonly subagentNames = new Map<string, string>();
   private readonly openSubagents = new Set<string>();
 
-  constructor(private readonly emit: (event: AgentEventV2) => void) {}
+  constructor(
+    private readonly emit: (event: AgentEventV2) => void,
+    /** Optional (issue #132): absent for callers that don't want the raw-output side channel
+     * (e.g. tests exercising only the AgentEventV2 stream). Never required for correctness of
+     * `emit()` itself -- a missing callback just means raw output is silently not captured. */
+    private readonly emitRawToolOutput?: (payload: RawToolOutputV2) => void,
+  ) {}
 
   get providerThreadId(): string | undefined {
     return this.providerThreadIdValue;
@@ -699,6 +743,7 @@ export class CodexAppServerNormalizer {
     if (identity.completed)
       throw new CodexAppServerProtocolError('state_invalid', 'Tool completed twice');
     identity.completed = true;
+    this.emitRawOutputIfPresent(item, identity);
     this.emit({
       type: 'tool.completed',
       turnId,
@@ -707,6 +752,25 @@ export class CodexAppServerNormalizer {
       toolName: descriptor.name,
       status: completedToolStatus(item),
       summary: boundedUtf8(completedToolSummary(item), 4_096),
+    });
+  }
+
+  private emitRawOutputIfPresent(item: JsonObject, identity: ItemIdentity): void {
+    if (!this.emitRawToolOutput) return;
+    const content = rawToolOutputContent(item);
+    if (!content) return;
+    const bytes = Buffer.from(content.text, 'utf8');
+    if (bytes.byteLength > MAX_RAW_TOOL_OUTPUT_BYTES) return;
+    const preview = boundedUtf8(content.text, TOOL_OUTPUT_PREVIEW_MAX_BYTES);
+    this.emitRawToolOutput({
+      contentBlockId: identity.contentBlockId,
+      toolCallId: identity.toolCallId,
+      mimeType: content.mimeType,
+      bytes,
+      preview,
+      previewTruncated: Buffer.byteLength(preview, 'utf8') < bytes.byteLength,
+      byteCount: bytes.byteLength,
+      sha256: createHash('sha256').update(bytes).digest('hex'),
     });
   }
 

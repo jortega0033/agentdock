@@ -17,6 +17,7 @@ import {
   type ProviderStatus,
   type ProviderTransportV2,
   type SessionContinuationV2,
+  type ToolOutputRefV2,
 } from '@agent-dock/shared';
 import {
   InteractiveSessionError,
@@ -29,6 +30,7 @@ import {
   type ProviderRegistry,
   type ProviderAttachmentInput,
   type ProviderSessionHandle,
+  type RawToolOutputV2,
   type StartSessionOptions,
   type WorkspaceTrustEvidence,
 } from '@agent-dock/agent-runtime';
@@ -102,6 +104,11 @@ interface InteractiveRuntimeState extends RuntimeStateBase {
   continuationEvidence?: Readonly<ProviderContinuationEvidence>;
   /** Attachment ids bound to this session at creation (issue #59), released once it terminates. */
   attachmentIds?: readonly string[];
+  /** Tool-output attachments staged mid-session (issue #132), keyed by the `tool.completed`
+   * event's `contentBlockId` they belong to. Populated by `consumeToolOutputs()`, consumed and
+   * removed by `prepareInteractiveEvent()` the moment the matching event is processed -- entries
+   * outlive that only for the rare cold-start race `pendingToolOutput()` guards against. */
+  pendingToolOutputs: Map<string, Promise<ToolOutputRefV2 | undefined>>;
 }
 
 interface PendingInteractiveStart {
@@ -166,6 +173,18 @@ const MAX_PENDING_COMMANDS = 64;
 const MAX_PENDING_COMMAND_BYTES = 1024 * 1024;
 const MAX_COMMAND_LEDGER_ENTRIES = 1_024;
 const INTERACTIVE_CLOSE_TIMEOUT_MS = 5_000;
+// Issue #132: raw tool output normally lives in `pendingToolOutputs` only for the instant between
+// its own channel delivering it and the matching `tool.completed` event consuming it -- this caps
+// the map purely against a pathological provider that emits far more raw output than completions
+// ever get processed for, not against ordinary session activity.
+const MAX_PENDING_TOOL_OUTPUTS = 256;
+// How long `prepareInteractiveEvent` waits for a `tool.completed` event's raw output to show up in
+// `pendingToolOutputs` before giving up and forwarding the event without an attachment reference.
+// Only matters for the cold-start race where the tool-output channel's consumer loop has not yet
+// registered as a waiter by the time the very first item arrives; in steady state the entry is
+// already present (same-tick channel pushes resolve in FIFO microtask order -- see
+// `emitRawOutputIfPresent` in the Codex normalizer).
+const PENDING_TOOL_OUTPUT_WAIT_MS = 50;
 const PROVIDER_REDETECT_TIMEOUT_MS = 5_000;
 // Interactive shutdown can spend one close interval resolving outstanding interactions, one on
 // graceful transport close, and one on the mandatory force-close/reap fallback. Keep the daemon's
@@ -174,6 +193,13 @@ const SESSION_SHUTDOWN_TIMEOUT_MS = INTERACTIVE_CLOSE_TIMEOUT_MS * 3 + 1_000;
 
 function isSessionActive(session: AgentSession): boolean {
   return session.status === 'starting' || session.status === 'running';
+}
+
+/** `AttachmentStore.stage()` takes a stream; raw tool output already arrived as one complete
+ * in-memory buffer (issue #132), so this just wraps it as the single-chunk stream the same
+ * staging path everywhere else already expects. */
+async function* singleChunkStream(bytes: Buffer): AsyncGenerator<Uint8Array, void, void> {
+  yield bytes;
 }
 
 function canonicalValue(value: unknown): unknown {
@@ -489,6 +515,7 @@ export class SessionManager {
         replayBytes: 0,
         nextEventIndex: 0,
         listeners: new Set(),
+        pendingToolOutputs: new Map(),
         acceptedWork: 'not_accepted',
         dispatchTail: Promise.resolve(),
         pendingCommands: 0,
@@ -530,6 +557,7 @@ export class SessionManager {
         },
       );
       runtime.done = this.consumeInteractive(id, runtime);
+      void this.consumeToolOutputs(id, runtime);
       onAdmitted(runtime.done);
       this.logCreated(session, false, 'interactive');
       return session;
@@ -677,6 +705,87 @@ export class SessionManager {
           });
         });
     }
+    // Deliberately does NOT delete tool-output attachments staged during this session (issue
+    // #132): unlike the inbound multimodal attachments released above, these are the feature's
+    // whole product -- an operator retrieves them *after* the session that produced them has
+    // already ended. They are tagged with this session's id (`stageToolOutput()` below) purely so
+    // the existing `AttachmentStore.releaseSessions()` lineage hook and the store's own
+    // `maxReferencedAgeMs` TTL eventually reclaim them, the same as any other referenced
+    // attachment; nothing here needs to reference `runtime.pendingToolOutputs` once the loop above
+    // has finished draining `runtime.handle.events`.
+  }
+
+  /**
+   * Drains the optional raw-tool-output side channel (issue #132) independently of and
+   * concurrently with `consumeInteractive()`'s own `handle.events` loop -- it is not an
+   * AgentEventV2 and never goes through that loop's validation/persistence path. Each item is
+   * staged into the attachment store immediately and the resulting (still-pending) promise is
+   * recorded by `contentBlockId` so `prepareInteractiveEvent()` can attach a bounded reference to
+   * the matching `tool.completed` event once it arrives.
+   */
+  private async consumeToolOutputs(id: string, runtime: InteractiveRuntimeState): Promise<void> {
+    const stream = runtime.handle.toolOutputs;
+    const store = this.security.attachmentStore;
+    if (!stream || !store) return;
+    try {
+      for await (const payload of stream) {
+        if (runtime.pendingToolOutputs.size >= MAX_PENDING_TOOL_OUTPUTS) {
+          const oldestKey = runtime.pendingToolOutputs.keys().next().value;
+          if (oldestKey !== undefined) runtime.pendingToolOutputs.delete(oldestKey);
+        }
+        runtime.pendingToolOutputs.set(
+          payload.contentBlockId,
+          this.stageToolOutput(id, store, payload).catch((error: unknown) => {
+            this.logger.warn('failed to stage a tool-output attachment; leaving it unavailable', {
+              sessionId: id,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            return undefined;
+          }),
+        );
+      }
+    } catch (error) {
+      this.logger.warn('tool-output channel failed', {
+        sessionId: id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async stageToolOutput(
+    sessionId: string,
+    store: AttachmentStore,
+    payload: RawToolOutputV2,
+  ): Promise<ToolOutputRefV2> {
+    const attachment = await store.stage({
+      fileName: `tool-output-${payload.contentBlockId}.txt`,
+      declaredSize: payload.byteCount,
+      sessionId,
+      stream: singleChunkStream(payload.bytes),
+    });
+    return {
+      attachmentId: attachment.id,
+      mimeType: payload.mimeType,
+      byteCount: payload.byteCount,
+      sha256: payload.sha256,
+      preview: payload.preview,
+      previewTruncated: payload.previewTruncated,
+    };
+  }
+
+  /** Bounded wait for the cold-start race documented on `PENDING_TOOL_OUTPUT_WAIT_MS`; see there. */
+  private async pendingToolOutput(
+    runtime: InteractiveRuntimeState,
+    contentBlockId: string,
+  ): Promise<ToolOutputRefV2 | undefined> {
+    let pending = runtime.pendingToolOutputs.get(contentBlockId);
+    if (!pending) {
+      await new Promise((resolve) => setTimeout(resolve, PENDING_TOOL_OUTPUT_WAIT_MS));
+      pending = runtime.pendingToolOutputs.get(contentBlockId);
+    }
+    if (!pending) return undefined;
+    runtime.pendingToolOutputs.delete(contentBlockId);
+    return pending;
   }
 
   private async prepareInteractiveEvent(
@@ -753,6 +862,12 @@ export class SessionManager {
     } else if (event.type === 'question.resolved' || event.type === 'question.cancelled') {
       const pending = runtime.interactions.get(event.requestId);
       if (pending?.state !== 'resolving') runtime.interactions.removeResolved(event.requestId);
+    } else if (event.type === 'tool.completed') {
+      // Issue #132: joins this event back to whatever `consumeToolOutputs()` staged for the same
+      // `contentBlockId`, if anything. No match (nothing to preserve, staging failed, or MIME
+      // unsupported) is not an error -- the event is forwarded unchanged, exactly as it always was.
+      const output = await this.pendingToolOutput(runtime, event.contentBlockId);
+      if (output) return { ...event, output };
     }
     return event;
   }

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { createReadStream, type ReadStream } from 'node:fs';
 import { mkdir, open, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import {
@@ -196,6 +197,20 @@ export class AttachmentStore {
     return [...this.#records.values()].map(({ path: _path, ...metadata }) =>
       structuredClone(metadata),
     );
+  }
+
+  /**
+   * Opens an attachment's bytes for a route response (issue #132's operator retrieval path).
+   * Unlike `referenceForDispatch()`, this is safe to call from a route handler: it never returns
+   * the on-disk path itself, only a readable stream and the already-public metadata `list()` also
+   * exposes. Matches `GET /v2/attachments`' existing security model -- no session-ownership check,
+   * since that route already lets any authenticated caller enumerate every attachment daemon-wide.
+   */
+  openContent(id: string): { metadata: AttachmentMetadataV2; stream: ReadStream } {
+    const record = this.#records.get(id);
+    if (!record) throw new AttachmentStoreError('attachment_not_found', 'Attachment was not found');
+    const { path: _path, ...metadata } = record;
+    return { metadata: structuredClone(metadata), stream: createReadStream(record.path) };
   }
 
   async reference(ids: string[], sessionId: string): Promise<AttachmentMetadataV2[]> {

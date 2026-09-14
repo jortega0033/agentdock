@@ -72,6 +72,30 @@ export function registerV2MultimodalRoutes(
   app.get('/v2/attachments', async (_req, reply) =>
     reply.send(attachmentListV2Schema.parse({ attachments: store.list() })),
   );
+  // Issue #132: the first byte-level retrieval route this store has ever needed -- every prior
+  // consumer either only ever needed the metadata list above, or (`referenceForDispatch()`) is a
+  // trusted in-process caller reading the file directly, never a route. Content-Disposition stays
+  // `attachment` unconditionally: nothing staged through this store today is safe to render inline
+  // in a browsing context (tool output can contain anything a command printed).
+  app.get('/v2/attachments/:id/content', async (req, reply) => {
+    const parsed = attachmentIdV2Schema.safeParse((req.params as { id?: unknown }).id);
+    if (!parsed.success)
+      return fail(reply, 400, 'invalid_attachment_request', 'Invalid attachment id');
+    try {
+      const { metadata, stream } = store.openContent(parsed.data);
+      reply
+        .header('content-type', metadata.mimeType)
+        .header(
+          'content-disposition',
+          `attachment; filename="${metadata.fileName.replace(/"/g, '')}"`,
+        )
+        .header('content-length', String(metadata.size));
+      return reply.send(stream);
+    } catch (error) {
+      attachmentFailure(reply, error);
+      return undefined;
+    }
+  });
   app.post('/v2/attachments/reference', async (req, reply) => {
     const parsed = attachmentReferenceRequestV2Schema.safeParse(req.body);
     if (!parsed.success)

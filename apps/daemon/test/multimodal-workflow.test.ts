@@ -334,4 +334,64 @@ describe('multimodal daemon routes', () => {
     expect(redeletion.statusCode, redeletion.body).toBe(204);
     await app.close();
   });
+
+  it('streams an attachment back over the authenticated content route (issue #132) and 404s on an unknown or already-deleted id', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agent-dock-multimodal-content-'));
+    const store = new AttachmentStore(join(root, 'staged'), join(root, 'manifest.json'));
+    await store.load();
+    const registry = new ProviderRegistry();
+    registry.register(new FakeProvider('claude'));
+    const app = buildServer({
+      registry,
+      sessionManager: new SessionManager(registry, noopLogger),
+      token: 'token',
+      logger: noopLogger,
+      attachmentStore: store,
+    });
+    const staged = await store.stage({
+      fileName: 'tool-output-abc.txt',
+      declaredSize: 11,
+      stream: chunks(Buffer.from('hello world')),
+    });
+
+    const ok = await app.inject({
+      method: 'GET',
+      url: `/v2/attachments/${staged.id}/content`,
+      headers: { authorization: 'Bearer token' },
+    });
+    expect(ok.statusCode, ok.body).toBe(200);
+    expect(ok.body).toBe('hello world');
+    expect(ok.headers['content-type']).toBe('text/plain');
+    expect(ok.headers['content-disposition']).toBe('attachment; filename="tool-output-abc.txt"');
+    expect(ok.headers['content-length']).toBe('11');
+
+    const unauthenticated = await app.inject({
+      method: 'GET',
+      url: `/v2/attachments/${staged.id}/content`,
+    });
+    expect(unauthenticated.statusCode).toBe(401);
+
+    const invalidId = await app.inject({
+      method: 'GET',
+      url: '/v2/attachments/not-a-uuid/content',
+      headers: { authorization: 'Bearer token' },
+    });
+    expect(invalidId.statusCode, invalidId.body).toBe(400);
+
+    const missing = await app.inject({
+      method: 'GET',
+      url: '/v2/attachments/123e4567-e89b-42d3-a456-426614174099/content',
+      headers: { authorization: 'Bearer token' },
+    });
+    expect(missing.statusCode, missing.body).toBe(404);
+
+    await store.deleteAttachments([staged.id]);
+    const afterDelete = await app.inject({
+      method: 'GET',
+      url: `/v2/attachments/${staged.id}/content`,
+      headers: { authorization: 'Bearer token' },
+    });
+    expect(afterDelete.statusCode, afterDelete.body).toBe(404);
+    await app.close();
+  });
 });

@@ -24,6 +24,29 @@ export interface ProviderAttachmentInput {
   byteLength: number;
 }
 
+/**
+ * Raw tool-completion output captured beyond the bounded inline preview (issue #132), delivered on
+ * a channel separate from `events` because a single tool's output can exceed AgentEventV2's
+ * per-event bounds (`MAX_NORMALIZED_EVENT_BYTES`/`MAX_CONTENT_BLOCK_BYTES`) and must never itself
+ * be persisted or broadcast verbatim -- only the daemon-derived bounded reference (`ToolOutputRefV2`)
+ * is. A provider adapter must not emit one above the daemon attachment store's own `maxFileBytes`
+ * cap; anything larger is simply dropped at the source, leaving the existing synthetic summary as
+ * the only record (graceful degradation, not a truncated attachment).
+ */
+export interface RawToolOutputV2 {
+  contentBlockId: string;
+  toolCallId: string;
+  mimeType: 'text/plain' | 'application/json';
+  bytes: Buffer;
+  /** Pre-computed by the provider adapter (cheap, in-memory) so the daemon only has to fill in the
+   * `attachmentId` it gets back from staging `bytes` -- never needs to re-hash or re-slice the
+   * content itself to build the wire `ToolOutputRefV2`. */
+  preview: string;
+  previewTruncated: boolean;
+  byteCount: number;
+  sha256: string;
+}
+
 export interface StartSessionOptions {
   /** Daemon-generated session UUID. Used only for logging/correlation, never as a process id. */
   sessionId: string;
@@ -206,6 +229,10 @@ export type ProviderInteractionResolution =
  */
 export interface InteractiveProviderSessionHandle {
   events: AsyncGenerator<AgentEventV2, void, void>;
+  /** Optional side channel of raw tool-completion output (issue #132). Undefined for providers
+   * that don't produce it; when present, the daemon drains it independently of `events` and joins
+   * each item back to its `tool.completed` event by `contentBlockId`. */
+  toolOutputs?: AsyncGenerator<RawToolOutputV2, void, void>;
   accepted: Promise<AcceptedWorkState>;
   readonly providerSessionId?: string;
   readonly runtimeMetadata?: Readonly<ProviderRuntimeMetadata>;
@@ -228,6 +255,9 @@ export interface InteractiveProviderTransport {
    * bound native framing before parsing; the supervisor independently verifies the normalized view.
    */
   events: AsyncGenerator<unknown, void, void>;
+  /** Optional side channel of raw tool-completion output (issue #132), passed through by the
+   * supervisor unvalidated -- it is never an AgentEventV2 and never goes through `parseProviderEvent`. */
+  toolOutputs?: AsyncGenerator<RawToolOutputV2, void, void>;
   /** Drained independently and retained only within the supervisor's bounded diagnostic buffer. */
   stderr: AsyncGenerator<unknown, void, void>;
   started: Promise<void>;

@@ -26,6 +26,7 @@ import type {
   ProviderDetectionOptions,
   ProviderRuntimeMetadata,
   ProviderSessionHandle,
+  RawToolOutputV2,
   StartInteractiveSessionOptions,
   StartSessionOptions,
 } from '@agent-dock/agent-runtime';
@@ -718,6 +719,7 @@ function makeControllableInteractiveSession(options: InteractiveSessionOptions =
     if (closed) return;
     closed = true;
     for (const waiter of waiters.splice(0)) waiter({ value: undefined, done: true });
+    finishToolOutputs();
   }
 
   async function* events(): AsyncGenerator<AgentEventV2, void, void> {
@@ -735,8 +737,44 @@ function makeControllableInteractiveSession(options: InteractiveSessionOptions =
     }
   }
 
+  // Issue #132: a second, independent controllable stream mirroring `events`/`push`/`finish`
+  // above, for tests that need to exercise the raw-tool-output side channel. Left untouched
+  // (never pushed to, closes alongside `finish()`) by every test that predates it.
+  const toolOutputQueue: RawToolOutputV2[] = [];
+  const toolOutputWaiters: Array<(result: IteratorResult<RawToolOutputV2>) => void> = [];
+  let toolOutputsClosed = false;
+
+  function pushToolOutput(payload: RawToolOutputV2): void {
+    if (toolOutputsClosed) throw new Error('interactive test tool-output channel is closed');
+    const waiter = toolOutputWaiters.shift();
+    if (waiter) waiter({ value: payload, done: false });
+    else toolOutputQueue.push(payload);
+  }
+
+  function finishToolOutputs(): void {
+    if (toolOutputsClosed) return;
+    toolOutputsClosed = true;
+    for (const waiter of toolOutputWaiters.splice(0)) waiter({ value: undefined, done: true });
+  }
+
+  async function* toolOutputs(): AsyncGenerator<RawToolOutputV2, void, void> {
+    while (true) {
+      if (toolOutputQueue.length > 0) {
+        yield toolOutputQueue.shift() as RawToolOutputV2;
+        continue;
+      }
+      if (toolOutputsClosed) return;
+      const result = await new Promise<IteratorResult<RawToolOutputV2>>((resolve) =>
+        toolOutputWaiters.push(resolve),
+      );
+      if (result.done) return;
+      yield result.value;
+    }
+  }
+
   const handle: InteractiveProviderSessionHandle = {
     events: events(),
+    toolOutputs: toolOutputs(),
     accepted: options.accepted ?? Promise.resolve('accepted'),
     ...(options.providerSessionId ? { providerSessionId: options.providerSessionId } : {}),
     ...(options.runtimeMetadata ? { runtimeMetadata: options.runtimeMetadata } : {}),
@@ -767,6 +805,8 @@ function makeControllableInteractiveSession(options: InteractiveSessionOptions =
     handle,
     push,
     finish,
+    pushToolOutput,
+    finishToolOutputs,
     sent,
     interruptCalls: () => interruptCalls,
     closeCalls: () => closeCalls,
@@ -2988,6 +3028,189 @@ describe('SessionManager — staged attachments and output schema (issue #59)', 
     );
 
     expect(provider.interactiveOptions[0]?.outputSchema).toEqual(outputSchema);
+  });
+});
+
+describe('SessionManager — raw tool output staging (issue #132)', () => {
+  async function newAttachmentStore(): Promise<AttachmentStore> {
+    const root = await mkdtemp(join(tmpdir(), 'agent-dock-tool-output-'));
+    const store = new AttachmentStore(join(root, 'staged'), join(root, 'manifest.json'));
+    await store.load();
+    return store;
+  }
+
+  function toolCompleted(toolCallId: string, contentBlockId: string): Extract<AgentEventV2, { type: 'tool.completed' }> {
+    return {
+      type: 'tool.completed',
+      turnId: INTERACTIVE_TURN_ID,
+      toolCallId,
+      contentBlockId,
+      toolName: 'command',
+      status: 'completed',
+      summary: 'Command completed with exit code 0',
+    };
+  }
+
+  async function waitForEvent(
+    received: AgentEventV2[],
+    predicate: (event: AgentEventV2) => boolean,
+  ): Promise<AgentEventV2> {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      const found = received.find(predicate);
+      if (found) return found;
+      await tick(20);
+    }
+    throw new Error('timed out waiting for the expected event');
+  }
+
+  it('joins a staged raw-output attachment onto the matching tool.completed event', async () => {
+    const attachmentStore = await newAttachmentStore();
+    const { interactive, sessionManager, session } = await setupInteractive({}, { attachmentStore });
+    const received: AgentEventV2[] = [];
+    sessionManager.subscribeInteractive(session.id, 0, (_i, event) => received.push(event));
+
+    const contentBlockId = uuid(1);
+    const toolCallId = uuid(2);
+    interactive.pushToolOutput({
+      contentBlockId,
+      toolCallId,
+      mimeType: 'text/plain',
+      bytes: Buffer.from('build succeeded\n'),
+      preview: 'build succeeded\n',
+      previewTruncated: false,
+      byteCount: 16,
+      sha256: 'deadbeef',
+    });
+    interactive.push(toolCompleted(toolCallId, contentBlockId));
+
+    const event = await waitForEvent(received, (candidate) => candidate.type === 'tool.completed');
+    expect(event).toMatchObject({
+      type: 'tool.completed',
+      output: {
+        mimeType: 'text/plain',
+        byteCount: 16,
+        sha256: 'deadbeef',
+        preview: 'build succeeded\n',
+        previewTruncated: false,
+        attachmentId: expect.any(String) as unknown as string,
+      },
+    });
+    const attachmentId = (event as { output: { attachmentId: string } }).output.attachmentId;
+    const staged = attachmentStore.list().find((item) => item.id === attachmentId);
+    expect(staged).toMatchObject({ sessionId: session.id, referenced: true, size: 16 });
+
+    interactive.push({ type: 'session.completed' });
+    interactive.finish();
+    await tick();
+  });
+
+  it("prefers the attachment store's own sniffed mimeType over the normalizer's declared one when they disagree", async () => {
+    // The normalizer always declares 'text/plain' (see rawToolOutputContent() in the Codex
+    // normalizer), but the store independently sniffs actual bytes and calls JSON-shaped output
+    // 'application/json' -- the wire ref must reflect what GET .../content actually serves.
+    const attachmentStore = await newAttachmentStore();
+    const { interactive, sessionManager, session } = await setupInteractive({}, { attachmentStore });
+    const received: AgentEventV2[] = [];
+    sessionManager.subscribeInteractive(session.id, 0, (_i, event) => received.push(event));
+
+    const contentBlockId = uuid(9);
+    const toolCallId = uuid(10);
+    const json = '{"exitCode":0}';
+    interactive.pushToolOutput({
+      contentBlockId,
+      toolCallId,
+      mimeType: 'text/plain',
+      bytes: Buffer.from(json),
+      preview: json,
+      previewTruncated: false,
+      byteCount: Buffer.byteLength(json),
+      sha256: 'deadbeef-json',
+    });
+    interactive.push(toolCompleted(toolCallId, contentBlockId));
+
+    const event = await waitForEvent(received, (candidate) => candidate.type === 'tool.completed');
+    expect(event).toMatchObject({ output: { mimeType: 'application/json' } });
+
+    interactive.push({ type: 'session.completed' });
+    interactive.finish();
+    await tick();
+  });
+
+  it('forwards tool.completed without an output reference when no attachment store is configured', async () => {
+    const { interactive, sessionManager, session } = await setupInteractive();
+    const received: AgentEventV2[] = [];
+    sessionManager.subscribeInteractive(session.id, 0, (_i, event) => received.push(event));
+
+    const contentBlockId = uuid(3);
+    const toolCallId = uuid(4);
+    interactive.pushToolOutput({
+      contentBlockId,
+      toolCallId,
+      mimeType: 'text/plain',
+      bytes: Buffer.from('ignored\n'),
+      preview: 'ignored\n',
+      previewTruncated: false,
+      byteCount: 8,
+      sha256: 'deadbeef',
+    });
+    interactive.push(toolCompleted(toolCallId, contentBlockId));
+
+    const event = await waitForEvent(received, (candidate) => candidate.type === 'tool.completed');
+    expect((event as { output?: unknown }).output).toBeUndefined();
+
+    interactive.push({ type: 'session.completed' });
+    interactive.finish();
+    await tick();
+  });
+
+  it('forwards tool.completed unchanged when its raw output never arrives (no attachment produced)', async () => {
+    const attachmentStore = await newAttachmentStore();
+    const { interactive, sessionManager, session } = await setupInteractive({}, { attachmentStore });
+    const received: AgentEventV2[] = [];
+    sessionManager.subscribeInteractive(session.id, 0, (_i, event) => received.push(event));
+
+    interactive.push(toolCompleted(uuid(5), uuid(6)));
+
+    const event = await waitForEvent(received, (candidate) => candidate.type === 'tool.completed');
+    expect((event as { output?: unknown }).output).toBeUndefined();
+    expect(attachmentStore.list()).toHaveLength(0);
+
+    interactive.push({ type: 'session.completed' });
+    interactive.finish();
+    await tick();
+  });
+
+  it('still attaches the output reference when tool.completed arrives before its matching raw output (reordered delivery)', async () => {
+    // Exercises PENDING_TOOL_OUTPUT_WAIT_MS's fallback wait directly: the two channels are
+    // independent, so nothing guarantees the raw-output side is drained first in every case.
+    const attachmentStore = await newAttachmentStore();
+    const { interactive, sessionManager, session } = await setupInteractive({}, { attachmentStore });
+    const received: AgentEventV2[] = [];
+    sessionManager.subscribeInteractive(session.id, 0, (_i, event) => received.push(event));
+
+    const contentBlockId = uuid(7);
+    const toolCallId = uuid(8);
+    interactive.push(toolCompleted(toolCallId, contentBlockId));
+    await tick(5);
+    interactive.pushToolOutput({
+      contentBlockId,
+      toolCallId,
+      mimeType: 'text/plain',
+      bytes: Buffer.from('late arrival\n'),
+      preview: 'late arrival\n',
+      previewTruncated: false,
+      byteCount: 13,
+      sha256: 'deadbeef-late',
+    });
+
+    const event = await waitForEvent(received, (candidate) => candidate.type === 'tool.completed');
+    expect(event).toMatchObject({
+      output: { byteCount: 13, sha256: 'deadbeef-late', preview: 'late arrival\n' },
+    });
+
+    interactive.push({ type: 'session.completed' });
+    interactive.finish();
+    await tick();
   });
 });
 

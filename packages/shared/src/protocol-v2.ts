@@ -726,6 +726,22 @@ const toolStartedEventSchema = z
     effectsComplete: z.boolean(),
   })
   .strict();
+// Opaque reference to a tool's complete output preserved beyond the 4,096-byte inline `summary`
+// (issue #132). Reuses the same daemon attachment store and id space as user-uploaded attachments
+// (`attachmentIdV2Schema`) rather than inventing a parallel storage concept -- the id is only ever
+// resolved through the existing authenticated attachment path, never a filesystem path on the wire.
+// Narrow initial MIME scope: only the two shapes tool output actually takes today.
+export const toolOutputRefV2Schema = z
+  .object({
+    attachmentId: attachmentIdV2Schema,
+    mimeType: z.enum(['text/plain', 'application/json']),
+    byteCount: z.number().int().finite().nonnegative().max(ATTACHMENT_LIMITS_V2.maxFileBytes),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    preview: z.string().max(4_096),
+    previewTruncated: z.boolean(),
+  })
+  .strict();
+export type ToolOutputRefV2 = z.infer<typeof toolOutputRefV2Schema>;
 const toolCompletedEventSchema = z
   .object({
     ...turnEventShape,
@@ -735,6 +751,7 @@ const toolCompletedEventSchema = z
     toolName: nonemptyWireStringSchema,
     status: z.enum(['completed', 'failed']),
     summary: z.string().max(4_096).optional(),
+    output: toolOutputRefV2Schema.optional(),
   })
   .strict();
 // Bounded, provider-neutral child-agent lifecycle event (issue #58). One event type carries every

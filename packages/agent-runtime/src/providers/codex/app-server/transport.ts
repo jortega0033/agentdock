@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
-import type { AgentCommandV2, AgentEventV2 } from '@agent-dock/shared';
+import { ATTACHMENT_LIMITS_V2, type AgentCommandV2, type AgentEventV2 } from '@agent-dock/shared';
 import {
   ProviderCommandRejectedError,
   ProviderTransportStartupError,
@@ -13,6 +13,7 @@ import {
   type ProviderRuntimeMetadata,
   type StartInteractiveSessionOptions,
   type ProviderAttachmentInput,
+  type RawToolOutputV2,
 } from '../../../types.js';
 import {
   CODEX_APP_SERVER_FIXTURE_SET,
@@ -99,6 +100,12 @@ const INTERACTION_TIMEOUT_MS = 300_000;
 // Content blocks are capped at 256 KiB by the normalizer. Leave room for the validated envelope.
 const MAX_EVENT_BYTES = 1024 * 1024;
 const MAX_BUFFERED_EVENT_BYTES = 16 * 1024 * 1024;
+// Raw tool output (issue #132) travels on its own channel, sized to the daemon attachment store's
+// own per-file cap rather than the much smaller AgentEventV2 envelope bound above -- that is the
+// entire point of the side channel. A handful of buffered values is plenty: the daemon drains this
+// channel continuously and only ever needs to be a little ahead of the matching `tool.completed`.
+const MAX_BUFFERED_TOOL_OUTPUTS = 64;
+const MAX_BUFFERED_TOOL_OUTPUT_BYTES = ATTACHMENT_LIMITS_V2.maxFileBytes;
 
 function asObject(value: unknown, label: string): JsonObject {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -577,6 +584,11 @@ export class CodexAppServerTransport implements InteractiveProviderTransport {
     MAX_BUFFERED_EVENT_BYTES,
     exactEventBytes,
   );
+  private readonly toolOutputChannel = new FailableChannel<RawToolOutputV2>(
+    MAX_BUFFERED_TOOL_OUTPUTS,
+    MAX_BUFFERED_TOOL_OUTPUT_BYTES,
+    (payload) => payload.bytes.byteLength,
+  );
   private readonly acceptedDeferred = deferred<AcceptedWorkState>();
   private readonly process: ManagedAppServerProcess;
   private readonly rpc: CodexAppServerRpc;
@@ -591,13 +603,17 @@ export class CodexAppServerTransport implements InteractiveProviderTransport {
   private modelProviderCapabilitiesValue: Readonly<CodexAppServerModelProviderCapabilities> =
     Object.freeze({ imageGeneration: false, namespaceTools: false, webSearch: false });
   readonly events = this.eventChannel[Symbol.asyncIterator]();
+  readonly toolOutputs = this.toolOutputChannel[Symbol.asyncIterator]();
   readonly stderr: AsyncGenerator<unknown, void, void>;
   readonly accepted = this.acceptedDeferred.promise;
   readonly started: Promise<void>;
   readonly runtimeMetadata: Readonly<ProviderRuntimeMetadata>;
 
   constructor(private readonly options: CodexAppServerTransportOptions) {
-    this.normalizer = new CodexAppServerNormalizer((event) => this.emit(event));
+    this.normalizer = new CodexAppServerNormalizer(
+      (event) => this.emit(event),
+      (payload) => this.emitRawToolOutput(payload),
+    );
     this.rpc = new CodexAppServerRpc({
       write: (frame) => this.process.write(frame),
       onNotification: (method, params) => this.handleNotification(method, params),
@@ -631,6 +647,7 @@ export class CodexAppServerTransport implements InteractiveProviderTransport {
           );
         }
         this.eventChannel.fail(error);
+        this.toolOutputChannel.fail(error);
         await this.process.forceClose().catch(() => undefined);
         if (error instanceof ProviderTransportStartupError) throw error;
         throw new ProviderTransportStartupError(
@@ -811,6 +828,7 @@ export class CodexAppServerTransport implements InteractiveProviderTransport {
     }
     await this.process.close();
     this.eventChannel.close();
+    this.toolOutputChannel.close();
   }
 
   async forceClose(): Promise<void> {
@@ -820,6 +838,7 @@ export class CodexAppServerTransport implements InteractiveProviderTransport {
     if (!this.acceptedDeferred.settled) this.acceptedDeferred.resolve('unknown');
     await this.process.forceClose();
     this.eventChannel.close();
+    this.toolOutputChannel.close();
   }
 
   private async start(): Promise<void> {
@@ -1576,6 +1595,14 @@ export class CodexAppServerTransport implements InteractiveProviderTransport {
     }
   }
 
+  /** Best-effort: unlike `emit()`, a dropped raw output never fails the session -- it just leaves
+   * the paired `tool.completed` event with its existing synthetic summary and no attachment
+   * reference (issue #132's required graceful degradation). */
+  private emitRawToolOutput(payload: RawToolOutputV2): void {
+    if (this.failure) return;
+    this.toolOutputChannel.push(payload);
+  }
+
   private assertOpen(): void {
     if (this.closing || this.failed) {
       throw new CodexAppServerProtocolError('closed', 'Codex app-server transport is closed');
@@ -1593,6 +1620,7 @@ export class CodexAppServerTransport implements InteractiveProviderTransport {
       );
     }
     this.eventChannel.fail(error);
+    this.toolOutputChannel.fail(error);
     void this.process?.forceClose().catch(() => undefined);
   }
 }

@@ -509,6 +509,13 @@ class SessionSupervisor implements InteractiveProviderSessionHandle {
     return this.transport.continuationEvidence;
   }
 
+  /** Pure pass-through (issue #132): raw tool output never goes through `parseProviderEvent` or
+   * this supervisor's own event queue -- it is not an AgentEventV2 and must never be persisted or
+   * broadcast verbatim, only the bounded reference the daemon derives from it. */
+  get toolOutputs(): InteractiveProviderSessionHandle['toolOutputs'] {
+    return this.transport.toolOutputs;
+  }
+
   constructor(
     private readonly transport: InteractiveProviderTransport,
     private readonly options: StartInteractiveSessionOptions,

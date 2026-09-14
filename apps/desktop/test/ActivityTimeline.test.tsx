@@ -149,6 +149,32 @@ describe('ActivityTimeline', () => {
     expect(scrollIntoView).toHaveBeenCalledTimes(1);
   });
 
+  it('still focuses the matched event when a later jump reuses the same sequence number in a different session (issue #131 review finding)', async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    const sessionAEvents = [
+      event('session.started', 0, { provider: 'codex', transport: 'fake', selection: {} }),
+      event('session.status', 1, { status: 'active' }),
+    ];
+    const otherMeta = {
+      sessionId: '923e4567-e89b-42d3-a456-426614174000',
+      executionId: '923e4567-e89b-42d3-a456-426614174001',
+      timestamp: '2026-08-31T00:00:00.000Z',
+    };
+    const sessionBEvents: TimelineEventInput[] = [
+      { ...otherMeta, type: 'session.started', sequence: 0, provider: 'claude', transport: 'fake', selection: {} },
+      { ...otherMeta, type: 'session.status', sequence: 1, status: 'active' },
+    ];
+
+    const { rerender } = render(<ActivityTimeline events={sessionAEvents} focusSequence={1} />);
+    await waitFor(() => expect(screen.getAllByRole('article')[1]).toHaveFocus());
+
+    // Switching to a different session whose own event log also has a sequence 1 -- the guard
+    // must key on the resolved item's identity, not the bare sequence number, or this second jump
+    // silently does nothing (the bug an independent review of this issue's PR caught).
+    rerender(<ActivityTimeline events={sessionBEvents} focusSequence={1} />);
+    await waitFor(() => expect(screen.getAllByRole('article')[1]).toHaveFocus());
+  });
+
   it('does nothing when focusSequence has no matching retained event', () => {
     render(
       <ActivityTimeline

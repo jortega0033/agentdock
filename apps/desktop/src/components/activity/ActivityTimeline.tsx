@@ -453,7 +453,7 @@ export function ActivityTimeline({
   const projection = useMemo(() => projectActivityTimeline(events), [events]);
   const cardRefs = useRef(new Map<string, HTMLElement>());
   const focusedBlockingIds = useRef(new Set<string>());
-  const lastFocusedSequence = useRef<number | undefined>(undefined);
+  const lastFocusedItemId = useRef<string | undefined>(undefined);
   const [announcement, setAnnouncement] = useState('');
 
   useEffect(() => {
@@ -475,10 +475,14 @@ export function ActivityTimeline({
   }, [focusBlockingCards, projection.items]);
 
   useEffect(() => {
-    if (focusSequence === undefined || lastFocusedSequence.current === focusSequence) return;
+    if (focusSequence === undefined) return;
     const target = projection.items.find((item) => item.sequence === focusSequence);
-    if (!target) return;
-    lastFocusedSequence.current = focusSequence;
+    // `sequence` is scoped per session/execution, not globally unique -- guarding on the raw
+    // number alone would wrongly skip a jump into a different session that happens to reuse the
+    // same sequence value the previous jump already focused. `item.id` already embeds session
+    // scope (issue #131 review finding), so guard on that instead.
+    if (!target || lastFocusedItemId.current === target.id) return;
+    lastFocusedItemId.current = target.id;
     const element = cardRefs.current.get(target.id);
     element?.scrollIntoView?.({ block: 'center' });
     element?.focus();

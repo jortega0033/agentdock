@@ -951,6 +951,55 @@ describe('POST /v2/sessions capability negotiation', () => {
     );
   });
 
+  it('POST /v2/sessions/search finds a literal in retained normalized history (issue #131)', async () => {
+    const { app } = setup();
+    const created = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions',
+      headers: auth(),
+      payload: { provider: 'claude', cwd, prompt: 'search route coverage marker' },
+    });
+    expect(created.statusCode, created.body).toBe(201);
+    const session = agentSessionV2Schema.parse(created.json());
+
+    await vi.waitFor(async () => {
+      const found = await app.inject({
+        method: 'POST',
+        url: '/v2/sessions/search',
+        headers: auth(),
+        payload: { query: 'ROUTE COVERAGE MARKER' },
+      });
+      expect(found.statusCode, found.body).toBe(200);
+      const page = found.json() as { matches: Array<{ sessionId: string; excerpt: string }> };
+      expect(page.matches.some((match) => match.sessionId === session.id)).toBe(true);
+      expect(page.matches[0]?.excerpt.toLowerCase()).toContain('route coverage marker');
+    });
+
+    const noMatch = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions/search',
+      headers: auth(),
+      payload: { query: 'no such literal appears anywhere' },
+    });
+    expect(noMatch.statusCode).toBe(200);
+    expect((noMatch.json() as { matches: unknown[] }).matches).toEqual([]);
+
+    const unauthenticated = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions/search',
+      payload: { query: 'hello' },
+    });
+    expect(unauthenticated.statusCode).toBe(401);
+
+    const invalidBody = await app.inject({
+      method: 'POST',
+      url: '/v2/sessions/search',
+      headers: auth(),
+      payload: { query: '' },
+    });
+    expect(invalidBody.statusCode).toBe(400);
+  });
+
   it('serves retained session metadata and normalized history after daemon reconstruction', async () => {
     const registry = new ProviderRegistry();
     registry.register(

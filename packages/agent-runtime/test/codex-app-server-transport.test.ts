@@ -752,6 +752,65 @@ describe('Codex app-server transport', () => {
     ]);
   });
 
+  it('preserves latest active-context tokens and model context-window capacity (issue #129)', () => {
+    const events: AgentEventV2[] = [];
+    const normalizer = new CodexAppServerNormalizer((event) => events.push(event));
+    normalizer.startSession('native-thread', CODEX_APP_SERVER_TRANSPORT.id, SELECTION);
+    normalizer.expectTurn(TURN_ID);
+    normalizer.bindTurnResponse('native-turn');
+    normalizer.notification('turn/started', {
+      threadId: 'native-thread',
+      turn: { id: 'native-turn', status: 'inProgress' },
+    });
+    events.length = 0;
+
+    normalizer.notification('thread/tokenUsage/updated', {
+      threadId: 'native-thread',
+      turnId: 'native-turn',
+      tokenUsage: {
+        last: { inputTokens: 100, outputTokens: 50, cachedInputTokens: 10, totalTokens: 62_000 },
+        total: { inputTokens: 900_000, outputTokens: 400_000, totalTokens: 1_300_000 },
+        modelContextWindow: 272_000,
+      },
+    });
+
+    expect(events).toEqual([
+      {
+        type: 'usage.tokens',
+        turnId: TURN_ID,
+        scope: 'turn',
+        inputTokens: 100,
+        outputTokens: 50,
+        cachedInputTokens: 10,
+        contextTokens: 62_000,
+        contextWindowTokens: 272_000,
+      },
+    ]);
+  });
+
+  it('omits context tokens/window when the provider does not report them, without guessing', () => {
+    const events: AgentEventV2[] = [];
+    const normalizer = new CodexAppServerNormalizer((event) => events.push(event));
+    normalizer.startSession('native-thread', CODEX_APP_SERVER_TRANSPORT.id, SELECTION);
+    normalizer.expectTurn(TURN_ID);
+    normalizer.bindTurnResponse('native-turn');
+    normalizer.notification('turn/started', {
+      threadId: 'native-thread',
+      turn: { id: 'native-turn', status: 'inProgress' },
+    });
+    events.length = 0;
+
+    normalizer.notification('thread/tokenUsage/updated', {
+      threadId: 'native-thread',
+      turnId: 'native-turn',
+      tokenUsage: { last: { inputTokens: 5 } },
+    });
+
+    expect(events).toEqual([
+      { type: 'usage.tokens', turnId: TURN_ID, scope: 'turn', inputTokens: 5 },
+    ]);
+  });
+
   it('correlates concurrent client responses out of order and clears pending requests on shutdown', async () => {
     const writes: Buffer[] = [];
     const fatals: Error[] = [];

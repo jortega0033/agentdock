@@ -7,6 +7,7 @@ import {
   commandAcknowledgementV2Schema,
   createSessionV2RequestSchema,
   cancelSessionV2ResponseSchema,
+  eventHistorySearchV2QuerySchema,
   negotiateCapabilities,
   sessionContinuationInputV2Schema,
   sessionEventHistoryV2QuerySchema,
@@ -453,6 +454,21 @@ export function registerV2SessionRoutes(
     }
     try {
       reply.send(await sessions.list(parsed.data));
+    } catch (error) {
+      if (!sendPersistedSessionError(reply, error)) throw error;
+    }
+  });
+
+  // A bounded, read-only literal search over already-retained normalized history (issue #131).
+  // POST (not GET) because the query is an opaque literal, not a resource path/filter set.
+  app.post('/v2/sessions/search', async (req, reply) => {
+    const parsed = eventHistorySearchV2QuerySchema.safeParse(req.body);
+    if (!parsed.success) {
+      invalidRequest(reply, parsed.error.flatten());
+      return;
+    }
+    try {
+      reply.send(sessions.search(parsed.data));
     } catch (error) {
       if (!sendPersistedSessionError(reply, error)) throw error;
     }

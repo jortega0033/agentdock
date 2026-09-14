@@ -309,6 +309,50 @@
   font-size: 12px;
 }
 
+.activity-rate-limits {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0 0;
+}
+
+.activity-rate-limits__name {
+  margin: 0;
+  color: #334155;
+  font-weight: 700;
+}
+
+.activity-rate-limit-window {
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: #f1f5f9;
+}
+
+.activity-rate-limit-window h4 {
+  margin: 0 0 6px;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.activity-rate-limit-window p {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.activity-rate-limit-meter {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e2e8f0;
+}
+
+.activity-rate-limit-meter__fill {
+  height: 100%;
+  background: #4f46e5;
+}
+
 .activity-visually-hidden {
   position: absolute;
   width: 1px;
@@ -360,6 +404,18 @@
 
 :root[data-theme='dark'] .activity-details dt {
   color: #94a3b8;
+}
+
+:root[data-theme='dark'] .activity-rate-limits__name {
+  color: #e2e8f0;
+}
+
+:root[data-theme='dark'] .activity-rate-limit-window {
+  background: #0f172a;
+}
+
+:root[data-theme='dark'] .activity-rate-limit-meter {
+  background: #273449;
 }
 
 @media (max-width: 680px) {

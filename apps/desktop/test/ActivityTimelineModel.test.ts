@@ -323,4 +323,43 @@ describe('projectActivityTimeline', () => {
       MAX_ACTIVITY_VALUE_ITEMS,
     );
   });
+
+  it('categorizes usage.rate_limits with the existing usage grouping and a distinct title', () => {
+    const { items } = projectActivityTimeline([
+      {
+        ...meta(0),
+        type: 'usage.rate_limits',
+        scope: 'session',
+        limitName: '5h window',
+        primary: { usedPercent: 42, windowDurationMins: 300, resetsAt: 1_700_000_000 },
+        secondary: { usedPercent: 7 },
+      },
+    ]);
+
+    expect(items).toHaveLength(1);
+    expect(items[0]!.category).toBe('usage');
+    expect(items[0]!.title).toBe('Rate limits');
+    expect(items[0]!.eventTypes).toEqual(['usage.rate_limits']);
+    expect(items[0]!.data).toMatchObject({
+      limitName: '5h window',
+      primary: { usedPercent: 42, windowDurationMins: 300, resetsAt: 1_700_000_000 },
+      secondary: { usedPercent: 7 },
+    });
+  });
+
+  it('keeps a rate-limits item distinct from a same-session usage.tokens item', () => {
+    const { items } = projectActivityTimeline([
+      { ...meta(0), type: 'usage.tokens', scope: 'turn', inputTokens: 12 },
+      {
+        ...meta(1),
+        type: 'usage.rate_limits',
+        scope: 'session',
+        primary: { usedPercent: 50 },
+      },
+    ]);
+
+    expect(items).toHaveLength(2);
+    expect(items[0]!.eventTypes).toEqual(['usage.tokens']);
+    expect(items[1]!.eventTypes).toEqual(['usage.rate_limits']);
+  });
 });

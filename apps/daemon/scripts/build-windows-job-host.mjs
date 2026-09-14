@@ -39,6 +39,7 @@ export async function buildWindowsJobHost() {
     const stderr = error && typeof error === 'object' && 'stderr' in error ? error.stderr : '';
     throw new Error(
       `Windows Job Object host build failed${stderr ? `: ${String(stderr).trim()}` : ''}`,
+      { cause: error },
     );
   }
   return outputPath;

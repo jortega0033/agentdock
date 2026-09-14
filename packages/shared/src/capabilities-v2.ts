@@ -1675,7 +1675,7 @@ function resolveForTransport(
           reason: 'extension handler lacks matching fixture evidence',
           invalidManifest: true,
         };
-      let advertisedValid = false;
+      let advertisedValid: boolean;
       try {
         advertisedValid = handler.validate(advertised);
       } catch {
@@ -1694,7 +1694,7 @@ function resolveForTransport(
       }
       const requested = item.constraints as OpaqueCapabilityConstraints | undefined;
       if (requested !== undefined) {
-        let requestedValid = false;
+        let requestedValid: boolean;
         try {
           requestedValid = handler.validate(requested);
         } catch {
@@ -1722,7 +1722,7 @@ function resolveForTransport(
         };
       }
       if (constraints) {
-        let resultValid = false;
+        let resultValid: boolean;
         try {
           resultValid = handler.validate(constraints);
         } catch {

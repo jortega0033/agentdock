@@ -11,6 +11,8 @@ import {
   createSessionRequestSchema,
   createSessionV2RequestSchema,
   healthResponseSchema,
+  eventHistorySearchV2PageSchema,
+  eventHistorySearchV2QuerySchema,
   providerIdSchema,
   providerStatusSchema,
   providerStatusV2Schema,
@@ -43,6 +45,8 @@ import {
   type CommandAcknowledgementV2,
   type CreateSessionRequest,
   type CreateSessionV2Request,
+  type EventHistorySearchV2Page,
+  type EventHistorySearchV2Query,
   type ProviderId,
   type ProviderStatus,
   type ProviderStatusV2,
@@ -150,6 +154,7 @@ export interface AttachmentUploadInput {
 
 export type SessionListV2Options = SessionListV2Query;
 export type SessionEventHistoryV2Options = SessionEventHistoryV2Query;
+export type EventHistorySearchV2Options = EventHistorySearchV2Query;
 
 interface CompatibilityResult {
   health: HealthResponse;
@@ -225,6 +230,8 @@ export class AgentDockClient {
         id: string,
         options?: SessionEventHistoryV2Options,
       ): Promise<SessionEventHistoryV2Page> => this.getSessionEventHistoryV2(id, options),
+      search: (options: EventHistorySearchV2Options): Promise<EventHistorySearchV2Page> =>
+        this.searchSessionEventHistoryV2(options),
       resume: (
         parentSessionId: string,
         input: SessionContinuationInputV2,
@@ -787,6 +794,23 @@ export class AgentDockClient {
       'protocol-v2 session event history page',
       {},
       { expectedStatus: 200, notFound: () => new SessionNotFoundError(sessionId) },
+    );
+  }
+
+  private async searchSessionEventHistoryV2(
+    options: EventHistorySearchV2Options,
+  ): Promise<EventHistorySearchV2Page> {
+    const parsed = validateInput(
+      eventHistorySearchV2QuerySchema,
+      options,
+      'protocol-v2 event history search query',
+    );
+    return this.requestV2(
+      '/v2/sessions/search',
+      eventHistorySearchV2PageSchema,
+      'protocol-v2 event history search page',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(parsed) },
+      { expectedStatus: 200 },
     );
   }
 

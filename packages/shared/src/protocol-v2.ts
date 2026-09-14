@@ -457,6 +457,24 @@ export const sessionEventHistoryV2QuerySchema = z
 
 export type SessionEventHistoryV2Query = z.infer<typeof sessionEventHistoryV2QuerySchema>;
 
+/**
+ * A bounded, read-only literal search over already-retained normalized v2 event history
+ * (issue #131). `query` is matched case-insensitively as a plain substring -- no regex, no
+ * provider-specific query language -- against safe textual fields already present in persisted
+ * events. This never recovers redacted/native provider content and adds no new persistence.
+ */
+export const eventHistorySearchV2QuerySchema = z
+  .object({
+    query: z.string().min(1).max(256),
+    provider: z.enum(PROVIDER_IDS).optional(),
+    cwd: z.string().min(1).max(32_768).optional(),
+    cursor: opaqueCursorV2Schema.optional(),
+    limit: pageLimitV2Schema.optional(),
+  })
+  .strict();
+
+export type EventHistorySearchV2Query = z.infer<typeof eventHistorySearchV2QuerySchema>;
+
 export const sessionStatusV2Schema = z.enum([
   'starting',
   'active',
@@ -913,6 +931,29 @@ export const sessionEventHistoryV2PageSchema = z
     nextCursor: opaqueCursorV2Schema.optional(),
   })
   .strict();
+
+export const eventHistorySearchV2MatchSchema = z
+  .object({
+    sessionId: sessionIdSchema,
+    executionId: executionIdSchema,
+    sequence: z.number().int().finite().nonnegative(),
+    type: nonemptyWireStringSchema,
+    timestamp: z.string().datetime({ offset: true }).optional(),
+    /** A bounded, escaped excerpt of the matched field -- never the full event payload. */
+    excerpt: contentTextSchema,
+  })
+  .strict();
+
+export type EventHistorySearchV2Match = z.infer<typeof eventHistorySearchV2MatchSchema>;
+
+export const eventHistorySearchV2PageSchema = z
+  .object({
+    matches: z.array(eventHistorySearchV2MatchSchema).max(MAX_PAGE_SIZE),
+    nextCursor: opaqueCursorV2Schema.optional(),
+  })
+  .strict();
+
+export type EventHistorySearchV2Page = z.infer<typeof eventHistorySearchV2PageSchema>;
 
 /** Wire items accepted on a v2 SSE stream. Stream errors are connection-local control frames. */
 export const agentEventOrStreamErrorV2Schema = z.union([

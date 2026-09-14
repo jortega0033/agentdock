@@ -125,6 +125,21 @@ function completedEvent(session: AgentSessionV2, sequence: number): AgentEventV2
   };
 }
 
+function errorEvent(session: AgentSessionV2, sequence: number, message: string): AgentEventV2Envelope {
+  return {
+    sessionId: session.id,
+    executionId: session.executionId,
+    ...(session.parentExecutionId === undefined
+      ? {}
+      : { parentExecutionId: session.parentExecutionId }),
+    sequence,
+    timestamp: NOW,
+    type: 'error',
+    message,
+    recoverable: false,
+  };
+}
+
 function expectCode(operation: () => unknown, code: string): void {
   try {
     operation();
@@ -165,6 +180,122 @@ describe('MemoryExecutionGraphStore', () => {
     );
     expect(store.history(randomUUID())).toBeUndefined();
     expectCode(() => store.list({ cursor: 'bad' }), 'invalid_cursor');
+  });
+
+  it('searches retained normalized history by bounded case-insensitive literal (issue #131)', () => {
+    const store = new MemoryExecutionGraphStore();
+    const older = record({ startedAt: '2026-09-01T07:00:00.000Z', cwd: '/workspace-a' });
+    const newer = record({ startedAt: STARTED, cwd: '/workspace-b' });
+    store.reserve(older);
+    store.reserve(newer);
+    store.appendEvent(older.session.id, errorEvent(older.session, 0, 'connection RESET by peer'));
+    store.appendEvent(newer.session.id, errorEvent(newer.session, 0, 'nothing interesting here'));
+    store.appendEvent(newer.session.id, errorEvent(newer.session, 1, 'a Connection reset again'));
+
+    const page = store.search({ query: 'connection reset' });
+    expect(page.matches).toHaveLength(2);
+    // Newest session first, same order list() uses; sequence order within a session.
+    expect(page.matches.map((match) => [match.sessionId, match.sequence])).toEqual([
+      [newer.session.id, 1],
+      [older.session.id, 0],
+    ]);
+    expect(page.matches[0]?.excerpt).toContain('Connection reset');
+    expect(page.nextCursor).toBeUndefined();
+    expect(store.search({ query: 'no such literal anywhere' }).matches).toEqual([]);
+  });
+
+  it('search paginates without gaps or duplicates across cursor-chained requests', () => {
+    const store = new MemoryExecutionGraphStore();
+    const session = record({ startedAt: STARTED });
+    store.reserve(session);
+    for (let index = 0; index < 5; index += 1) {
+      store.appendEvent(session.session.id, errorEvent(session.session, index, `needle ${index}`));
+    }
+
+    const first = store.search({ query: 'needle', limit: 2 });
+    expect(first.matches.map((match) => match.sequence)).toEqual([0, 1]);
+    expect(first.nextCursor).toBeDefined();
+
+    const second = store.search({ query: 'needle', limit: 2, cursor: first.nextCursor });
+    expect(second.matches.map((match) => match.sequence)).toEqual([2, 3]);
+    expect(second.nextCursor).toBeDefined();
+
+    const third = store.search({ query: 'needle', limit: 2, cursor: second.nextCursor });
+    expect(third.matches.map((match) => match.sequence)).toEqual([4]);
+    expect(third.nextCursor).toBeUndefined();
+  });
+
+  it('search filters by provider and canonical workspace', () => {
+    const store = new MemoryExecutionGraphStore();
+    const claudeSession = record({ provider: 'claude', cwd: '/workspace-a', startedAt: STARTED });
+    const codexSession = record({
+      provider: 'codex',
+      cwd: '/workspace-b',
+      startedAt: '2026-09-01T07:00:00.000Z',
+    });
+    store.reserve(claudeSession);
+    store.reserve(codexSession);
+    store.appendEvent(claudeSession.session.id, errorEvent(claudeSession.session, 0, 'shared token'));
+    store.appendEvent(codexSession.session.id, errorEvent(codexSession.session, 0, 'shared token'));
+
+    expect(store.search({ query: 'shared token', provider: 'claude' }).matches).toHaveLength(1);
+    expect(store.search({ query: 'shared token', cwd: '/workspace-b' }).matches).toHaveLength(1);
+    expect(store.search({ query: 'shared token' }).matches).toHaveLength(2);
+  });
+
+  it('search never recovers identifiers themselves as if they were content matches', () => {
+    const store = new MemoryExecutionGraphStore();
+    const session = record({ startedAt: STARTED });
+    store.reserve(session);
+    store.appendEvent(session.session.id, errorEvent(session.session, 0, 'unrelated message'));
+
+    // The session/execution UUID is real, retained data -- but it is identity metadata, not
+    // operator-visible content, and must not be searchable as if it were.
+    expect(store.search({ query: session.session.id.slice(0, 8) }).matches).toEqual([]);
+  });
+
+  it('search excludes per-event opaque correlation ids (toolCallId, contentBlockId, agentId) too', () => {
+    const store = new MemoryExecutionGraphStore();
+    const session = record({ startedAt: STARTED });
+    store.reserve(session);
+    const toolCallId = randomUUID();
+    const contentBlockId = randomUUID();
+    store.appendEvent(session.session.id, {
+      sessionId: session.session.id,
+      executionId: session.session.executionId,
+      turnId: randomUUID(),
+      sequence: 0,
+      timestamp: NOW,
+      type: 'tool.started',
+      toolCallId,
+      contentBlockId,
+      toolName: 'searchable-tool-name',
+      possibleEffects: [],
+      effectsComplete: false,
+    });
+
+    expect(store.search({ query: toolCallId.slice(0, 8) }).matches).toEqual([]);
+    expect(store.search({ query: contentBlockId.slice(0, 8) }).matches).toEqual([]);
+    expect(store.search({ query: 'searchable-tool-name' }).matches).toHaveLength(1);
+  });
+
+  it('search rejects a garbage cursor and one whose session no longer sits at its index', () => {
+    const store = new MemoryExecutionGraphStore();
+    const session = record({ startedAt: STARTED });
+    store.reserve(session);
+    store.appendEvent(session.session.id, errorEvent(session.session, 0, 'needle a'));
+    store.appendEvent(session.session.id, errorEvent(session.session, 1, 'needle b'));
+    store.appendEvent(session.session.id, errorEvent(session.session, 2, 'needle c'));
+    expectCode(() => store.search({ query: 'needle', cursor: 'not-a-real-cursor' }), 'invalid_cursor');
+
+    const page = store.search({ query: 'needle', limit: 2 });
+    expect(page.matches.map((match) => match.sequence)).toEqual([0, 1]);
+    expect(page.nextCursor).toBeDefined(); // mid-session resume: sessionIndex 0, sessionId set
+
+    // A newer session now sorts ahead of it, shifting what sits at sessionIndex 0.
+    const newerSession = record({ startedAt: '2026-09-01T08:30:00.000Z' });
+    store.reserve(newerSession);
+    expectCode(() => store.search({ query: 'needle', cursor: page.nextCursor }), 'invalid_cursor');
   });
 
   it('enforces terminal parent lineage, immutable identity, and rollback-only discard', () => {

@@ -16,6 +16,8 @@ import {
   type ProviderStatus,
   type ProviderTransportV2,
   type SessionContinuationInputV2,
+  type EventHistorySearchV2Page,
+  type EventHistorySearchV2Query,
   type SessionEventHistoryV2Page,
   type SessionEventHistoryV2Query,
   type SessionListV2Page,
@@ -857,6 +859,10 @@ export class V2SessionFacade {
     query: SessionEventHistoryV2Query = {},
   ): SessionEventHistoryV2Page | undefined {
     return this.graph.history(id, query);
+  }
+
+  search(query: EventHistorySearchV2Query): EventHistorySearchV2Page {
+    return this.graph.search(query);
   }
 
   buildContinuation(

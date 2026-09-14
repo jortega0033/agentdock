@@ -33,6 +33,15 @@ export function ComponentPanel({ provider, cwd }: { provider: ProviderId; cwd: s
           {item.displayPath && <code>{item.displayPath}</code>}
           <div className="mcp-field-list"><span>hooks {item.manifestPreview.hooks}</span><span>MCP {item.manifestPreview.mcpServers}</span><span>executables {item.manifestPreview.executables}</span><span>env {item.manifestPreview.environmentVariables}</span></div>
           {item.loadError && <p className="mcp-server__failure">{item.loadError.summary}</p>}
+          {item.riskFindings && item.riskFindings.length > 0 && (
+            <ul className="component-risk-findings" aria-label="Static review findings">
+              {item.riskFindings.map((finding, index) => (
+                <li key={`${finding.id}-${index}`} className={`component-risk-finding component-risk-finding--${finding.severity}`}>
+                  {finding.summary}
+                </li>
+              ))}
+            </ul>
+          )}
           {!item.trusted && (
             item.supportsManage || item.supportsDirectInvoke
               ? <p className="form-hint">This component advertises a management or invocation operation, but it stays blocked until workspace trust is granted.</p>

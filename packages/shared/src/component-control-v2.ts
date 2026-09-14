@@ -4,6 +4,36 @@ import { providerIdSchema } from './schemas.js';
 const componentIdSchema = z.string().min(1).max(512).regex(/^[A-Za-z0-9._:/-]+$/);
 export const providerComponentKindV2Schema = z.enum(['skill', 'plugin', 'hook', 'command', 'agent']);
 export type ProviderComponentKindV2 = z.infer<typeof providerComponentKindV2Schema>;
+
+/**
+ * Deterministic, syntactically-evident static review signals for a discovered component,
+ * computed from the same bounded read as the rest of its descriptor (issue #130). These are
+ * evidence for a human trust decision, never a safety verdict: their absence is not "safe", and
+ * they never carry file bodies, credentials, environment values, or executable output.
+ */
+export const componentRiskFindingV2Schema = z
+  .object({
+    id: z.enum([
+      'declares_executable_command',
+      'declares_mcp_server',
+      'declares_environment_access',
+      'declares_command_and_environment_access',
+      'non_reviewable_binary_content',
+      'unparseable_manifest_encoding',
+    ]),
+    severity: z.enum(['info', 'warning']),
+    summary: z.string().min(1).max(512),
+    evidence: z
+      .object({
+        kind: z.enum(['manifest_field', 'file']),
+        path: z.string().max(1_024).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export type ComponentRiskFindingV2 = z.infer<typeof componentRiskFindingV2Schema>;
+
 export const providerComponentDescriptorV2Schema = z.object({
   id: componentIdSchema,
   provider: providerIdSchema,
@@ -22,6 +52,7 @@ export const providerComponentDescriptorV2Schema = z.object({
   supportsManage: z.boolean(),
   loadError: z.object({ code: componentIdSchema, summary: z.string().max(1_024) }).strict().optional(),
   manifestPreview: z.object({ hooks: z.number().int().min(0).max(10_000), mcpServers: z.number().int().min(0).max(10_000), executables: z.number().int().min(0).max(10_000), environmentVariables: z.number().int().min(0).max(10_000), skills: z.number().int().min(0).max(10_000), agents: z.number().int().min(0).max(10_000) }).strict(),
+  riskFindings: z.array(componentRiskFindingV2Schema).max(64).optional(),
 }).strict();
 export type ProviderComponentDescriptorV2 = z.infer<typeof providerComponentDescriptorV2Schema>;
 

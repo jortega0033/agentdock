@@ -17,9 +17,11 @@ function respond(id, result) {
   send({ jsonrpc: '2.0', id, result });
 }
 
-function respondError(id, message) {
-  send({ jsonrpc: '2.0', id, error: { code: -32000, message } });
+function respondError(id, message, code = -32000) {
+  send({ jsonrpc: '2.0', id, error: { code, message } });
 }
+
+const JSON_RPC_METHOD_NOT_FOUND = -32601;
 
 const TOOLS = [
   { name: 'echo', description: 'Echoes its input.', annotations: { readOnlyHint: true } },
@@ -60,12 +62,14 @@ rl.on('line', (line) => {
     return;
   }
   if (method === 'tools/list') {
-    if (mode === 'no_optional_methods') return respondError(id, 'Method not found');
+    if (mode === 'no_optional_methods')
+      return respondError(id, 'Method not found', JSON_RPC_METHOD_NOT_FOUND);
+    if (mode === 'list_server_error') return respondError(id, 'internal fixture failure', -32000);
     respond(id, { tools: TOOLS });
     return;
   }
   if (method === 'resources/list' || method === 'prompts/list') {
-    respondError(id, 'Method not found');
+    respondError(id, 'Method not found', JSON_RPC_METHOD_NOT_FOUND);
     return;
   }
   if (method === 'tools/call') {

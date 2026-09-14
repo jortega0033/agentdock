@@ -333,6 +333,37 @@ describe('ActivityTimeline', () => {
     expect(screen.getByLabelText('Extension data')).toHaveTextContent('vendor.trace');
   });
 
+  it("renders a tool.completed event's preserved output as a dedicated attachment, not inline generic JSON (issue #132)", () => {
+    render(
+      <ActivityTimeline
+        events={[
+          event('tool.completed', 0, {
+            toolCallId: '123e4567-e89b-42d3-a456-426614174020',
+            contentBlockId: '123e4567-e89b-42d3-a456-426614174021',
+            toolName: 'command',
+            status: 'completed',
+            summary: 'Command completed with exit code 0',
+            output: {
+              attachmentId: '123e4567-e89b-42d3-a456-426614174022',
+              mimeType: 'text/plain',
+              byteCount: 9_001,
+              sha256: 'deadbeef',
+              preview: 'build log preview line one\n',
+              previewTruncated: true,
+            },
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByLabelText('Tool output')).toHaveTextContent('build log preview line one');
+    expect(screen.getByText('9,001 bytes')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Load full output' })).toBeInTheDocument();
+    // The generic details dump must not also show the raw output object -- it's superseded by
+    // the dedicated view above, not duplicated alongside it.
+    expect(screen.queryByText(/attachmentId/)).not.toBeInTheDocument();
+  });
+
   it('labels denied, cancelled, and resolved interactions by their terminal states', () => {
     const approvalRequestId = '123e4567-e89b-42d3-a456-426614174020';
     const cancelledQuestionId = '123e4567-e89b-42d3-a456-426614174021';

@@ -50,6 +50,14 @@ export class SessionNotFoundError extends AgentDockClientError {
   }
 }
 
+/** `GET /v2/attachments/:id/content` referenced an attachment id the daemon has no record of, or one that has since expired or been deleted (HTTP 404). */
+export class AttachmentNotFoundError extends AgentDockClientError {
+  constructor(public readonly attachmentId: string) {
+    super(`attachment not found: ${attachmentId}`);
+    this.name = 'AttachmentNotFoundError';
+  }
+}
+
 /** `GET /providers/:id` referenced a provider id the daemon has no adapter for (HTTP 404), or `POST /sessions` named an unsupported provider (HTTP 400). */
 export class ProviderUnavailableError extends AgentDockClientError {
   constructor(message: string) {

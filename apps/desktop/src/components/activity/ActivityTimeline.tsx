@@ -329,6 +329,16 @@ function CoreContent({ item }: { item: ActivityTimelineItem }) {
     if (item.eventTypes.includes('usage.rate_limits')) {
       return <RateLimitsContent data={data} />;
     }
+    const contextTokens = numberValue(data, 'contextTokens');
+    const contextWindowTokens = numberValue(data, 'contextWindowTokens');
+    // Only shown when both are present: a lone current or capacity value is not a truthful
+    // pressure signal on its own, and this deliberately shows raw counts rather than a derived
+    // percentage (issue #129) -- the provider's own "percent remaining" math may reserve a
+    // baseline this normalized contract does not yet capture.
+    const contextLabel =
+      contextTokens !== undefined && contextWindowTokens !== undefined
+        ? `${contextTokens.toLocaleString()} / ${contextWindowTokens.toLocaleString()}`
+        : undefined;
     return (
       <DetailList
         entries={[
@@ -336,6 +346,7 @@ function CoreContent({ item }: { item: ActivityTimelineItem }) {
           ['Input tokens', numberValue(data, 'inputTokens')],
           ['Cached input tokens', numberValue(data, 'cachedInputTokens')],
           ['Output tokens', numberValue(data, 'outputTokens')],
+          ['Context', contextLabel],
           ['Cost', numberValue(data, 'cost')],
           ['Currency', textValue(data, 'currency')],
         ]}

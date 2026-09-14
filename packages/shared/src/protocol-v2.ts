@@ -813,6 +813,12 @@ const usageTokensEventSchema = z
     inputTokens: z.number().int().finite().nonnegative().optional(),
     outputTokens: z.number().int().finite().nonnegative().optional(),
     cachedInputTokens: z.number().int().finite().nonnegative().optional(),
+    /** Latest active-context token count, e.g. Codex's `tokenUsage.last.totalTokens`. Never the
+     * accumulated session total -- that is a different, billing-shaped question. */
+    contextTokens: z.number().int().finite().nonnegative().optional(),
+    /** Provider-reported context-window capacity in tokens, e.g. Codex's `modelContextWindow`.
+     * Absent when the provider/transport does not expose this evidence; never hardcoded. */
+    contextWindowTokens: z.number().int().finite().nonnegative().optional(),
   })
   .strict();
 const usageCostEventSchema = z

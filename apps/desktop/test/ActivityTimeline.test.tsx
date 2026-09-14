@@ -392,6 +392,32 @@ describe('ActivityTimeline', () => {
     );
   });
 
+  it('shows a context-pressure signal only when both current and capacity are present (issue #129)', () => {
+    const { rerender } = render(
+      <ActivityTimeline
+        events={[
+          event('usage.tokens', 0, {
+            scope: 'turn',
+            inputTokens: 100,
+            contextTokens: 62_000,
+            contextWindowTokens: 272_000,
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText('62,000 / 272,000')).toBeInTheDocument();
+
+    rerender(
+      <ActivityTimeline
+        events={[
+          event('usage.tokens', 0, { scope: 'turn', inputTokens: 100, contextTokens: 62_000 }),
+        ]}
+      />,
+    );
+    expect(screen.queryByText(/272,000/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Context', { exact: false })).not.toBeInTheDocument();
+  });
+
   it('renders a primary-only rate-limit window with utilization, duration, and reset time', () => {
     render(
       <ActivityTimeline

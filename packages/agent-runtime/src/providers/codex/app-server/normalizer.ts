@@ -773,6 +773,10 @@ export class CodexAppServerNormalizer {
     const inputTokens = safeCount(last.inputTokens);
     const outputTokens = safeCount(last.outputTokens);
     const cachedInputTokens = safeCount(last.cachedInputTokens);
+    // `last.totalTokens` is the latest active-context size, distinct from the accumulated
+    // session `total` this normalizer does not read here -- see issue #129.
+    const contextTokens = safeCount(last.totalTokens);
+    const contextWindowTokens = safeCount(tokenUsage.modelContextWindow);
     this.emit({
       type: 'usage.tokens',
       turnId,
@@ -780,6 +784,8 @@ export class CodexAppServerNormalizer {
       ...(inputTokens === undefined ? {} : { inputTokens }),
       ...(outputTokens === undefined ? {} : { outputTokens }),
       ...(cachedInputTokens === undefined ? {} : { cachedInputTokens }),
+      ...(contextTokens === undefined ? {} : { contextTokens }),
+      ...(contextWindowTokens === undefined ? {} : { contextWindowTokens }),
     });
   }
 

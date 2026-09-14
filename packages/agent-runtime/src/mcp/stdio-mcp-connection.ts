@@ -3,6 +3,11 @@ import { McpTransportError, StdioJsonRpcTransport } from './stdio-jsonrpc-transp
 import { buildBaseProcessEnvironment } from '../process/provider-environment.js';
 
 export const MCP_PROTOCOL_VERSION = '2025-06-18';
+/** JSON-RPC 2.0's reserved "Method not found" code -- the only server response this client is
+ * entitled to read as "this optional method doesn't exist here." Any other error code (auth
+ * failure, malformed request, a genuine -32000-range server error) is a real failure and must
+ * propagate, not collapse into a falsely-empty catalog (issue #139). */
+const MCP_METHOD_NOT_FOUND = -32601;
 export const MCP_CONNECT_TIMEOUT_MS = 15_000;
 export const MCP_LIST_TIMEOUT_MS = 15_000;
 export const MCP_INVOKE_TIMEOUT_MS = 60_000;
@@ -111,7 +116,13 @@ export class StdioMcpConnection {
     } catch (error) {
       // A server that never implements an optional listing method reports "method not found";
       // this connection has none of that kind, which is a legitimate empty result, not a failure.
-      if (error instanceof McpTransportError && error.code === 'protocol_error') return [];
+      // Any other error code (auth, malformed request, a genuine server error) is a real failure.
+      if (
+        error instanceof McpTransportError &&
+        error.code === 'protocol_error' &&
+        error.jsonRpcCode === MCP_METHOD_NOT_FOUND
+      )
+        return [];
       throw error;
     }
   }

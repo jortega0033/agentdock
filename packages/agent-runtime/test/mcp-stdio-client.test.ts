@@ -54,6 +54,27 @@ describe('StdioJsonRpcTransport', () => {
     }
   });
 
+  it('preserves the server\'s numeric JSON-RPC error code, not just its message text (issue #139)', async () => {
+    const cwd = await tempCwd();
+    const transport = new StdioJsonRpcTransport(process.execPath, [FIXTURE], {
+      cwd,
+      env: { ...process.env, AGENTDOCK_FIXTURE_MODE: 'list_server_error' },
+    });
+    try {
+      await transport.request(
+        'initialize',
+        { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'x', version: '1' } },
+        3_000,
+      );
+      await expect(transport.request('tools/list', {}, 3_000)).rejects.toMatchObject({
+        code: 'protocol_error',
+        jsonRpcCode: -32000,
+      });
+    } finally {
+      await transport.close();
+    }
+  });
+
   it('times out distinctly when the server never responds', async () => {
     const cwd = await tempCwd();
     const transport = new StdioJsonRpcTransport(process.execPath, [FIXTURE], { cwd, env: { ...process.env, AGENTDOCK_FIXTURE_MODE: 'slow_init' } });
@@ -122,6 +143,16 @@ describe('StdioMcpConnection', () => {
     try {
       const items = await connection.listCatalog();
       expect(items).toEqual([]);
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it('fails closed on a genuine tools/list server error instead of reporting an empty catalog (issue #139)', async () => {
+    const cwd = await tempCwd();
+    const connection = new StdioMcpConnection(spawnFixture('list_server_error'), cwd, FAST);
+    try {
+      await expect(connection.listCatalog()).rejects.toThrow(McpTransportError);
     } finally {
       await connection.close();
     }

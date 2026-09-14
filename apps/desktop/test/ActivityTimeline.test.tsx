@@ -391,4 +391,152 @@ describe('ActivityTimeline', () => {
       expect(screen.getByRole('button', { name: 'Security dialog control' })).toHaveFocus(),
     );
   });
+
+  it('shows a context-pressure signal only when both current and capacity are present (issue #129)', () => {
+    const { rerender } = render(
+      <ActivityTimeline
+        events={[
+          event('usage.tokens', 0, {
+            scope: 'turn',
+            inputTokens: 100,
+            contextTokens: 62_000,
+            contextWindowTokens: 272_000,
+          }),
+        ]}
+      />,
+    );
+    expect(screen.getByText('62,000 / 272,000')).toBeInTheDocument();
+
+    rerender(
+      <ActivityTimeline
+        events={[
+          event('usage.tokens', 0, { scope: 'turn', inputTokens: 100, contextTokens: 62_000 }),
+        ]}
+      />,
+    );
+    expect(screen.queryByText(/272,000/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Context', { exact: false })).not.toBeInTheDocument();
+  });
+
+  it('renders a primary-only rate-limit window with utilization, duration, and reset time', () => {
+    render(
+      <ActivityTimeline
+        events={[
+          event('usage.rate_limits', 0, {
+            scope: 'session',
+            limitName: '5h window',
+            primary: { usedPercent: 82, windowDurationMins: 300, resetsAt: 1_700_000_000 },
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByText('5h window')).toBeInTheDocument();
+    expect(screen.getByText('Primary window (300 min window)')).toBeInTheDocument();
+    expect(screen.getByText('82% used · 18% remaining')).toBeInTheDocument();
+    expect(screen.queryByText('Secondary window', { exact: false })).not.toBeInTheDocument();
+    const resetTime = screen.getByText(new Date(1_700_000_000 * 1000).toLocaleString());
+    expect(resetTime.tagName).toBe('TIME');
+    expect(resetTime).toHaveAttribute('dateTime', new Date(1_700_000_000 * 1000).toISOString());
+  });
+
+  it('renders a secondary-only event distinctly without fabricating a primary window', () => {
+    render(
+      <ActivityTimeline
+        events={[event('usage.rate_limits', 0, { scope: 'session', secondary: { usedPercent: 7 } })]}
+      />,
+    );
+
+    expect(screen.getByText('Secondary window')).toBeInTheDocument();
+    expect(screen.getByText('7% used · 93% remaining')).toBeInTheDocument();
+    expect(screen.queryByText('Primary window', { exact: false })).not.toBeInTheDocument();
+  });
+
+  it('renders dual windows in stable primary-then-secondary order', () => {
+    const { container } = render(
+      <ActivityTimeline
+        events={[
+          event('usage.rate_limits', 0, {
+            scope: 'session',
+            primary: { usedPercent: 10 },
+            secondary: { usedPercent: 20 },
+          }),
+        ]}
+      />,
+    );
+
+    const labels = Array.from(container.querySelectorAll('.activity-rate-limit-window h4')).map(
+      (node) => node.textContent,
+    );
+    expect(labels).toEqual(['Primary window', 'Secondary window']);
+  });
+
+  it.each([
+    [0, '0% used', '100% remaining'],
+    [82, '82% used', '18% remaining'],
+    [100, '100% used', '0% remaining'],
+    [120, '120% used', '0% remaining'],
+  ])('preserves reported usedPercent %d as text without clamping', (usedPercent, usedText, headroomText) => {
+    const { container } = render(
+      <ActivityTimeline
+        events={[
+          event('usage.rate_limits', 0, { scope: 'session', primary: { usedPercent } }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByText(`${usedText} · ${headroomText}`)).toBeInTheDocument();
+    const fill = container.querySelector('.activity-rate-limit-meter__fill') as HTMLElement;
+    const width = Number.parseFloat(fill.style.width);
+    expect(width).toBeGreaterThanOrEqual(0);
+    expect(width).toBeLessThanOrEqual(100);
+  });
+
+  it('fails safely to an unavailable state for invalid reset/utilization inputs instead of throwing', () => {
+    expect(() =>
+      render(
+        <ActivityTimeline
+          events={[
+            event('usage.rate_limits', 0, {
+              scope: 'session',
+              primary: { usedPercent: 50, resetsAt: -5 },
+              secondary: { usedPercent: Number.NaN },
+            }),
+          ]}
+        />,
+      ),
+    ).not.toThrow();
+
+    expect(screen.getAllByText('Unavailable').length).toBeGreaterThan(0);
+    expect(screen.getByText('Utilization unavailable')).toBeInTheDocument();
+    expect(document.body.innerHTML).not.toContain('NaN');
+    expect(document.body.innerHTML).not.toContain('Infinity');
+    expect(document.body.innerHTML).not.toContain('Invalid Date');
+  });
+
+  it('keeps provider labels as escaped text and does not claim a current reset after a frozen replay', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:00.000Z'));
+    try {
+      const malicious = '<img src=x onerror="window.pwned=true">5h window';
+      render(
+        <ActivityTimeline
+          events={[
+            event('usage.rate_limits', 0, {
+              scope: 'session',
+              limitName: malicious,
+              primary: { usedPercent: 99, resetsAt: 1_700_000_000 },
+            }),
+          ]}
+        />,
+      );
+
+      expect(screen.getByText(malicious)).toBeInTheDocument();
+      expect(document.querySelector('img')).toBeNull();
+      // A resolved-in-the-past reset stays a historical observation, not a live 0%/reset claim.
+      expect(screen.getByText('99% used · 1% remaining')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

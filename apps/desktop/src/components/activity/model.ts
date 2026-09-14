@@ -697,7 +697,9 @@ export function projectActivityTimeline(
           ? 'Thinking'
           : type === 'status'
             ? `Status: ${asText(event.status, 'unknown')}`
-            : type.replaceAll('.', ' ');
+            : type === 'usage.rate_limits'
+              ? 'Rate limits'
+              : type.replaceAll('.', ' ');
     append(
       newItem(
         eventFallbackId(event, occurrence),

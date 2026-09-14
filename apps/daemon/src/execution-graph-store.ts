@@ -63,6 +63,11 @@ const SEARCH_META_KEYS = new Set([
   'timestamp',
   'type',
   'requestId',
+  'toolCallId',
+  'contentBlockId',
+  'agentId',
+  'parentAgentId',
+  'nativeChildId',
 ]);
 const DEFAULT_MAX_BYTES = 250 * 1024 * 1024;
 const TERMINAL_STATUSES = new Set<AgentSessionV2['status']>([

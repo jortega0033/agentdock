@@ -254,6 +254,31 @@ describe('MemoryExecutionGraphStore', () => {
     expect(store.search({ query: session.session.id.slice(0, 8) }).matches).toEqual([]);
   });
 
+  it('search excludes per-event opaque correlation ids (toolCallId, contentBlockId, agentId) too', () => {
+    const store = new MemoryExecutionGraphStore();
+    const session = record({ startedAt: STARTED });
+    store.reserve(session);
+    const toolCallId = randomUUID();
+    const contentBlockId = randomUUID();
+    store.appendEvent(session.session.id, {
+      sessionId: session.session.id,
+      executionId: session.session.executionId,
+      turnId: randomUUID(),
+      sequence: 0,
+      timestamp: NOW,
+      type: 'tool.started',
+      toolCallId,
+      contentBlockId,
+      toolName: 'searchable-tool-name',
+      possibleEffects: [],
+      effectsComplete: false,
+    });
+
+    expect(store.search({ query: toolCallId.slice(0, 8) }).matches).toEqual([]);
+    expect(store.search({ query: contentBlockId.slice(0, 8) }).matches).toEqual([]);
+    expect(store.search({ query: 'searchable-tool-name' }).matches).toHaveLength(1);
+  });
+
   it('search rejects a garbage cursor and one whose session no longer sits at its index', () => {
     const store = new MemoryExecutionGraphStore();
     const session = record({ startedAt: STARTED });

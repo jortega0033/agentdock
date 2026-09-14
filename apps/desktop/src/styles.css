@@ -1177,6 +1177,40 @@ textarea {
   color: #94a3b8;
 }
 
+.component-risk-findings {
+  display: grid;
+  gap: 0.3rem;
+  margin: 0.6rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.component-risk-finding {
+  border-radius: 6px;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.78rem;
+}
+
+.component-risk-finding--info {
+  background: #eef2f8;
+  color: #475569;
+}
+
+.component-risk-finding--warning {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+:root[data-theme='dark'] .component-risk-finding--info {
+  background: rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+}
+
+:root[data-theme='dark'] .component-risk-finding--warning {
+  background: rgba(217, 119, 6, 0.16);
+  color: #fbbf24;
+}
+
 .mcp-catalog {
   margin: 0.75rem 0 0;
   padding-left: 1.25rem;

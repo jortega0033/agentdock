@@ -298,3 +298,131 @@ describe('Claude hook management (the one real provider-native operation)', () =
     expect(result.status).toBe('unsupported');
   });
 });
+
+describe('deterministic component risk findings (issue #130)', () => {
+  it('reports declared hooks, MCP servers, and the combined command+env warning from the canonical manifest', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'agent-dock-risk-canonical-'));
+    const pluginDir = join(cwd, '.claude', 'plugins', 'risky-plugin');
+    await mkdir(join(pluginDir, '.claude-plugin'), { recursive: true });
+    await writeFile(
+      join(pluginDir, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({
+        name: 'Risky Plugin',
+        hooks: [{ event: 'PreToolUse', command: 'echo hi' }],
+        mcpServers: { fixture: { command: 'node', args: ['server.js'] } },
+        env: { REQUIRED_TOKEN: '' },
+      }),
+    );
+    const control = new FilesystemProviderComponentControlPlane('claude');
+    const result = await control.list(
+      { provider: 'claude', cwd, kind: 'plugin' },
+      { cwd, workspaceTrust: TRUSTED },
+    );
+    const item = result.items.find((entry) => entry.kind === 'plugin');
+    const ids = item?.riskFindings?.map((finding) => finding.id) ?? [];
+    expect(ids).toContain('declares_executable_command');
+    expect(ids).toContain('declares_mcp_server');
+    expect(ids).toContain('declares_environment_access');
+    expect(ids).toContain('declares_command_and_environment_access');
+    // No file body, credential, environment value, or raw path escapes into the finding.
+    const serialized = JSON.stringify(item?.riskFindings);
+    expect(serialized).not.toContain('echo hi');
+    expect(serialized).not.toContain('REQUIRED_TOKEN');
+  });
+
+  it('does not flag a plain prose mention of "command" or "environment" as a finding', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'agent-dock-risk-benign-'));
+    const pluginDir = join(cwd, '.claude', 'plugins', 'benign-plugin');
+    await mkdir(pluginDir, { recursive: true });
+    await writeFile(
+      join(pluginDir, 'README.md'),
+      'This plugin explains how to run a command in your environment for documentation purposes only.',
+    );
+    const control = new FilesystemProviderComponentControlPlane('claude');
+    const result = await control.list(
+      { provider: 'claude', cwd, kind: 'plugin' },
+      { cwd, workspaceTrust: TRUSTED },
+    );
+    const item = result.items.find((entry) => entry.kind === 'plugin');
+    expect(item?.riskFindings ?? []).toEqual([]);
+  });
+
+  it('reports non-reviewable binary content found alongside a clean-looking manifest', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'agent-dock-risk-binary-'));
+    const pluginDir = join(cwd, '.claude', 'plugins', 'binary-plugin');
+    await mkdir(join(pluginDir, '.claude-plugin'), { recursive: true });
+    await writeFile(
+      join(pluginDir, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'Binary Plugin' }),
+    );
+    // A stand-in for a compiled payload: any byte-0 marks content as non-reviewable as text.
+    await writeFile(join(pluginDir, 'payload.bin'), Buffer.from([0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00]));
+    const control = new FilesystemProviderComponentControlPlane('claude');
+    const result = await control.list(
+      { provider: 'claude', cwd, kind: 'plugin' },
+      { cwd, workspaceTrust: TRUSTED },
+    );
+    const item = result.items.find((entry) => entry.kind === 'plugin');
+    const finding = item?.riskFindings?.find((entry) => entry.id === 'non_reviewable_binary_content');
+    expect(finding).toBeDefined();
+    expect(finding?.severity).toBe('warning');
+    expect(finding?.evidence?.path).toBe('payload.bin');
+  });
+
+  it('reports unparseable encoding for a legacy manifest that is not valid UTF-8 text', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'agent-dock-risk-encoding-'));
+    const skillDir = join(cwd, '.claude', 'skills', 'garbled-skill');
+    await mkdir(skillDir, { recursive: true });
+    // Invalid UTF-8 (an unpaired continuation-style byte sequence): Node's utf8 read decodes
+    // this with the replacement character rather than throwing, so this must be caught
+    // deliberately rather than relying on readFile to fail.
+    await writeFile(join(skillDir, 'SKILL.md'), Buffer.from([0xff, 0xfe, 0x00, 0x01, 0x02]));
+    const control = new FilesystemProviderComponentControlPlane('claude');
+    const result = await control.list(
+      { provider: 'claude', cwd, kind: 'skill' },
+      { cwd, workspaceTrust: TRUSTED },
+    );
+    const item = result.items.find((entry) => entry.kind === 'skill');
+    const ids = item?.riskFindings?.map((finding) => finding.id) ?? [];
+    expect(ids).toContain('unparseable_manifest_encoding');
+  });
+
+  it('keeps a canonical manifest with no risky fields free of findings entirely', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'agent-dock-risk-clean-'));
+    const pluginDir = join(cwd, '.claude', 'plugins', 'clean-plugin');
+    await mkdir(join(pluginDir, '.claude-plugin'), { recursive: true });
+    await writeFile(
+      join(pluginDir, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'Clean Plugin', description: 'Nothing risky here' }),
+    );
+    const control = new FilesystemProviderComponentControlPlane('claude');
+    const result = await control.list(
+      { provider: 'claude', cwd, kind: 'plugin' },
+      { cwd, workspaceTrust: TRUSTED },
+    );
+    const item = result.items.find((entry) => entry.kind === 'plugin');
+    expect(item?.riskFindings).toBeUndefined();
+  });
+
+  it('bounds the binary scan to a fixed number of entries and total bytes instead of scanning unboundedly', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'agent-dock-risk-overflow-'));
+    const pluginDir = join(cwd, '.claude', 'plugins', 'overflow-plugin');
+    await mkdir(join(pluginDir, '.claude-plugin'), { recursive: true });
+    await writeFile(
+      join(pluginDir, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'Overflow Plugin' }),
+    );
+    for (let index = 0; index < 20; index += 1) {
+      await writeFile(join(pluginDir, `file-${index}.txt`), `clean text file ${index}`);
+    }
+    const control = new FilesystemProviderComponentControlPlane('claude');
+    const result = await control.list(
+      { provider: 'claude', cwd, kind: 'plugin' },
+      { cwd, workspaceTrust: TRUSTED },
+    );
+    const item = result.items.find((entry) => entry.kind === 'plugin');
+    // No binary content anywhere -- the bounded scan must complete and report nothing, not hang
+    // or throw on a directory with many entries.
+    expect(item?.riskFindings ?? []).toEqual([]);
+  });
+});

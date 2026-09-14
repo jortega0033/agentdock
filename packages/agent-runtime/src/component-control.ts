@@ -1,7 +1,8 @@
-import { readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { open, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import type {
+  ComponentRiskFindingV2,
   ProviderComponentDescriptorV2,
   ProviderComponentInvokeRequestV2,
   ProviderComponentListRequestV2,
@@ -138,6 +139,60 @@ interface CanonicalPluginManifest {
   dependencies: string[];
   contents: string;
   loadError?: { code: string; summary: string };
+  riskFindings?: ComponentRiskFindingV2[];
+}
+
+function hasDeclaredEntries(value: unknown): boolean {
+  if (Array.isArray(value)) return value.length > 0;
+  if (value !== null && typeof value === 'object') return Object.keys(value).length > 0;
+  return false;
+}
+
+/**
+ * Deterministic findings from the canonical plugin manifest's own structured JSON fields --
+ * never from a substring/keyword match over prose, so a README mentioning "command" in passing
+ * text can never trigger one (issue #130's explicit false-positive guard). Only fields this
+ * repo's own manifest reader already treats as real declarations are inspected.
+ */
+function structuredManifestRiskFindings(manifest: UnknownRecord): ComponentRiskFindingV2[] {
+  const declaresCommand = hasDeclaredEntries(manifest.hooks) || hasDeclaredEntries(manifest.commands);
+  const declaresMcp = hasDeclaredEntries(manifest.mcpServers);
+  const declaresEnv = hasDeclaredEntries(manifest.env) || hasDeclaredEntries(manifest.environment);
+  const findings: ComponentRiskFindingV2[] = [];
+  if (declaresCommand) {
+    findings.push({
+      id: 'declares_executable_command',
+      severity: 'info',
+      summary: 'Manifest declares one or more hook/command entries that can execute on this machine.',
+      evidence: { kind: 'manifest_field' },
+    });
+  }
+  if (declaresMcp) {
+    findings.push({
+      id: 'declares_mcp_server',
+      severity: 'info',
+      summary: 'Manifest declares an MCP server integration with executable/network capability.',
+      evidence: { kind: 'manifest_field' },
+    });
+  }
+  if (declaresEnv) {
+    findings.push({
+      id: 'declares_environment_access',
+      severity: 'info',
+      summary: 'Manifest declares environment-variable access or requirements.',
+      evidence: { kind: 'manifest_field' },
+    });
+  }
+  if (declaresCommand && declaresEnv) {
+    findings.push({
+      id: 'declares_command_and_environment_access',
+      severity: 'warning',
+      summary:
+        'Manifest declares both an executable command and environment-variable access -- review before trusting.',
+      evidence: { kind: 'manifest_field' },
+    });
+  }
+  return findings;
 }
 
 /**
@@ -199,6 +254,7 @@ async function readCanonicalClaudePluginManifest(
       ? manifest.dependencies.filter((item): item is string => typeof item === 'string').slice(0, 256)
       : [],
     contents: raw,
+    riskFindings: structuredManifestRiskFindings(manifest),
   };
 }
 
@@ -213,6 +269,68 @@ async function within(root: string, candidate: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+const UNREVIEWABLE_ENCODING_MARKERS = [String.fromCharCode(0), String.fromCharCode(0xfffd)];
+
+/** A manifest's own text already decoded with the UTF-8 replacement character (or containing a
+ * raw NUL) means the source bytes were not really UTF-8 text -- binary/bytecode content, or an
+ * encoding this reader cannot trust, silently posing as a manifest (issue #130). */
+function hasUnreviewableEncoding(text: string): boolean {
+  return UNREVIEWABLE_ENCODING_MARKERS.some((marker) => text.includes(marker));
+}
+
+const MAX_RISK_FINDINGS = 64;
+const MAX_RISK_SCAN_ENTRIES = 200;
+const MAX_RISK_SCAN_FILE_BYTES = 4_096;
+const MAX_RISK_SCAN_TOTAL_BYTES = 2 * 1024 * 1024;
+
+/**
+ * A shallow (non-recursive), bounded scan of a component directory's own top-level files for
+ * binary/bytecode content the manifest itself never mentions -- a real .pyc/.so/.dll payload
+ * sitting beside a clean-looking manifest is exactly the "non-reviewable executable payload"
+ * signal issue #130 asks for. Every candidate path is still verified with the same realpath
+ * containment check the rest of this file uses; nothing here executes or reads file contents
+ * beyond a bounded byte prefix.
+ */
+async function nonReviewableFileFinding(
+  componentDir: string,
+): Promise<ComponentRiskFindingV2 | undefined> {
+  let entries;
+  try {
+    entries = await readdir(componentDir, { withFileTypes: true });
+  } catch {
+    return undefined;
+  }
+  let totalBytes = 0;
+  for (const entry of entries.slice(0, MAX_RISK_SCAN_ENTRIES)) {
+    if (totalBytes >= MAX_RISK_SCAN_TOTAL_BYTES) break;
+    if (!entry.isFile()) continue;
+    const candidate = join(componentDir, entry.name);
+    if (!(await within(componentDir, candidate))) continue;
+    let handle;
+    try {
+      handle = await open(candidate, 'r');
+    } catch {
+      continue;
+    }
+    try {
+      const buffer = Buffer.alloc(MAX_RISK_SCAN_FILE_BYTES);
+      const { bytesRead } = await handle.read(buffer, 0, MAX_RISK_SCAN_FILE_BYTES, 0);
+      totalBytes += bytesRead;
+      if (buffer.subarray(0, bytesRead).includes(0)) {
+        return {
+          id: 'non_reviewable_binary_content',
+          severity: 'warning',
+          summary: 'Component contains binary/bytecode content that cannot be reviewed as text.',
+          evidence: { kind: 'file', path: entry.name },
+        };
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+  return undefined;
 }
 
 async function scanRoot(
@@ -261,6 +379,20 @@ async function scanRoot(
       continue;
     }
     if (Buffer.byteLength(contents, 'utf8') > 1_000_000) continue;
+    const riskFindings: ComponentRiskFindingV2[] = [...(canonical?.riskFindings ?? [])];
+    if (hasUnreviewableEncoding(contents)) {
+      riskFindings.push({
+        id: 'unparseable_manifest_encoding',
+        severity: 'warning',
+        summary:
+          'Manifest content could not be reliably decoded as text and cannot be trusted for review.',
+        evidence: { kind: 'manifest_field' },
+      });
+    }
+    if (entry.isDirectory()) {
+      const binaryFinding = await nonReviewableFileFinding(join(root.directory, entry.name));
+      if (binaryFinding) riskFindings.push(binaryFinding);
+    }
     const metadata = frontmatter(contents);
     const name = (canonical?.name || metadata.name || entry.name.replace(/\.md$/i, '')).slice(
       0,
@@ -297,6 +429,9 @@ async function scanRoot(
       supportsManage: false,
       manifestPreview: preview(contents),
       ...(canonical?.loadError ? { loadError: canonical.loadError } : {}),
+      ...(riskFindings.length > 0
+        ? { riskFindings: riskFindings.slice(0, MAX_RISK_FINDINGS) }
+        : {}),
     });
   }
   return items;

@@ -135,6 +135,86 @@ function QuestionContent({ data }: { data: SafeRecord }) {
   );
 }
 
+function clampPercent(value: number): number {
+  return Math.min(100, Math.max(0, value));
+}
+
+/** `usedPercent` is contract-unbounded above 100; only a visual meter clamps, never the text. */
+function formatUsedPercent(usedPercent: number | undefined): string | undefined {
+  if (usedPercent === undefined || !Number.isFinite(usedPercent) || usedPercent < 0)
+    return undefined;
+  return `${usedPercent}% used`;
+}
+
+function formatHeadroomPercent(usedPercent: number | undefined): string | undefined {
+  if (usedPercent === undefined || !Number.isFinite(usedPercent) || usedPercent < 0)
+    return undefined;
+  return `${clampPercent(100 - usedPercent)}% remaining`;
+}
+
+/** `resetsAt` is provider-reported unix seconds. Any non-finite/negative/unrenderable input fails safely. */
+function formatResetsAt(resetsAt: number | undefined): { iso: string; label: string } | undefined {
+  if (resetsAt === undefined || !Number.isFinite(resetsAt) || resetsAt < 0) return undefined;
+  const date = new Date(resetsAt * 1000);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return { iso: date.toISOString(), label: date.toLocaleString() };
+}
+
+function RateLimitWindow({ label, window }: { label: string; window: SafeRecord }) {
+  const usedPercent = numberValue(window, 'usedPercent');
+  const windowDurationMins = numberValue(window, 'windowDurationMins');
+  const usedText = formatUsedPercent(usedPercent);
+  const headroomText = formatHeadroomPercent(usedPercent);
+  const reset = formatResetsAt(numberValue(window, 'resetsAt'));
+  const meterPercent = usedPercent === undefined ? undefined : clampPercent(usedPercent);
+  return (
+    <section className="activity-rate-limit-window" aria-label={label}>
+      <h4>
+        {label}
+        {windowDurationMins !== undefined ? ` (${windowDurationMins} min window)` : ''}
+      </h4>
+      {usedText ? (
+        <>
+          <div
+            className="activity-rate-limit-meter"
+            role="img"
+            aria-label={[usedText, headroomText].filter(Boolean).join(', ')}
+          >
+            <div
+              className="activity-rate-limit-meter__fill"
+              style={{ width: `${meterPercent}%` }}
+            />
+          </div>
+          <p>
+            {usedText}
+            {headroomText ? ` · ${headroomText}` : ''}
+          </p>
+        </>
+      ) : (
+        <p>Utilization unavailable</p>
+      )}
+      <p>
+        Resets:{' '}
+        {reset ? <time dateTime={reset.iso}>{reset.label}</time> : <span>Unavailable</span>}
+      </p>
+    </section>
+  );
+}
+
+function RateLimitsContent({ data }: { data: SafeRecord | undefined }) {
+  const limitName = textValue(data, 'limitName');
+  const primary = isRecord(data?.primary) ? data.primary : undefined;
+  const secondary = isRecord(data?.secondary) ? data.secondary : undefined;
+  return (
+    <div className="activity-rate-limits">
+      {limitName ? <p className="activity-rate-limits__name">{limitName}</p> : null}
+      {primary ? <RateLimitWindow label="Primary window" window={primary} /> : null}
+      {secondary ? <RateLimitWindow label="Secondary window" window={secondary} /> : null}
+      {!primary && !secondary ? <p>No rate-limit window data reported.</p> : null}
+    </div>
+  );
+}
+
 function CoreContent({ item }: { item: ActivityTimelineItem }) {
   const data = isRecord(item.data) ? item.data : undefined;
   const contentType = textValue(data, 'type');
@@ -246,6 +326,19 @@ function CoreContent({ item }: { item: ActivityTimelineItem }) {
   }
 
   if (item.category === 'usage') {
+    if (item.eventTypes.includes('usage.rate_limits')) {
+      return <RateLimitsContent data={data} />;
+    }
+    const contextTokens = numberValue(data, 'contextTokens');
+    const contextWindowTokens = numberValue(data, 'contextWindowTokens');
+    // Only shown when both are present: a lone current or capacity value is not a truthful
+    // pressure signal on its own, and this deliberately shows raw counts rather than a derived
+    // percentage (issue #129) -- the provider's own "percent remaining" math may reserve a
+    // baseline this normalized contract does not yet capture.
+    const contextLabel =
+      contextTokens !== undefined && contextWindowTokens !== undefined
+        ? `${contextTokens.toLocaleString()} / ${contextWindowTokens.toLocaleString()}`
+        : undefined;
     return (
       <DetailList
         entries={[
@@ -253,6 +346,7 @@ function CoreContent({ item }: { item: ActivityTimelineItem }) {
           ['Input tokens', numberValue(data, 'inputTokens')],
           ['Cached input tokens', numberValue(data, 'cachedInputTokens')],
           ['Output tokens', numberValue(data, 'outputTokens')],
+          ['Context', contextLabel],
           ['Cost', numberValue(data, 'cost')],
           ['Currency', textValue(data, 'currency')],
         ]}

@@ -12,9 +12,16 @@ import type { StartSessionOptions } from '../../types.js';
  * same-user process via `ps`/Task Manager's command line column for the process's whole
  * lifetime. `--input-format text` makes the stdin-reads-the-prompt behavior explicit rather than
  * relying on it being `-p`'s undocumented default.
+ *
+ * `--input-format` switches to `stream-json` only when `opts.attachments` is non-empty (issue
+ * #152): a plain prompt has no way to carry an attachment, so the CLI needs the structured,
+ * Anthropic Messages-API-shaped input format instead (see stdin-payload.ts, which this function
+ * must always agree with on which mode is in effect for the same `opts`). Every session without
+ * attachments keeps the exact args this function produced before #152, byte for byte.
  */
 export function buildClaudeArgs(opts: StartSessionOptions): string[] {
-  const args = ['-p', '--input-format', 'text', '--output-format', 'stream-json', '--verbose'];
+  const inputFormat = opts.attachments?.length ? 'stream-json' : 'text';
+  const args = ['-p', '--input-format', inputFormat, '--output-format', 'stream-json', '--verbose'];
   if (opts.resumeProviderSessionId) {
     args.push('--resume', opts.resumeProviderSessionId);
   } else {

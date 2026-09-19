@@ -16,6 +16,7 @@ export const providerCapabilitiesSchema = z
     tools: z.boolean().optional(),
     usage: z.boolean().optional(),
     thinking: z.boolean().optional(),
+    attachments: z.boolean().optional(),
   })
   .catchall(z.boolean());
 
@@ -31,6 +32,18 @@ export const providerStatusSchema = z.object({
   error: z.string().optional(),
 });
 
+/**
+ * One outbound attachment for the one-shot `/sessions` path (issue #152). `path` is trusted the
+ * same way `cwd` already is on this route: an absolute, caller-supplied local filesystem path the
+ * daemon reads directly, not a staged/referenced upload -- this route's caller is already the
+ * trusted local process, the same trust boundary `cwd` relies on today. Capped at one attachment
+ * for now (the only shape any current caller needs); widen only with a real second use case.
+ */
+export const sessionAttachmentInputSchema = z.object({
+  path: z.string().min(1, 'attachment path is required'),
+  mimeType: z.string().min(1, 'attachment mimeType is required'),
+});
+
 /** Body for POST /sessions. Rejects anything not an absolute-looking, non-empty path/prompt. */
 export const createSessionRequestSchema = z.object({
   provider: providerIdSchema,
@@ -38,6 +51,9 @@ export const createSessionRequestSchema = z.object({
   prompt: z.string().min(1, 'prompt is required').max(200_000, 'prompt is too long'),
   /** Continue a prior provider-native session/thread, when `capabilities.resume` is true. */
   resumeProviderSessionId: z.string().min(1).optional(),
+  /** Delivered with the initial prompt when the selected provider's `capabilities.attachments` is
+   * true (issue #152); rejected by the route otherwise. */
+  attachments: z.array(sessionAttachmentInputSchema).max(1).optional(),
 });
 
 export type CreateSessionRequest = z.infer<typeof createSessionRequestSchema>;

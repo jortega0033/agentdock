@@ -10,6 +10,10 @@ import { BoundedV1SseWriter } from '../v1-sse-writer.js';
 
 const TERMINAL_SESSION_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
+/** Mirrors packages/agent-runtime's own per-attachment bound (issue #152) -- enforced again here,
+ * before a provider process ever spawns, rather than trusting the adapter layer alone. */
+const MAX_SESSION_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+
 export function registerSessionRoutes(
   app: FastifyInstance,
   sessionManager: SessionManager,
@@ -27,7 +31,7 @@ export function registerSessionRoutes(
         reply.code(400).send({ error: 'invalid request body', details: parsed.error.flatten() });
         return;
       }
-      const { provider, cwd, prompt, resumeProviderSessionId } = parsed.data;
+      const { provider, cwd, prompt, resumeProviderSessionId, attachments } = parsed.data;
 
       const providerImpl = registry.get(provider);
       if (!providerImpl) {
@@ -56,6 +60,33 @@ export function registerSessionRoutes(
         return;
       }
 
+      if (attachments?.length) {
+        const providerCapabilities = (await providerImpl.detect()).capabilities;
+        if (!providerCapabilities.attachments) {
+          reply.code(400).send({ error: `provider does not support attachments: ${provider}` });
+          return;
+        }
+        const acceptedMimeTypes = providerImpl.getAttachmentMimeTypes?.() ?? [];
+        for (const attachment of attachments) {
+          if (!acceptedMimeTypes.includes(attachment.mimeType)) {
+            reply.code(400).send({
+              error: `provider ${provider} does not accept attachment MIME type: ${attachment.mimeType}`,
+            });
+            return;
+          }
+          if (!existsSync(attachment.path) || !statSync(attachment.path).isFile()) {
+            reply.code(400).send({ error: `attachment file does not exist: ${attachment.path}` });
+            return;
+          }
+          if (statSync(attachment.path).size > MAX_SESSION_ATTACHMENT_BYTES) {
+            reply.code(400).send({
+              error: `attachment "${attachment.path}" exceeds the ${MAX_SESSION_ATTACHMENT_BYTES} byte limit`,
+            });
+            return;
+          }
+        }
+      }
+
       if (
         trustStore &&
         workspace &&
@@ -74,6 +105,11 @@ export function registerSessionRoutes(
           resumeProviderSessionId,
           1,
           workspace,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          attachments,
         );
         reply.code(201).send(session);
       } catch (error) {

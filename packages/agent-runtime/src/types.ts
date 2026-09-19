@@ -25,6 +25,19 @@ export interface ProviderAttachmentInput {
 }
 
 /**
+ * One outbound attachment for the simpler, one-shot `StartSessionOptions` path (issue #152) --
+ * deliberately narrower than `ProviderAttachmentInput`: there is no `AttachmentStore`-staged
+ * upload in this path, so `attachmentId`/`byteLength` (meaningful only to that v2 flow) don't
+ * apply here. `path` carries the same trust requirement as `ProviderAttachmentInput.path`: the
+ * daemon route reads and validates it directly (size bound, MIME-type allowlist, existence) before
+ * it ever reaches an adapter -- see apps/daemon/src/routes/sessions.ts.
+ */
+export interface SessionAttachmentInput {
+  path: string;
+  mimeType: string;
+}
+
+/**
  * Raw tool-completion output captured beyond the bounded inline preview (issue #132), delivered on
  * a channel separate from `events` because a single tool's output can exceed AgentEventV2's
  * per-event bounds (`MAX_NORMALIZED_EVENT_BYTES`/`MAX_CONTENT_BLOCK_BYTES`) and must never itself
@@ -66,6 +79,15 @@ export interface StartSessionOptions {
   sandbox?: 'read-only' | 'workspace-write';
   /** Exact provider model pin for transports that must preserve launch scope. */
   model?: string;
+  /**
+   * One-shot outbound attachment(s) delivered with the initial prompt (issue #152). Only honored
+   * when the selected provider's `ProviderCapabilities.attachments` is true; an adapter that
+   * doesn't support this must ignore it or fail closed rather than silently dropping it -- see
+   * each provider's `build-args.ts`/adapter for its own delivery mechanism. `path` is always a
+   * daemon-trusted local filesystem path (never a caller/renderer-supplied one at the transport
+   * layer -- callers must satisfy that trust boundary before reaching here, same as `cwd`).
+   */
+  attachments?: readonly SessionAttachmentInput[];
 }
 
 export interface ProviderSessionHandle {
@@ -297,6 +319,14 @@ export interface AgentProvider {
   }): Promise<readonly ProviderModelCatalogEntry[]>;
   /** Optional rich-transport manifest. Undefined keeps the provider on the legacy v1 bridge. */
   getV2Support?(status: ProviderStatus): ProviderV2Support | undefined;
+  /**
+   * MIME types this provider's `StartSessionOptions.attachments` delivery mechanism accepts
+   * (issue #152). Absent (or an empty list) means this provider currently has no verified
+   * attachment-delivery mechanism at all -- a caller must treat that the same as
+   * `capabilities.attachments` being falsy. Each implementing provider's own `capabilities.ts`
+   * documents which of its listed MIME types were directly tested versus only documented/assumed.
+   */
+  getAttachmentMimeTypes?(): readonly string[];
   /** Optional rich-transport factory. Real Claude/Codex adapters remain one-shot until #8. */
   startInteractiveSession?(
     options: StartInteractiveSessionOptions,

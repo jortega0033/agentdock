@@ -62,6 +62,12 @@ export interface ProviderCapabilities {
   usage?: boolean;
   /** Does the adapter surface CLI-exposed reasoning as `thinking.delta` (only when the CLI itself makes it public)? */
   thinking?: boolean;
+  /** Can `StartSessionOptions.attachments` be delivered to the CLI with the initial prompt (issue
+   * #152)? `true` only for a provider whose adapter has a verified attachment-delivery mechanism
+   * (Claude: a `document`/`image` content block via `--input-format stream-json`; Codex: `-i/--image
+   * <path>` argv). See each provider's `capabilities.ts` for its own accepted MIME type list --
+   * this flag is only the boolean gate, not the type list itself. */
+  attachments?: boolean;
   [futureCapability: string]: boolean | undefined;
 }
 

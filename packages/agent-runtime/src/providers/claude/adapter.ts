@@ -15,8 +15,10 @@ import { execCapture } from '../../process/exec-capture.js';
 import { runProviderSession } from '../common/run-session.js';
 import { superviseInteractiveSession } from '../common/session-supervisor.js';
 import { buildClaudeArgs } from './build-args.js';
+import { CLAUDE_ATTACHMENT_MIME_TYPES } from './capabilities.js';
 import { detectClaude } from './detect.js';
 import { parseClaudeLine } from './parser.js';
+import { buildClaudeStdinPayload } from './stdin-payload.js';
 import { createClaudeAgentSdkTransport, probeClaudeModelCatalog } from './sdk/index.js';
 import { resolveClaudeSdkAuth } from './sdk-auth.js';
 import {
@@ -141,6 +143,10 @@ export class ClaudeProvider implements AgentProvider {
     };
   }
 
+  getAttachmentMimeTypes(): readonly string[] {
+    return CLAUDE_ATTACHMENT_MIME_TYPES;
+  }
+
   getV2Support(status: ProviderStatus): ProviderV2Support | undefined {
     const env = this.dependencies.env();
     const mode = resolveClaudeTransportMode(env.AGENT_DOCK_CLAUDE_TRANSPORT);
@@ -215,6 +221,7 @@ export class ClaudeProvider implements AgentProvider {
         buildArgs: buildClaudeArgs,
         parseLine: parseClaudeLine,
         promptViaStdin: CLAUDE_PROMPT_VIA_STDIN,
+        buildStdinPayload: buildClaudeStdinPayload,
       },
       options,
       this.logger,

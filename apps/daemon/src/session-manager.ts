@@ -31,6 +31,7 @@ import {
   type ProviderAttachmentInput,
   type ProviderSessionHandle,
   type RawToolOutputV2,
+  type SessionAttachmentInput,
   type StartSessionOptions,
   type WorkspaceTrustEvidence,
 } from '@agent-dock/agent-runtime';
@@ -262,6 +263,7 @@ export class SessionManager {
     sandbox?: StartSessionOptions['sandbox'],
     model?: string,
     beforeProviderDispatch?: (session: Readonly<AgentSession>) => void,
+    attachments?: readonly SessionAttachmentInput[],
   ): AgentSession {
     if (this.shuttingDown) throw new Error('session manager is shutting down');
     if (workspace && this.blockedWorkspaces.has(workspace.workspaceId)) {
@@ -295,6 +297,7 @@ export class SessionManager {
           ...(providerStatus ? { providerStatus } : {}),
           ...(sandbox ? { sandbox } : {}),
           ...(model ? { model } : {}),
+          ...(attachments?.length ? { attachments } : {}),
         });
       } catch (error) {
         this.store.delete(id);

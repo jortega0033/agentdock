@@ -29,3 +29,31 @@ describe('buildClaudeArgs — prompt transport (AD-05)', () => {
     expect(args.join('').length).toBeLessThan(200); // just the flags, nowhere near the prompt size
   });
 });
+
+describe('buildClaudeArgs — attachments (issue #152)', () => {
+  it('keeps --input-format text when there are no attachments, identical to before #152', () => {
+    const args = buildClaudeArgs({ sessionId: 'sess-1', cwd: '/tmp', prompt: 'hi', attachments: [] });
+    expect(args).toEqual(['-p', '--input-format', 'text', '--output-format', 'stream-json', '--verbose', '--session-id', 'sess-1']);
+  });
+
+  it('switches to --input-format stream-json when an attachment is present', () => {
+    const args = buildClaudeArgs({
+      sessionId: 'sess-1',
+      cwd: '/tmp',
+      prompt: 'hi',
+      attachments: [{ path: '/tmp/cv.pdf', mimeType: 'application/pdf' }],
+    });
+    expect(args).toEqual(['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--session-id', 'sess-1']);
+  });
+
+  it('switches to stream-json on resume too, when an attachment is present', () => {
+    const args = buildClaudeArgs({
+      sessionId: 'sess-1',
+      cwd: '/tmp',
+      prompt: 'hi',
+      resumeProviderSessionId: 'thread-1',
+      attachments: [{ path: '/tmp/cv.pdf', mimeType: 'application/pdf' }],
+    });
+    expect(args).toEqual(['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--resume', 'thread-1']);
+  });
+});

@@ -72,6 +72,69 @@ describe('createSessionRequestSchema', () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it('accepts an optional attachments array with one entry (issue #152)', () => {
+    const result = createSessionRequestSchema.safeParse({
+      provider: 'claude',
+      cwd: '/tmp',
+      prompt: 'hi',
+      attachments: [{ path: '/tmp/cv.pdf', mimeType: 'application/pdf' }],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts a request with no attachments field at all', () => {
+    const result = createSessionRequestSchema.safeParse({
+      provider: 'claude',
+      cwd: '/tmp',
+      prompt: 'hi',
+    });
+    expect(result.success).toBe(true);
+    expect(result.success && result.data.attachments).toBeUndefined();
+  });
+
+  it('rejects more than one attachment', () => {
+    const result = createSessionRequestSchema.safeParse({
+      provider: 'claude',
+      cwd: '/tmp',
+      prompt: 'hi',
+      attachments: [
+        { path: '/tmp/a.pdf', mimeType: 'application/pdf' },
+        { path: '/tmp/b.pdf', mimeType: 'application/pdf' },
+      ],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an attachment with an empty path', () => {
+    const result = createSessionRequestSchema.safeParse({
+      provider: 'claude',
+      cwd: '/tmp',
+      prompt: 'hi',
+      attachments: [{ path: '', mimeType: 'application/pdf' }],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an attachment with an empty mimeType', () => {
+    const result = createSessionRequestSchema.safeParse({
+      provider: 'claude',
+      cwd: '/tmp',
+      prompt: 'hi',
+      attachments: [{ path: '/tmp/cv.pdf', mimeType: '' }],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an attachment path starting with "-", to avoid CLI argv-parsing ambiguity', () => {
+    const result = createSessionRequestSchema.safeParse({
+      provider: 'claude',
+      cwd: '/tmp',
+      prompt: 'hi',
+      attachments: [{ path: '-rf', mimeType: 'application/pdf' }],
+    });
+    expect(result.success).toBe(false);
+  });
 });
 
 describe('providerCapabilitiesSchema', () => {

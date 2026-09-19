@@ -71,3 +71,58 @@ describe('buildCodexArgs — prompt transport (issue #57)', () => {
     ]);
   });
 });
+
+describe('buildCodexArgs — attachments (issue #152)', () => {
+  it('does not change argv shape when attachments is an empty array', () => {
+    const args = buildCodexArgs({ sessionId: 'sess-1', cwd: '/tmp', prompt: 'hi', attachments: [] });
+    expect(args).toEqual(['exec', '-', '--json', '--skip-git-repo-check']);
+  });
+
+  it('appends --image <path> for a fresh session', () => {
+    const args = buildCodexArgs({
+      sessionId: 'sess-1',
+      cwd: '/tmp',
+      prompt: 'hi',
+      attachments: [{ path: '/tmp/cv.pdf', mimeType: 'application/pdf' }],
+    });
+    expect(args).toEqual(['exec', '-', '--json', '--skip-git-repo-check', '--image', '/tmp/cv.pdf']);
+  });
+
+  it('appends --image <path> after resume/sandbox/model flags too, one pair per attachment', () => {
+    const args = buildCodexArgs({
+      sessionId: 'sess-1',
+      cwd: '/tmp',
+      prompt: 'hi',
+      resumeProviderSessionId: 'thread-1',
+      model: 'gpt-5.4',
+      attachments: [
+        { path: '/tmp/cv.pdf', mimeType: 'application/pdf' },
+        { path: '/tmp/photo.png', mimeType: 'image/png' },
+      ],
+    });
+    expect(args).toEqual([
+      'exec',
+      'resume',
+      'thread-1',
+      '-',
+      '--json',
+      '--skip-git-repo-check',
+      '--model',
+      'gpt-5.4',
+      '--image',
+      '/tmp/cv.pdf',
+      '--image',
+      '/tmp/photo.png',
+    ]);
+  });
+
+  it('never includes attachment file content, only the path, anywhere in argv', () => {
+    const args = buildCodexArgs({
+      sessionId: 'sess-1',
+      cwd: '/tmp',
+      prompt: 'hi',
+      attachments: [{ path: '/tmp/cv.pdf', mimeType: 'application/pdf' }],
+    });
+    expect(args.join(' ')).not.toMatch(/base64|data:/);
+  });
+});

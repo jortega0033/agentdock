@@ -48,6 +48,19 @@ binding for a terminal parent session before it will ever negotiate continuation
 those are two independent claims, and issue #54 exists specifically because Claude's v1 flag being
 real was previously conflated with its (currently nonexistent) v2 durable binding support.
 
+`CreateSessionRequest`'s optional `attachments` (issue #152, at most one entry today) delivers a
+local file with the initial prompt, for a provider whose `ProviderStatus.capabilities.attachments`
+is `true`: `{ path: string; mimeType: string }`. The daemon rejects the request (`400`) before ever
+spawning a process if the target provider doesn't support attachments, doesn't accept the given
+`mimeType` (see each provider's own `getAttachmentMimeTypes()`), the file doesn't exist, the path
+resolves outside the session's own working directory, or the file exceeds the shared size bound
+(`MAX_SESSION_ATTACHMENT_BYTES`, `@agent-dock/agent-runtime`). Unlike `cwd`, an attachment's bytes
+are automatically sent to the provider's API, so its path is held to a tighter bar than `cwd`'s: it
+must resolve inside the session's working directory, not merely be any path the daemon process can
+read. Claude delivers it as an Anthropic Messages-API-shaped `document`/`image` content block via
+`--input-format stream-json`; Codex delivers it as `-i`/`--image <path>` argv. A session with no
+`attachments` behaves identically to before this field existed.
+
 ## The `AgentEvent` union
 
 Defined once, in `packages/shared/src/events.ts`. Every provider adapter normalizes its CLI's

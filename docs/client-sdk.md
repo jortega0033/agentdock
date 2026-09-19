@@ -70,6 +70,9 @@ const session = await client.sessions.create({
   cwd,
   prompt: 'Inspect this repository',
   // resumeProviderSessionId: session.providerSessionId, // to continue a prior thread
+  // attachments: [{ path: `${cwd}/report.pdf`, mimeType: 'application/pdf' }], // path must
+  // resolve inside `cwd`; only for a provider whose ProviderStatus.capabilities.attachments is
+  // true -- see protocol-v1.md
 });
 
 for await (const event of client.sessions.events(session.id)) {

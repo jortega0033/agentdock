@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -246,6 +246,217 @@ describe('POST /sessions', () => {
     });
     expect(res.statusCode).toBe(201);
     expect(provider.startedOptions.at(-1)?.resumeProviderSessionId).toBe('prior-thread');
+  });
+
+  describe('attachments (issue #152)', () => {
+    function attachmentFixture(mimeType = 'application/pdf'): { path: string; mimeType: string } {
+      const path = join(cwd, 'attachment.bin');
+      writeFileSync(path, 'fake attachment bytes');
+      return { path, mimeType };
+    }
+
+    it('rejects attachments for a provider whose capabilities.attachments is falsy', async () => {
+      // The default setup() FakeProvider uses FAKE_PROVIDER_CAPABILITIES, which has no
+      // `attachments` key at all -- absent must be treated the same as false.
+      const { app } = setup();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/sessions',
+        headers: { authorization: `Bearer ${TOKEN}` },
+        payload: { provider: 'claude', cwd, prompt: 'hi', attachments: [attachmentFixture()] },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/does not support attachments/);
+    });
+
+    it('rejects an attachment MIME type the provider does not accept', async () => {
+      const registry = new ProviderRegistry();
+      const provider = new FakeProvider('claude', {
+        id: 'claude',
+        name: 'Claude Code',
+        installed: true,
+        authenticated: 'authenticated',
+        capabilities: { ...FAKE_PROVIDER_CAPABILITIES, attachments: true },
+      });
+      registry.register(provider);
+      const sessionManager = new SessionManager(registry, noopLogger);
+      const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/sessions',
+        headers: { authorization: `Bearer ${TOKEN}` },
+        payload: {
+          provider: 'claude',
+          cwd,
+          prompt: 'hi',
+          attachments: [attachmentFixture('application/x-msdownload')],
+        },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/does not accept attachment MIME type/);
+      expect(provider.startedOptions).toHaveLength(0);
+    });
+
+    it('rejects an attachment whose file does not exist on disk', async () => {
+      const registry = new ProviderRegistry();
+      const provider = new FakeProvider('claude', {
+        id: 'claude',
+        name: 'Claude Code',
+        installed: true,
+        authenticated: 'authenticated',
+        capabilities: { ...FAKE_PROVIDER_CAPABILITIES, attachments: true },
+      });
+      registry.register(provider);
+      const sessionManager = new SessionManager(registry, noopLogger);
+      const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/sessions',
+        headers: { authorization: `Bearer ${TOKEN}` },
+        payload: {
+          provider: 'claude',
+          cwd,
+          prompt: 'hi',
+          attachments: [{ path: join(cwd, 'does-not-exist.pdf'), mimeType: 'application/pdf' }],
+        },
+      });
+      expect(res.statusCode).toBe(400);
+      expect(res.json().error).toMatch(/attachment file does not exist/);
+    });
+
+    it("rejects an attachment whose path resolves outside the session's cwd", async () => {
+      const registry = new ProviderRegistry();
+      const provider = new FakeProvider('claude', {
+        id: 'claude',
+        name: 'Claude Code',
+        installed: true,
+        authenticated: 'authenticated',
+        capabilities: { ...FAKE_PROVIDER_CAPABILITIES, attachments: true },
+      });
+      registry.register(provider);
+      const sessionManager = new SessionManager(registry, noopLogger);
+      const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+
+      const outsideDir = mkdtempSync(join(tmpdir(), 'agent-dock-outside-cwd-'));
+      const outsidePath = join(outsideDir, 'secret.pdf');
+      writeFileSync(outsidePath, 'contents that must never leave the machine via this route');
+      try {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/sessions',
+          headers: { authorization: `Bearer ${TOKEN}` },
+          payload: {
+            provider: 'claude',
+            cwd,
+            prompt: 'hi',
+            attachments: [{ path: outsidePath, mimeType: 'application/pdf' }],
+          },
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json().error).toMatch(/must be inside the session's working directory/);
+        expect(provider.startedOptions).toHaveLength(0);
+      } finally {
+        rmSync(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects a symlink inside cwd that resolves to a path outside it', async () => {
+      const registry = new ProviderRegistry();
+      const provider = new FakeProvider('claude', {
+        id: 'claude',
+        name: 'Claude Code',
+        installed: true,
+        authenticated: 'authenticated',
+        capabilities: { ...FAKE_PROVIDER_CAPABILITIES, attachments: true },
+      });
+      registry.register(provider);
+      const sessionManager = new SessionManager(registry, noopLogger);
+      const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+
+      const outsideDir = mkdtempSync(join(tmpdir(), 'agent-dock-outside-cwd-'));
+      const outsidePath = join(outsideDir, 'secret.pdf');
+      writeFileSync(outsidePath, 'contents that must never leave the machine via this route');
+      const linkPath = join(cwd, 'escape-link.pdf');
+      try {
+        symlinkSync(outsidePath, linkPath);
+      } catch {
+        // Symlink creation can require elevated privileges on some Windows configurations --
+        // skip rather than fail the suite on a platform limitation unrelated to this route's logic.
+        rmSync(outsideDir, { recursive: true, force: true });
+        return;
+      }
+      try {
+        const res = await app.inject({
+          method: 'POST',
+          url: '/sessions',
+          headers: { authorization: `Bearer ${TOKEN}` },
+          payload: {
+            provider: 'claude',
+            cwd,
+            prompt: 'hi',
+            attachments: [{ path: linkPath, mimeType: 'application/pdf' }],
+          },
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json().error).toMatch(/must be inside the session's working directory/);
+        expect(provider.startedOptions).toHaveLength(0);
+      } finally {
+        rmSync(outsideDir, { recursive: true, force: true });
+      }
+    });
+
+    it('rejects an attachment path starting with "-"', async () => {
+      const { app } = setup();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/sessions',
+        headers: { authorization: `Bearer ${TOKEN}` },
+        payload: {
+          provider: 'claude',
+          cwd,
+          prompt: 'hi',
+          attachments: [{ path: '-rf', mimeType: 'application/pdf' }],
+        },
+      });
+      expect(res.statusCode).toBe(400);
+    });
+
+    it('accepts a supported attachment and threads it through to the provider', async () => {
+      const registry = new ProviderRegistry();
+      const provider = new FakeProvider('claude', {
+        id: 'claude',
+        name: 'Claude Code',
+        installed: true,
+        authenticated: 'authenticated',
+        capabilities: { ...FAKE_PROVIDER_CAPABILITIES, attachments: true },
+      });
+      registry.register(provider);
+      const sessionManager = new SessionManager(registry, noopLogger);
+      const app = buildServer({ registry, sessionManager, token: TOKEN, logger: noopLogger });
+      const attachment = attachmentFixture();
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/sessions',
+        headers: { authorization: `Bearer ${TOKEN}` },
+        payload: { provider: 'claude', cwd, prompt: 'hi', attachments: [attachment] },
+      });
+      expect(res.statusCode).toBe(201);
+      expect(provider.startedOptions.at(-1)?.attachments).toEqual([attachment]);
+    });
+
+    it('does not reject or require attachments for a request that omits the field entirely', async () => {
+      const { app } = setup();
+      const res = await app.inject({
+        method: 'POST',
+        url: '/sessions',
+        headers: { authorization: `Bearer ${TOKEN}` },
+        payload: { provider: 'claude', cwd, prompt: 'hi' },
+      });
+      expect(res.statusCode).toBe(201);
+    });
   });
 
   it('maps admission-controller rejection to 429 session_capacity_exceeded (issue #52)', async () => {

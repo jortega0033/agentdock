@@ -16,6 +16,7 @@ export const providerCapabilitiesSchema = z
     tools: z.boolean().optional(),
     usage: z.boolean().optional(),
     thinking: z.boolean().optional(),
+    attachments: z.boolean().optional(),
   })
   .catchall(z.boolean());
 
@@ -31,6 +32,30 @@ export const providerStatusSchema = z.object({
   error: z.string().optional(),
 });
 
+/**
+ * One outbound attachment for the one-shot `/sessions` path (issue #152). `path` is a
+ * caller-supplied local filesystem path the daemon reads directly, not a staged/referenced
+ * upload -- but unlike `cwd`, the route additionally requires it to resolve inside the session's
+ * own working directory (see `isWithinDirectory` in apps/daemon/src/routes/sessions.ts): an
+ * attachment's bytes are automatically sent to a third-party AI provider, a materially different
+ * capability than `cwd` merely bounding where the provider process runs, so it does not inherit
+ * `cwd`'s unscoped trust. Capped at one attachment for now (the only shape any current caller
+ * needs); widen only with a real second use case.
+ *
+ * `path` may not start with `-`: Codex's attachment flag (`-i`/`--image <path>`) takes the path as
+ * a bare argv value, and a leading `-` risks the CLI's own arg parser treating it as a flag rather
+ * than a value -- a real absolute path never legitimately starts with `-` on any platform this app
+ * supports, so rejecting it here costs nothing and closes that ambiguity at the source rather than
+ * depending on a specific CLI's parsing behavior.
+ */
+export const sessionAttachmentInputSchema = z.object({
+  path: z
+    .string()
+    .min(1, 'attachment path is required')
+    .refine((value) => !value.startsWith('-'), 'attachment path must not start with "-"'),
+  mimeType: z.string().min(1, 'attachment mimeType is required'),
+});
+
 /** Body for POST /sessions. Rejects anything not an absolute-looking, non-empty path/prompt. */
 export const createSessionRequestSchema = z.object({
   provider: providerIdSchema,
@@ -38,6 +63,9 @@ export const createSessionRequestSchema = z.object({
   prompt: z.string().min(1, 'prompt is required').max(200_000, 'prompt is too long'),
   /** Continue a prior provider-native session/thread, when `capabilities.resume` is true. */
   resumeProviderSessionId: z.string().min(1).optional(),
+  /** Delivered with the initial prompt when the selected provider's `capabilities.attachments` is
+   * true (issue #152); rejected by the route otherwise. */
+  attachments: z.array(sessionAttachmentInputSchema).max(1).optional(),
 });
 
 export type CreateSessionRequest = z.infer<typeof createSessionRequestSchema>;

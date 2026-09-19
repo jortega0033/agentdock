@@ -15,6 +15,7 @@ import { buildLegacyProviderEnvironment } from '../../process/provider-environme
 import { runProviderSession } from '../common/run-session.js';
 import { superviseInteractiveSession } from '../common/session-supervisor.js';
 import { buildCodexArgs } from './build-args.js';
+import { CODEX_ATTACHMENT_MIME_TYPES } from './capabilities.js';
 import { detectCodex } from './detect.js';
 import { parseCodexLine } from './parser.js';
 import {
@@ -58,6 +59,10 @@ export class CodexProvider implements AgentProvider {
 
   getV2Support(status: ProviderStatus): ProviderV2Support | undefined {
     return resolveCodexV2Support(status, resolveCodexTransportMode());
+  }
+
+  getAttachmentMimeTypes(): readonly string[] {
+    return CODEX_ATTACHMENT_MIME_TYPES;
   }
 
   async fetchModelCatalog(options: {

@@ -1,6 +1,8 @@
-import { existsSync, statSync } from 'node:fs';
+import { existsSync, realpathSync, statSync } from 'node:fs';
+import { relative, resolve as resolvePath } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { createSessionRequestSchema, sessionIdParamSchema } from '@agent-dock/shared';
+import { MAX_SESSION_ATTACHMENT_BYTES } from '@agent-dock/agent-runtime';
 import type { ProviderRegistry } from '@agent-dock/agent-runtime';
 import type { SessionManager } from '../session-manager.js';
 import type { WorkspaceTrustStore } from '../workspace-trust-store.js';
@@ -10,9 +12,30 @@ import { BoundedV1SseWriter } from '../v1-sse-writer.js';
 
 const TERMINAL_SESSION_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
-/** Mirrors packages/agent-runtime's own per-attachment bound (issue #152) -- enforced again here,
- * before a provider process ever spawns, rather than trusting the adapter layer alone. */
-const MAX_SESSION_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+/**
+ * Whether `candidatePath` resolves (symlinks followed) to a location inside `directory` (issue
+ * #152). `cwd` itself has no such jail -- a caller can already point the provider process at any
+ * working directory it can read -- but an attachment is a categorically different capability: its
+ * *bytes* are automatically base64-encoded and sent to a third-party AI provider's API with no
+ * further action needed from whatever's inside the prompt. Without this jail, holding the daemon's
+ * bearer token alone would be a direct, one-call "read this arbitrary file and exfiltrate it"
+ * primitive, wider than what a caller can already do through cwd. Requiring the attachment to live
+ * inside the session's own cwd means a caller must already control (or have staged a file into)
+ * that directory -- the same trust bar cwd's own contents already sit behind -- rather than naming
+ * anything the daemon process happens to have read access to.
+ */
+function isWithinDirectory(candidatePath: string, directory: string): boolean {
+  let realCandidate: string;
+  let realDirectory: string;
+  try {
+    realCandidate = realpathSync(candidatePath);
+    realDirectory = realpathSync(directory);
+  } catch {
+    return false;
+  }
+  const rel = relative(realDirectory, realCandidate);
+  return rel !== '' && !rel.startsWith('..') && !resolvePath(rel).startsWith('..');
+}
 
 export function registerSessionRoutes(
   app: FastifyInstance,
@@ -51,7 +74,10 @@ export function registerSessionRoutes(
           return;
         }
       }
-      if (resumeProviderSessionId && !(await providerImpl.detect()).capabilities.resume) {
+      const effectiveCwd = workspace?.canonicalPath ?? cwd;
+      const detectedStatus =
+        resumeProviderSessionId || attachments?.length ? await providerImpl.detect() : undefined;
+      if (resumeProviderSessionId && !detectedStatus?.capabilities.resume) {
         reply.code(400).send({ error: `provider does not support resume: ${provider}` });
         return;
       }
@@ -61,8 +87,7 @@ export function registerSessionRoutes(
       }
 
       if (attachments?.length) {
-        const providerCapabilities = (await providerImpl.detect()).capabilities;
-        if (!providerCapabilities.attachments) {
+        if (!detectedStatus?.capabilities.attachments) {
           reply.code(400).send({ error: `provider does not support attachments: ${provider}` });
           return;
         }
@@ -74,11 +99,24 @@ export function registerSessionRoutes(
             });
             return;
           }
-          if (!existsSync(attachment.path) || !statSync(attachment.path).isFile()) {
+          let attachmentStat: ReturnType<typeof statSync>;
+          try {
+            attachmentStat = statSync(attachment.path);
+          } catch {
             reply.code(400).send({ error: `attachment file does not exist: ${attachment.path}` });
             return;
           }
-          if (statSync(attachment.path).size > MAX_SESSION_ATTACHMENT_BYTES) {
+          if (!attachmentStat.isFile()) {
+            reply.code(400).send({ error: `attachment file does not exist: ${attachment.path}` });
+            return;
+          }
+          if (!isWithinDirectory(attachment.path, effectiveCwd)) {
+            reply.code(400).send({
+              error: `attachment must be inside the session's working directory: ${attachment.path}`,
+            });
+            return;
+          }
+          if (attachmentStat.size > MAX_SESSION_ATTACHMENT_BYTES) {
             reply.code(400).send({
               error: `attachment "${attachment.path}" exceeds the ${MAX_SESSION_ATTACHMENT_BYTES} byte limit`,
             });
@@ -100,7 +138,7 @@ export function registerSessionRoutes(
       try {
         const session = sessionManager.create(
           provider,
-          workspace?.canonicalPath ?? cwd,
+          effectiveCwd,
           prompt,
           resumeProviderSessionId,
           1,

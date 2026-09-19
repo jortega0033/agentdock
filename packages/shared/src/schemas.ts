@@ -33,14 +33,26 @@ export const providerStatusSchema = z.object({
 });
 
 /**
- * One outbound attachment for the one-shot `/sessions` path (issue #152). `path` is trusted the
- * same way `cwd` already is on this route: an absolute, caller-supplied local filesystem path the
- * daemon reads directly, not a staged/referenced upload -- this route's caller is already the
- * trusted local process, the same trust boundary `cwd` relies on today. Capped at one attachment
- * for now (the only shape any current caller needs); widen only with a real second use case.
+ * One outbound attachment for the one-shot `/sessions` path (issue #152). `path` is a
+ * caller-supplied local filesystem path the daemon reads directly, not a staged/referenced
+ * upload -- but unlike `cwd`, the route additionally requires it to resolve inside the session's
+ * own working directory (see `isWithinDirectory` in apps/daemon/src/routes/sessions.ts): an
+ * attachment's bytes are automatically sent to a third-party AI provider, a materially different
+ * capability than `cwd` merely bounding where the provider process runs, so it does not inherit
+ * `cwd`'s unscoped trust. Capped at one attachment for now (the only shape any current caller
+ * needs); widen only with a real second use case.
+ *
+ * `path` may not start with `-`: Codex's attachment flag (`-i`/`--image <path>`) takes the path as
+ * a bare argv value, and a leading `-` risks the CLI's own arg parser treating it as a flag rather
+ * than a value -- a real absolute path never legitimately starts with `-` on any platform this app
+ * supports, so rejecting it here costs nothing and closes that ambiguity at the source rather than
+ * depending on a specific CLI's parsing behavior.
  */
 export const sessionAttachmentInputSchema = z.object({
-  path: z.string().min(1, 'attachment path is required'),
+  path: z
+    .string()
+    .min(1, 'attachment path is required')
+    .refine((value) => !value.startsWith('-'), 'attachment path must not start with "-"'),
   mimeType: z.string().min(1, 'attachment mimeType is required'),
 });
 

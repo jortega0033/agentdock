@@ -1,13 +1,7 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import type { StartSessionOptions } from '../../types.js';
+import { MAX_SESSION_ATTACHMENT_BYTES } from '../common/attachment-limits.js';
 import { CLAUDE_ATTACHMENT_MIME_TYPES } from './capabilities.js';
-
-/**
- * A CV or similar document is a handful of pages; this bounds what this adapter will ever read
- * into memory and base64-encode for a single attachment, independent of whatever bound the daemon
- * route enforces before a file even reaches here (belt and suspenders, not a substitute for it).
- */
-export const MAX_CLAUDE_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 
 function contentBlockType(mimeType: string): 'document' | 'image' {
   return mimeType === 'application/pdf' ? 'document' : 'image';
@@ -22,7 +16,7 @@ function contentBlockType(mimeType: string): 'document' | 'image' {
  * the daemon route's own size check.
  *
  * Throws if an attachment's MIME type isn't one this adapter has a delivery mechanism for, or if
- * the file can't be read or exceeds `MAX_CLAUDE_ATTACHMENT_BYTES` -- the caller (adapter.ts) must
+ * the file can't be read or exceeds `MAX_SESSION_ATTACHMENT_BYTES` -- the caller (adapter.ts) must
  * only reach this function when `options.attachments` is non-empty, so a throw here means a
  * genuinely bad attachment, not an absent one.
  */
@@ -36,6 +30,26 @@ export function buildClaudeStreamJsonStdinPayload(options: StartSessionOptions):
         `claude attachment delivery does not support MIME type "${attachment.mimeType}"`,
       );
     }
+    // Checked from the directory entry before reading the whole file into memory: the daemon
+    // route already enforces this same bound pre-dispatch, but re-checking the declared size
+    // first here (not just after a full readFileSync) avoids fully materializing a
+    // pathologically large file just to then discard it.
+    let declaredSize: number;
+    try {
+      declaredSize = statSync(attachment.path).size;
+    } catch (error) {
+      throw new Error(
+        `could not read claude attachment "${attachment.path}": ${
+          error instanceof Error ? error.message : 'unknown error'
+        }`,
+        { cause: error },
+      );
+    }
+    if (declaredSize > MAX_SESSION_ATTACHMENT_BYTES) {
+      throw new Error(
+        `claude attachment "${attachment.path}" is ${declaredSize} bytes, over the ${MAX_SESSION_ATTACHMENT_BYTES} byte limit`,
+      );
+    }
     let bytes: Buffer;
     try {
       bytes = readFileSync(attachment.path);
@@ -47,9 +61,11 @@ export function buildClaudeStreamJsonStdinPayload(options: StartSessionOptions):
         { cause: error },
       );
     }
-    if (bytes.byteLength > MAX_CLAUDE_ATTACHMENT_BYTES) {
+    if (bytes.byteLength > MAX_SESSION_ATTACHMENT_BYTES) {
+      // The file grew between the stat above and this read (TOCTOU) -- re-checked against what
+      // was actually read, the same discipline this app's own CV-upload path already follows.
       throw new Error(
-        `claude attachment "${attachment.path}" is ${bytes.byteLength} bytes, over the ${MAX_CLAUDE_ATTACHMENT_BYTES} byte limit`,
+        `claude attachment "${attachment.path}" is ${bytes.byteLength} bytes, over the ${MAX_SESSION_ATTACHMENT_BYTES} byte limit`,
       );
     }
     content.push({

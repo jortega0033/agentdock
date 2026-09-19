@@ -2,8 +2,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { MAX_SESSION_ATTACHMENT_BYTES } from '../src/providers/common/attachment-limits.js';
 import {
-  MAX_CLAUDE_ATTACHMENT_BYTES,
   buildClaudeStdinPayload,
   buildClaudeStreamJsonStdinPayload,
 } from '../src/providers/claude/stdin-payload.js';
@@ -95,7 +95,7 @@ describe('buildClaudeStdinPayload (issue #152)', () => {
 
   it('throws when the attachment exceeds the byte bound, without reading the whole file into the error message', () => {
     const bigPath = join(dir, 'big.pdf');
-    writeFileSync(bigPath, Buffer.alloc(MAX_CLAUDE_ATTACHMENT_BYTES + 1, 1));
+    writeFileSync(bigPath, Buffer.alloc(MAX_SESSION_ATTACHMENT_BYTES + 1, 1));
     expect(() =>
       buildClaudeStreamJsonStdinPayload({
         sessionId: 's',

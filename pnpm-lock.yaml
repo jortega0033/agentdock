@@ -23,8 +23,8 @@ importers:
         specifier: ^10.10.0
         version: 10.10.0(jiti@2.7.0)
       globals:
-        specifier: ^15.14.0
-        version: 15.15.0
+        specifier: ^17.12.0
+        version: 17.12.0
       prettier:
         specifier: ^3.4.2
         version: 3.9.6
@@ -2041,8 +2041,8 @@ packages:
     engines: {node: '>=12'}
     deprecated: Old versions of glob are not supported, and contain widely publicized security vulnerabilities, which have been fixed in the current version. Please update. Support for old versions may be purchased (at exorbitant rates) by contacting i@izs.me
 
-  globals@15.15.0:
-    resolution: {integrity: sha512-7ACyT3wmyp3I61S4fG682L0VA2RGD9otkqGJIwNUMF1SWUombIIk+af1unuDYgMm082aHYwD+mzJvv9Iu8dsgg==}
+  globals@17.12.0:
+    resolution: {integrity: sha512-cezEd/DTyyht9cvSSURyygXPfy04GtWO/5e6ZPvH7fCtjKz9PYOmuawphw1Ctd1f6C+5JypXfGD7ahNMXvevBA==}
     engines: {node: '>=18'}
 
   gopd@1.2.0:
@@ -5430,7 +5430,7 @@ snapshots:
       minimatch: 5.1.9
       once: 1.4.0
 
-  globals@15.15.0: {}
+  globals@17.12.0: {}
 
   gopd@1.2.0: {}
 

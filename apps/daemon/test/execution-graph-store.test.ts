@@ -570,7 +570,9 @@ describe('FileExecutionGraphStore', () => {
     const migrated = new FileExecutionGraphStore(path, { now: () => new Date(NOW) });
     expect(migrated.get(legacy.session.id)).toEqual(legacy);
     expect(JSON.parse(await readFile(recordPath, 'utf8'))).toMatchObject({ schemaVersion: 1 });
-    expect(new FileExecutionGraphStore(path).get(legacy.session.id)).toEqual(legacy);
+    expect(new FileExecutionGraphStore(path, { now: () => new Date(NOW) }).get(legacy.session.id)).toEqual(
+      legacy,
+    );
 
     const futureContents = `${JSON.stringify({ schemaVersion: 2, record: legacy })}\n`;
     await writeFile(recordPath, futureContents, 'utf8');
